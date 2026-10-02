@@ -7,6 +7,7 @@
   MINEDOCSCAN_WORK_ROOT     작업 폴더 — 정합 이미지, DB, 리포트 (로컬 디스크 권장)
   MINEDOCSCAN_SITE          사이트 팩 폴더 (템플릿·마스터·라벨)
   MINEDOCSCAN_DB_URL        DB 주소 (기본: sqlite:///<work_root>/minedocscan.db)
+  MINEDOCSCAN_REVIEWS       검수 기록 파일 (기본: <site>/reviews/reviews.jsonl — 사이트 팩 안, 추가 전용)
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ class Settings:
     work_root: Path = Path("work")
     site: Path | None = None
     db_url: str | None = None
+    reviews: Path | None = None          # 검수 기록(jsonl). None 이면 사이트 팩의 reviews/reviews.jsonl
     dpi: int = 200                       # 템플릿 좌표계의 해상도. 템플릿을 만든 해상도와 같아야 한다
     recognizer: str = "null"             # recognize.REGISTRY 의 이름
     corrector: str = "none"              # correct.REGISTRY 의 이름
@@ -42,6 +44,15 @@ class Settings:
     def resolved_db_url(self) -> str:
         return self.db_url or f"sqlite:///{(self.work_root / 'minedocscan.db').as_posix()}"
 
+    def reviews_path(self, site_root: Path | None = None) -> Path:
+        """검수 기록 파일. 설정이 없으면 사이트 팩 안이다 — WORK_ROOT 와 달리 지워지지 않는 곳."""
+        if self.reviews is not None:
+            return self.reviews
+        root = site_root or self.site
+        if root is None:
+            raise ValueError("검수 파일 경로를 정할 수 없습니다: [paths] reviews 또는 MINEDOCSCAN_REVIEWS, 아니면 사이트 팩")
+        return Path(root) / "reviews" / "reviews.jsonl"
+
 
 def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> Settings:
     path = Path(config_path or os.environ.get("MINEDOCSCAN_CONFIG", "minedocscan.toml"))
@@ -56,6 +67,7 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         work_root=_p(paths.get("work_root")) or Path("work"),
         site=_p(paths.get("site")),
         db_url=raw.get("database", {}).get("url"),
+        reviews=_p(paths.get("reviews")),
         dpi=int(pipe.get("dpi", 200)),
         recognizer=raw.get("recognize", {}).get("backend", "null"),
         corrector=raw.get("correct", {}).get("backend", "none"),
@@ -73,9 +85,11 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         s.site = Path(env["MINEDOCSCAN_SITE"])
     if env.get("MINEDOCSCAN_DB_URL"):
         s.db_url = env["MINEDOCSCAN_DB_URL"]
+    if env.get("MINEDOCSCAN_REVIEWS"):
+        s.reviews = Path(env["MINEDOCSCAN_REVIEWS"])
     for k, v in overrides.items():
         if v is not None:
-            setattr(s, k, Path(v) if k in ("archive_root", "work_root", "site") else v)
+            setattr(s, k, Path(v) if k in ("archive_root", "work_root", "site", "reviews") else v)
     return s
 
 
