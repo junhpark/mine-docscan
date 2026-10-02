@@ -353,8 +353,13 @@ COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "eval": cmd_
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .store.db import SchemaVersionError
+
     args = build_parser().parse_args(argv)
-    return COMMANDS[args.command](args)
+    try:
+        return COMMANDS[args.command](args)
+    except SchemaVersionError as e:                 # 안내문만 보이면 된다. 트레이스백은 필요 없다
+        raise SystemExit(str(e)) from e
 
 
 if __name__ == "__main__":

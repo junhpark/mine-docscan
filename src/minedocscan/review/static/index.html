@@ -53,7 +53,7 @@
 (function () {
   'use strict';
   const qs = new URLSearchParams(location.search);
-  const state = { items: [], idx: 0, done: 0, total: 0, showMachine: false, entered: {}, templates: {} };
+  const state = { items: [], idx: 0, done: 0, total: 0, showMachine: false, entered: {}, templates: {}, busy: false };
   const $ = (id) => document.getElementById(id);
 
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -144,6 +144,7 @@
   }
 
   async function saveItem() {
+    if (state.busy) return;                   // 저장이 끝나기 전의 Enter 연타는 무시한다 (같은 셀 두 번 저장·다음 셀 건너뜀 방지)
     const item = state.items[state.idx];
     const inputs = Array.from($('view').querySelectorAll('input.val'));
     const plans = [];
@@ -155,6 +156,7 @@
       }
       plans.push([inp.dataset.fid, p]);
     }
+    state.busy = true;
     try {
       for (const [fid, p] of plans) {
         await post(fid, p);
@@ -167,6 +169,7 @@
       next();
       msg('저장했습니다', true);
     } catch (e) { msg(e.message); }
+    finally { state.busy = false; }
   }
 
   function next() { if (state.idx < state.items.length) state.idx += 1; render(); }
@@ -175,6 +178,8 @@
   function onKey(ev) {
     if (ev.key === 'Enter') {
       ev.preventDefault();
+      // 키를 누르고 있을 때의 반복, 한글 입력기의 조합 확정 Enter 는 저장이 아니다 — 보지 않은 셀이 빈 칸으로 저장된다
+      if (ev.repeat || ev.isComposing || ev.keyCode === 229 || state.busy) return;
       const inputs = Array.from($('view').querySelectorAll('input.val'));
       const i = inputs.indexOf(ev.target);
       if (i < inputs.length - 1) { inputs[i + 1].focus(); inputs[i + 1].select(); return; }   // 묶음: 다음 칸으로
@@ -182,6 +187,7 @@
     }
   }
   document.addEventListener('keydown', (ev) => {
+    if (ev.repeat) return;
     if (ev.key === 'PageDown') { ev.preventDefault(); next(); }
     else if (ev.key === 'PageUp') { ev.preventDefault(); prev(); }
   });

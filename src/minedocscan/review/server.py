@@ -8,6 +8,7 @@
 
 127.0.0.1 에만 바인딩한다 — 화면에 실제 이름과 차량번호가 보인다. 단일 스레드(SQLite 연결 하나).
 서버 로그에는 요청 경로와 상태 코드만 찍는다. 입력값과 이미지 내용은 찍지 않는다.
+POST 는 같은 브라우저에 열린 다른 페이지가 보낼 수 없게 Host·Origin(로컬 주소만)과 Content-Type(JSON)을 확인한다.
 """
 from __future__ import annotations
 
@@ -25,6 +26,14 @@ from .store import VERDICTS, review_from_field, save, stats
 
 STATIC = Path(__file__).parent / "static"
 DIGITS = re.compile(r"^[0-9]+$")
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+
+
+def _int_param(params: dict, key: str, default: int) -> int:
+    try:
+        return int(params[key]) if params.get(key) else default
+    except ValueError as e:
+        raise ApiError(400, f"{key} 는 정수여야 합니다: {params[key]!r}") from e
 
 
 class ApiError(Exception):
@@ -49,7 +58,10 @@ class ReviewApp:
         opts = dict(self.queue_opts)
         for k, cast in (("n", int), ("seed", int), ("empty_share", float), ("template", str), ("kind", str)):
             if params.get(k):
-                opts[k] = cast(params[k])
+                try:
+                    opts[k] = cast(params[k])
+                except ValueError as e:
+                    raise ApiError(400, f"{k} 값이 잘못되었습니다: {params[k]!r}") from e
         name = params.get("name") or self.queue
         if name not in QUEUES:
             raise ApiError(400, f"알 수 없는 대기열: {name}")
@@ -64,7 +76,7 @@ class ReviewApp:
             if kind == "row":
                 return row_png(self.con, self.settings, fid)
             if kind == "cell":
-                return cell_png(self.con, self.settings, fid, scale=int(params.get("scale", 3)))
+                return cell_png(self.con, self.settings, fid, scale=_int_param(params, "scale", 3))
         except KeyError as e:
             raise ApiError(404, f"없는 필드: {fid}") from e
         except CropError as e:
@@ -72,6 +84,8 @@ class ReviewApp:
         raise ApiError(400, f"kind 는 cell 또는 row: {kind}")
 
     def post_review(self, body: dict) -> dict:
+        if not isinstance(body, dict):
+            raise ApiError(400, "본문은 JSON 객체여야 합니다")
         fid, verdict = str(body.get("field_id", "")), str(body.get("verdict", ""))
         value, note = str(body.get("value", "")).strip(), str(body.get("note", "") or "")
         f = field_info(self.con, fid)
@@ -84,8 +98,10 @@ class ReviewApp:
         if verdict == "value":
             if not value:
                 raise ApiError(400, "값이 비었습니다 (빈 칸이면 verdict=empty)")
-            if f["kind"] == "handwritten_number" and not DIGITS.match(value):
-                raise ApiError(400, f"숫자 셀에는 숫자만: {value!r}")
+            if f["kind"] == "handwritten_number":
+                if not DIGITS.match(value):
+                    raise ApiError(400, f"숫자 셀에는 숫자만: {value!r}")
+                value = str(int(value))              # "07" → "7": 정답 파일과 인식기 출력이 같은 표기여야 채점이 맞는다
         review = review_from_field(self.con, fid, verdict, value, self.reviewer, note=note)
         out = save(self.con, self.site, self.settings, review)
         return {"ok": True, **out, "field_id": fid, "verdict": verdict, "value": review.value,
@@ -120,10 +136,24 @@ class _Handler(BaseHTTPRequestHandler):
     def _json(self, status: int, data: dict) -> None:
         self._send(status, json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
+    def _check_local(self, need_json: bool) -> None:
+        """로컬 화면이 보낸 요청인지: Host 와 (있으면) Origin 이 127.0.0.1/localhost, 쓰기는 JSON 본문만."""
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
+        if host not in LOCAL_HOSTS:
+            raise ApiError(403, "로컬 주소로만 접근할 수 있습니다")
+        origin = self.headers.get("Origin")
+        if origin:
+            o = urlparse(origin)
+            if o.scheme != "http" or (o.hostname or "") not in ("127.0.0.1", "localhost", "::1"):
+                raise ApiError(403, "다른 출처의 요청은 받지 않습니다")
+        if need_json and not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
+            raise ApiError(415, "Content-Type 은 application/json 이어야 합니다")
+
     def do_GET(self):
         u = urlparse(self.path)
         params = {k: v[0] for k, v in parse_qs(u.query).items()}
         try:
+            self._check_local(need_json=False)
             if u.path == "/":
                 self._send(200, index_html(), "text/html; charset=utf-8")
             elif u.path == "/api/queue":
@@ -138,20 +168,25 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "없는 경로"})
         except ApiError as e:
             self._json(e.status, {"error": str(e)})
+        except Exception as e:                                 # noqa: BLE001 — 연결을 끊지 않고 500 으로 답한다
+            self._json(500, {"error": f"서버 오류: {type(e).__name__}"})
 
     def do_POST(self):
         u = urlparse(self.path)
         try:
             if u.path != "/api/review":
                 raise ApiError(404, "없는 경로")
-            n = int(self.headers.get("Content-Length") or 0)
+            self._check_local(need_json=True)
             try:
+                n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
-            except ValueError as e:
+            except (ValueError, UnicodeDecodeError) as e:
                 raise ApiError(400, "본문이 JSON 이 아닙니다") from e
             self._json(200, self.app.post_review(body))
         except ApiError as e:
             self._json(e.status, {"error": str(e)})
+        except Exception as e:                                 # noqa: BLE001
+            self._json(500, {"error": f"서버 오류: {type(e).__name__}"})
 
 
 def make_server(app: ReviewApp, host: str = "127.0.0.1", port: int = 8765) -> HTTPServer:

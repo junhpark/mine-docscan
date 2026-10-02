@@ -35,7 +35,8 @@ from ..store.db import open_db, upsert
 
 class Pipeline:
     def __init__(self, settings: Settings, site: SitePack | None = None, recognizer: Recognizer | None = None,
-                 corrector: Corrector | None = None, con: sqlite3.Connection | None = None):
+                 corrector: Corrector | None = None, con: sqlite3.Connection | None = None, load_reviews: bool = True):
+        """load_reviews=False 면 검수 파일을 읽어 들이지 않는다 — 회귀 검사처럼 기계 값만 봐야 할 때."""
         self.settings = settings
         if site is None:
             if settings.site is None:
@@ -49,7 +50,8 @@ class Pipeline:
         self._handlers: dict[str, object] = {}
         self.summary: dict = {"documents": 0, "pages": 0, "by_form": {}, "by_status": {}, "low_margin": [],
                               "handlers": {}}
-        self.summary["reviews"] = import_into(self.con, settings.reviews_path(self.site.root))
+        self.summary["reviews"] = (import_into(self.con, settings.reviews_path(self.site.root)) if load_reviews
+                                   else {"path": None, "imported": 0, "skipped": 0})
 
     # ── 입력 ───────────────────────────────────────────────────────────────
     @staticmethod

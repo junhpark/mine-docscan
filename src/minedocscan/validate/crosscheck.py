@@ -111,15 +111,30 @@ def _crosscheck_date(con: sqlite3.Connection, date: str, exclude: set[str]) -> d
 
 
 def _collect(items) -> tuple[dict, dict, dict]:
-    """같은 (자리, 광종, 편)에 여러 행(근무조·여러 장)이 있으면 값 유무는 OR, 횟수는 합 (최종값과 기계값 각각)."""
+    """같은 (자리, 광종, 편)에 여러 행(근무조·여러 장)이 있으면 값 유무는 OR, 횟수는 합 (최종값과 기계값 각각).
+
+    값이 있는데 횟수를 모르는 행(has_value=1, trips NULL — 아직 검수하지 않았거나 인식기가 못 읽음)이 하나라도 섞이면
+    그 칸의 합은 모르는 것으로 둔다(NULL → 값 유무만 비교). 주간만 검수하고 야간은 아직일 때 주간 값만을 행렬과
+    비교해 가짜 불일치를 만들지 않기 위해서다.
+    """
     has: dict[tuple, int] = {}
     trips: dict[tuple, int] = {}
     raw: dict[tuple, int] = {}
+    unknown_final: set[tuple] = set()
+    unknown_raw: set[tuple] = set()
     for slot, r in items:
         key = (slot, r["material"], r["level"])
         has[key] = max(has.get(key, 0), r["has_value"])
         if r["trips"] is not None:
             trips[key] = trips.get(key, 0) + r["trips"]
+        elif r["has_value"]:
+            unknown_final.add(key)
         if r["trips_raw"] is not None:
             raw[key] = raw.get(key, 0) + r["trips_raw"]
+        elif r["has_value"]:                 # prod_haul 에는 기계의 값 유무가 없다. 최종 값 유무로 대신한다
+            unknown_raw.add(key)
+    for k in unknown_final:
+        trips.pop(k, None)
+    for k in unknown_raw:
+        raw.pop(k, None)
     return has, trips, raw

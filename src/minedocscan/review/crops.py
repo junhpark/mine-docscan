@@ -54,25 +54,32 @@ def _png(img: np.ndarray) -> bytes:
     return buf.tobytes()
 
 
-def cell_png(con: sqlite3.Connection, settings, field_id: str, pad: int = 6, scale: int = 3) -> bytes:
+def _pad(r: sqlite3.Row, pad: int | None) -> int:
+    """여유 폭. 실제 양식은 행 높이가 27 px 쯤이라 고정 6 px 로는 칸 선을 넘은 획이 잘린다 → 행 높이의 절반, 최소 8 px."""
+    return pad if pad is not None else max(8, (r["y1"] - r["y0"]) // 2)
+
+
+def cell_png(con: sqlite3.Connection, settings, field_id: str, pad: int | None = None, scale: int = 3) -> bytes:
     """셀 하나. pad 만큼 여유를 두고 scale 배로 키운다 (한두 자리 숫자를 크게 보기 위해)."""
     r = field_info(con, field_id)
     if r is None:
         raise KeyError(field_id)
     img = aligned_image(settings, r)
+    pad = _pad(r, pad)
     crop = _clip(img, r["x0"] - pad, r["y0"] - pad, r["x1"] + pad, r["y1"] + pad)
     if scale != 1 and crop.size:
         crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     return _png(crop)
 
 
-def row_png(con: sqlite3.Connection, settings, field_id: str, pad: int = 6) -> bytes:
+def row_png(con: sqlite3.Connection, settings, field_id: str, pad: int | None = None) -> bytes:
     """그 행 전체(같은 표·같은 행의 모든 셀)를 자르고 대상 셀에 테두리를 친다 — 인쇄된 광종·편이 같이 보여야 한다.
     표 밖 자유 필드(row_no = -1)는 그 필드 주변을 넓게 자른다."""
     r = field_info(con, field_id)
     if r is None:
         raise KeyError(field_id)
     img = aligned_image(settings, r)
+    pad = _pad(r, pad)
     if r["row_no"] >= 0:
         ext = con.execute("SELECT MIN(x0), MIN(y0), MAX(x1), MAX(y1) FROM doc_field WHERE page_id = ? AND region = ? "
                           "AND row_no = ?", (r["page_id"], r["region"], r["row_no"])).fetchone()

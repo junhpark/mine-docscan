@@ -83,12 +83,13 @@ def test_reviewed_and_illegible_fields_leave_every_queue(day):
     save(con, site, settings, Review(ids[1], "illegible", reviewer="jp"))
     save(con, site, settings, Review(cell_in_mm, "empty", reviewer="jp"))
 
+    saved = {ids[0], ids[1], cell_in_mm}                                 # 불일치 셀도 표본에 들어 있을 수 있다
     after = build_queue(con, "haul-numbers", n=40, seed=3)
-    assert set(_ids(after)) == set(ids) - {ids[0], ids[1]}             # 원래 표본의 부분집합, 순서 유지
-    assert _ids(after) == [f for f in ids if f not in (ids[0], ids[1])]
-    assert after["total"] == 40 and after["done"] == 2
-    assert ids[0] not in _ids(build_queue(con, "pending")) and ids[1] not in _ids(build_queue(con, "pending"))
-    assert set(pend) - {ids[0], ids[1], cell_in_mm} == set(_ids(build_queue(con, "pending")))
+    assert set(_ids(after)) == set(ids) - saved                          # 원래 표본의 부분집합, 순서 유지
+    assert _ids(after) == [f for f in ids if f not in saved]
+    assert after["total"] == 40 and after["done"] == len(set(ids) & saved)
+    assert not saved & set(_ids(build_queue(con, "pending")))
+    assert set(pend) - saved == set(_ids(build_queue(con, "pending")))
     # 묶음의 일부만 검수되면 항목은 남고 그 셀에 기존 검수가 보인다; 전부 검수되면 빠진다
     mm2 = build_queue(con, "mismatch")
     item = next(i for i in mm2["items"] if any(c["field_id"] == cell_in_mm for c in i["cells"]))

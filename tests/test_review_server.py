@@ -128,3 +128,44 @@ def test_missing_aligned_image_is_a_clear_error(srv, tmp_path):
         ReviewApp(app.con, app.site, srv["settings"], "")                 # 검수자 없이는 띄우지 않는다
     with pytest.raises(OSError, match="--port"):
         make_server(app, port=srv["httpd"].server_address[1])            # 쓰이고 있는 포트
+
+
+def test_rejects_foreign_origin_and_non_json_and_bad_params(srv):
+    base, con = srv["url"], srv["pipe"].con
+    q = json.loads(_get(base + "/api/queue?name=pending&kind=handwritten_number")[2])
+    fid = q["items"][0]["cells"][0]["field_id"]
+    n0 = con.execute("SELECT COUNT(*) FROM doc_review").fetchone()[0]
+
+    def post(headers, data):
+        req = urllib.request.Request(base + "/api/review", data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    body = json.dumps({"field_id": fid, "verdict": "value", "value": "3"}).encode()
+    assert post({"Content-Type": "text/plain"}, body) == 415                        # 다른 페이지의 단순 요청
+    assert post({"Content-Type": "application/json", "Origin": "http://evil.example"}, body) == 403
+    assert post({"Content-Type": "application/json", "Host": "evil.example"}, body) == 403
+    assert post({"Content-Type": "application/json"}, b"[1, 2]") == 400               # 본문이 객체가 아니다
+    assert post({"Content-Type": "application/json"}, b"\xff\xfe") == 400
+    assert con.execute("SELECT COUNT(*) FROM doc_review").fetchone()[0] == n0          # 아무것도 저장되지 않았다
+    # 같은 출처는 된다
+    assert post({"Content-Type": "application/json", "Origin": base}, body) == 200
+    # 잘못된 매개변수는 연결을 끊지 않고 400
+    for path in ("/crop?field_id=" + fid + "&kind=cell&scale=abc", "/api/queue?n=abc", "/api/queue?empty_share=x"):
+        with pytest.raises(urllib.error.HTTPError) as e:
+            _get(base + path)
+        assert e.value.code == 400, path
+
+
+def test_number_values_are_normalized(srv):
+    base, settings, con = srv["url"], srv["settings"], srv["pipe"].con
+    q = json.loads(_get(base + "/api/queue?name=pending&kind=handwritten_number")[2])
+    fid = q["items"][1]["cells"][0]["field_id"]
+    status, out = _post(base + "/api/review", {"field_id": fid, "verdict": "value", "value": "07"})
+    assert status == 200 and out["value"] == "7"
+    assert load(settings.reviews)[0][-1][1].value == "7"
+    assert con.execute("SELECT value_final FROM doc_field WHERE field_id=?", (fid,)).fetchone()[0] == "7"
+    assert "isComposing" in _get(base + "/")[2].decode() and "ev.repeat" in _get(base + "/")[2].decode()
