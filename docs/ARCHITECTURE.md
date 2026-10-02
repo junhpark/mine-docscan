@@ -226,7 +226,7 @@ class Corrector(Protocol):
 지금은 명령줄 도구 하나다(`minedocscan`). 1단계가 완성되었을 때의 모습은 다음과 같고, 전부 같은 패키지를 쓴다.
 
 ```
-스캐너(복합기)가 공유 폴더에 PDF 저장
+스캐너가 접수 폴더에 PDF 저장
       ↓
 감시 서비스 (예정)      새 파일을 발견하면 Pipeline.process_file()
       ↓

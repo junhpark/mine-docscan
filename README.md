@@ -81,6 +81,7 @@ config/        설정 예시
 | [docs/ROADMAP.md](docs/ROADMAP.md) | 현재 상태, 다음 단계, 결정이 필요한 사항 |
 | [docs/PRIOR_WORK.md](docs/PRIOR_WORK.md) | 선행 연구에서 이어받은 요구사항과 바꾼 것 |
 | [docs/decisions/](docs/decisions/) | 설계 결정 기록 |
+| [docs/tasks/](docs/tasks/) | 작업 지시서 (Claude Code 에 맡기는 단위) |
 | [CLAUDE.md](CLAUDE.md) | Claude Code 로 작업할 때의 규칙과 요약 |
 
 ## 현재 상태

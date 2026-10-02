@@ -10,6 +10,7 @@
 - `docs/ROADMAP.md` — 구현된 것 / 남은 것 / 결정이 필요한 것
 - `docs/PRIOR_WORK.md` — 선행 연구에서 이어받은 요구사항과 바꾼 것
 - `docs/decisions/` — 왜 이렇게 했는지 (ADR)
+- `docs/tasks/` — 작업 지시서. 맡은 작업의 범위·설계·수용 기준은 여기서 읽는다
 
 ## 범위
 
