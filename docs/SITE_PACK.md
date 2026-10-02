@@ -11,6 +11,7 @@
   templates/<양식>/template.yaml   양식 정의
   templates/<양식>/reference.png   기준 이미지 (빈 양식 또는 깨끗한 스캔 한 장, 200 dpi)
   labels/pages.json                사람이 붙인 페이지 메타 (선택)
+  reviews/reviews.jsonl            검수 기록 — 사람이 입력한 값 (추가 전용, 도구가 쓴다)
   expected/regression.json         회귀 기준 수치 (선택, `minedocscan regress --update` 가 쓴다)
 ```
 
@@ -109,6 +110,25 @@ fields:                            # 표 밖의 자유 필드
 ```
 
 우선순위: 페이지 라벨 > 문서 라벨 > 파일명 규칙.
+
+## reviews/reviews.jsonl
+
+검수 화면(`minedocscan review serve`)이 쓰는 **사람이 입력한 값의 원본**이다. 한 줄 = 검수 한 건, 고치는 것도 새 줄을 추가한다.
+지우거나 손으로 편집하지 않는다. DB(`doc_review`)는 이 파일의 사본이라 `WORK_ROOT` 를 지우고 다시 돌려도 값이 다시 붙는다.
+사이트 팩에 두는 이유는 사이트 팩이 지워지지 않는 곳이기 때문이다. 공유 드라이브에 있어도 되지만 **한 번에 한 사람만 입력한다**
+(동시에 쓰면 동기화 충돌이 난다). 다른 위치에 두려면 설정 `[paths] reviews` 또는 `MINEDOCSCAN_REVIEWS`.
+
+```json
+{"review_id": "…", "field_id": "ab12…-p2:haul:trips_day:3", "verdict": "value", "value": "7",
+ "reviewer": "jp", "reviewed_at": "2030-01-08T01:02:03Z", "note": "",
+ "source": "scan_2030-01-07#2", "template": "synth_haul_log", "region": "haul", "field_name": "trips_day",
+ "row_no": 3, "row_key": "ORE|L3", "bbox": [604, 694, 846, 766],
+ "machine": {"has_value": 1, "value_raw": "", "backend": "null", "confidence": 0.0}}
+```
+
+`verdict` 는 `value`(적힌 값), `empty`(빈 칸), `illegible`(읽을 수 없음). `source` 부터는 DB 없이도 읽을 수 있게 하는 문맥이고,
+`machine` 은 검수 당시 기계가 낸 값이다. 템플릿을 고쳐 `bbox` 가 달라진 기록은 `review stats` 가 건수를 보여 준다 (적용은 한다).
+실제 값(이름·차량번호)이 들어가므로 저장소에 넣지 않는다.
 
 ## 새 양식을 추가하는 절차
 

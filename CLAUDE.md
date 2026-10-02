@@ -34,6 +34,12 @@ minedocscan run   --site out/demo/site --archive-root out/demo/scans --work-root
 minedocscan report --work-root out/demo/work
 minedocscan eval  --answers out/demo/answers.json --work-root out/demo/work
 
+minedocscan review serve --site out/demo/site --work-root out/demo/work --queue haul-numbers --reviewer jp
+                                            # 127.0.0.1:8765 — 셀을 보고 값을 입력. 기록은 <site>/reviews/reviews.jsonl
+minedocscan review stats  --site … --work-root …          # 얼마나 했는지
+minedocscan review export-answers answers.json --site … --work-root …
+minedocscan eval --answers answers.json --target raw --only-listed --work-root …   # 기계 값을 검수값과 비교
+
 # 실데이터 (저장소 밖 — docs/DATA.md)
 export MINEDOCSCAN_SITE=…/site-packs/<현장>  MINEDOCSCAN_ARCHIVE_ROOT=…/mine-docscan  MINEDOCSCAN_WORK_ROOT=…/work
 minedocscan info
@@ -68,7 +74,8 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 | `recognize/` | 인식 백엔드 인터페이스와 등록소 (`null`, `oracle`) |
 | `correct/` | 교정 백엔드 인터페이스와 등록소 (`none`) |
 | `handlers/` | 양식의 의미: 셀 → `doc_field` → 업무 테이블 (`generic`, `inspection`, `haul`) |
-| `validate/crosscheck.py` | 양식 간 교차검증, 그날의 실제 배차 관측 |
+| `validate/crosscheck.py` | 양식 간 교차검증, 그날의 실제 배차 관측 (날짜 지정 재계산 가능) |
+| `review/` | 검수: `store.py`(추가 전용 `reviews.jsonl` ↔ `doc_review`, `save()`), `queue.py`(대기열 3종), `crops.py`, `server.py` + `static/index.html`(표준 라이브러리, 127.0.0.1) |
 | `store/` | `schema.sql`, `upsert()` |
 | `pipeline/runner.py` | 단계 순서와 상태 기록만 안다 |
 | `evaluate/` | CER·필드 정확도·자동 적재율, 실데이터 회귀 |
@@ -86,7 +93,8 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 3. 인식 백엔드를 붙이기 전에 `oracle` 백엔드로 CER 0 을 확인한다. 0 이 아니면 인식기가 아니라 파이프라인의 버그다.
 
 **개인정보를 커밋하지 않는다.** 현장 문서에는 작업자 이름, 서명, 차량번호가 있다.
-- 스캔 원본, 기준 이미지, 템플릿 YAML(머리글에 이름·차량번호가 들어 있다), 페이지 라벨, 정답 CSV·엑셀은 전부 저장소 밖(사이트 팩·아카이브)에 둔다.
+- 스캔 원본, 기준 이미지, 템플릿 YAML(머리글에 이름·차량번호가 들어 있다), 페이지 라벨, 정답 CSV·엑셀, 검수 기록(`reviews.jsonl`)은 전부 저장소 밖(사이트 팩·아카이브)에 둔다.
+- 검수 화면의 갈무리(실제 값이 보인다)를 문서·PR·이슈에 붙이지 않는다. 서버 로그에 입력값을 찍지 않는다.
 - 테스트에 필요한 이미지는 `tools/synth.py` 로 만든다. 실제 문서를 `tests/fixtures/` 에 넣지 않는다.
 - 문서·코드·커밋 메시지·이슈에 실제 이름이나 차량번호를 예시로 쓰지 않는다. 합성 데이터의 값(`T01`, `V-101`, `ALPHA`)을 쓴다.
 - API 키·비밀값은 환경변수로만 받는다. `.env`, `minedocscan.toml` 은 커밋되지 않는다.
@@ -96,6 +104,9 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 - 좌표는 전부 템플릿 좌표계(기준 이미지 픽셀, 200 dpi). 페이지 좌표를 따로 들고 다니지 않는다.
 - DB 쓰기는 `store.db.upsert()` 만 쓴다. 같은 문서를 다시 돌려도 행이 늘지 않아야 한다(멱등).
 - 스키마는 SQLite 와 PostgreSQL 에서 같이 도는 문법만 쓴다. 날짜는 ISO 문자열, 불리언은 0/1.
+  컬럼이 바뀌면 `store/db.py` 의 `SCHEMA_VERSION` 을 올린다 (마이그레이션 없음, 예전 DB 는 `--fresh`).
+- 기계 값(`value_raw`, `has_value_raw`, `trips_raw`, `confidence`, `backend`)은 검수가 건드리지 않는다. 업무 테이블은 검수를 적용한 최종 필드 행에서 만든다 (ADR 0008).
+- 검수 기록의 원본은 사이트 팩의 `reviews/reviews.jsonl` 이다. 지우거나 덮어쓰지 않는다. 테스트에서는 `reviews` 경로를 `tmp_path` 로 돌린다.
 - 판정 규칙의 숫자(임계값)는 근거를 주석으로 남긴다. 실데이터에서 어떤 경우 때문에 그 값이 되었는지.
 - 현장에 관한 것(장비 구분, 파일명 규칙, 제외할 광종)을 코드에 적지 않는다. 사이트 팩의 `site.toml` 로 보낸다.
 

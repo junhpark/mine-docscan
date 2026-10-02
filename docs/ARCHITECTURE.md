@@ -71,6 +71,9 @@ doc_field.review_status / 업무 행 review_status : auto | pending → reviewed
 - `unknown_form` — 어느 템플릿과도 맞지 않는다 (새 양식이거나 양식이 아닌 페이지).
 - `classified_only` — 양식은 알지만 셀 정의가 아직 없는 템플릿(스텁). 분류 통계에만 잡힌다.
 - `align_failed` — 정합 품질 미달. 값을 뽑지 않고 검수로 보낸다(잘못된 좌표에서 뽑은 값은 없는 것보다 나쁘다).
+- `reviewed` — 사람이 종이를 보고 값을 확정했다(`value`) 또는 빈 칸임을 확정했다(`empty`). 읽을 수 없다고 표시한 셀(`illegible`)은
+  `pending` 으로 남고 대기열과 정답에서 빠진다. 업무 행은 구성 필드 중 하나라도 `pending` 이면 `pending`, 아니고 하나라도 `reviewed` 면
+  `reviewed`, 아니면 `auto` 다. 검수 흐름은 §7.1.
 
 ## 4. 계층과 데이터 위치
 
@@ -119,15 +122,20 @@ erDiagram
 |---|---|---|
 | 문서 | `doc_document` | 원본 파일. ID = SHA-256 앞 16자리 → 같은 스캔의 중복 접수 차단 |
 | | `doc_page` | 페이지별 양식, 분류 여유, 정합 품질, 정합 이미지 경로, 상태 |
-| | `doc_field` | 셀 하나. 좌표(bbox), 잉크, 값 유무, 원문, 최종값, 신뢰도, 후보, 값을 만든 주체, 검수 상태 |
+| | `doc_field` | 셀 하나. 좌표(bbox), 잉크, 값 유무(기계 `has_value_raw` / 최종 `has_value`), 원문 `value_raw`, 최종값 `value_final`, 신뢰도, 후보, 값을 만든 주체, 검수 상태 |
+| | `doc_review` | 사람이 입력한 값 한 건. 원본은 사이트 팩의 `reviews/reviews.jsonl` 이고 이 테이블은 사본이다 (ADR 0008) |
+| | `meta_schema` | 스키마 버전. 버전이 다른 DB 파일은 열지 않는다 (`run --fresh` 로 다시 만든다) |
 | 마스터 | `eq_equipment` | 장비. ISO 23725 의 FleetDefinition 구조(식별자 UUID, HID, 장비 유형)를 따른다. 같은 키는 항상 같은 UUID |
 | | `eq_assignment_obs` | 그날 실제로 누가 어느 차를 몰았는가 (관측값). 인쇄된 머리글과 다르면 표시 |
 | 업무 | `insp_daily` | 일일 장비 점검: 날짜 × 장비 → 이상 유/무, 점검내역 |
-| | `prod_haul` | 운반 실적: 날짜 × 자리(차량) × 광종 × 편 × 근무조 → 횟수. 두 양식에서 각각 들어온다 |
-| | `xcheck_haul` | 두 양식의 같은 값 비교: `match` / `mismatch` / `missing_log` / `missing_matrix` |
+| | `prod_haul` | 운반 실적: 날짜 × 자리(차량) × 광종 × 편 × 근무조 → 횟수. 두 양식에서 각각 들어온다. `trips` 는 최종, `trips_raw` 는 기계가 읽은 값 |
+| | `xcheck_haul` | 두 양식의 같은 값 비교: `match` / `mismatch` / `missing_log` / `missing_matrix`. 판정은 최종 값, 기계 값의 합도 `*_trips_raw` 에 같이 둔다 |
 
 규칙:
 - 쓰기는 `store.db.upsert()` 만 쓴다 (`INSERT … ON CONFLICT … DO UPDATE`). 재실행은 덮어쓴다.
+- **기계 값과 최종 값을 따로 둔다.** `value_raw`·`confidence`·`backend`·`has_value_raw`·`trips_raw` 는 언제나 기계의 것이고 검수해도 바뀌지 않는다.
+  `value_final`·`has_value`·`trips` 는 최종 값이다. 업무 테이블은 최종 값에서 만든다.
+- 컬럼이 바뀌면 `store/db.py` 의 `SCHEMA_VERSION` 을 올린다. 마이그레이션은 없다 (ADR 0005). 사람이 입력한 값은 파일에 있으므로 DB 는 언제든 다시 만든다.
 - SQLite 와 PostgreSQL 에서 같이 도는 문법만 쓴다. 날짜·시각은 ISO 8601 문자열, 불리언은 0/1.
 - 업무 테이블의 모든 행은 `source_field_id` 로 `doc_field` 를, 거기서 페이지와 정합 이미지의 좌표를 가리킨다.
 
@@ -151,6 +159,31 @@ erDiagram
 순서로 자리를 정한다. 그 결과가 `eq_assignment_obs` 다. 하루에 행렬이 여러 장이면 전부 합쳐서 비교하고,
 같은 (자리, 광종, 편)에 근무조가 여럿이면 값 유무는 OR, 횟수는 합으로 본다.
 인식기가 없으면 값의 유무만 비교하고, 숫자를 읽으면 횟수까지 비교한다.
+
+일치율(`report` 의 `xcheck_agreement`)은 양쪽 다 횟수가 있는 칸 중 횟수가 같은 비율이다. 최종 값 기준과 기계 값 기준을 따로 내고 분모를 같이 본다.
+정확도가 아니다 — 두 문서를 같은 방식으로 틀리게 읽으면 일치로 잡힌다 (ADR 0007).
+
+### 7.1 검수 흐름
+
+검수는 **옮겨 적기**다. 검수자는 종이에 적힌 그대로 입력하고, 두 문서가 달라도 각각 적힌 대로 적는다. 어느 쪽이 맞는지는 정하지 않는다 (ADR 0006).
+
+```
+minedocscan review serve --queue haul-numbers --reviewer jp      # 127.0.0.1:8765, 표준 라이브러리 서버 + HTML 한 장
+   화면: 행 띠(인쇄된 광종·편이 보인다) + 3배 셀 → 숫자 입력 → Enter
+   POST /api/review → review/store.save():
+      1. <site>/reviews/reviews.jsonl 에 한 줄 추가 (원본, 추가 전용)
+      2. doc_review (사본)
+      3. doc_field: value_final·has_value·review_status 를 덮는다. 기계 값은 그대로
+      4. 핸들러의 on_review(): 그 셀의 업무 행(prod_haul / insp_daily)과 그 날짜의 교차검증만 다시 계산
+      5. 문서 상태(needs_review) 갱신
+```
+
+- 대기열(`review/queue.py`): `haul-numbers`(운반 숫자 표본, 기계 값 숨김), `mismatch`(교차검증 불일치 칸의 일보·행렬 셀 묶음, 기계 값 숨김),
+  `pending`(검수 대기 필드 전부, 기계 값을 미리 채움). 정답을 만드는 대기열에서 기계 값을 숨기는 이유는 보여 주면 그 값에 끌리기 때문이다.
+- 파이프라인은 시작할 때 검수 파일을 읽어 들이고, 필드 행을 만든 뒤 유효한 검수를 덮고(`handlers/base.apply_reviews`), 그 최종 행에서 업무 행을 만든다.
+  그래서 `run --fresh` 로 DB 를 지우고 다시 돌려도 입력한 값이 그대로 다시 붙고, 검수된 셀도 인식기를 돌리므로 새 인식기의 `value_raw` 를 검수값과 비교할 수 있다.
+- **불변식**: 저장 직후의 DB 는, 같은 검수 파일을 가지고 처음부터 다시 돌린 DB 와 같다 (`tests/test_review_store.py` 가 고정한다).
+- 검수값은 그대로 정답이다: `review export-answers` → `eval --answers … --target raw --only-listed`.
 
 물질수지 관점에서 문서들이 놓이는 자리는 다음과 같다. 노드 사이를 잇는 교차검증을 하나씩 늘려 간다.
 
@@ -197,8 +230,12 @@ class Corrector(Protocol):
 | 지표 | 뜻 |
 |---|---|
 | CER | 문자 오류율 — 수기 텍스트 인식·교정의 품질 |
-| 필드 정확도 | 필드 단위 완전 일치율 — 숫자·코드는 한 글자만 틀려도 틀린 값 |
+| 필드 정확도 | 필드 단위 완전 일치율 — 숫자·코드는 한 글자만 틀려도 틀린 값. 정답이 빈 칸인 셀과 값이 있는 셀을 따로 낸다 (빈 칸이 대부분이라 합치면 가려진다) |
 | 자동 적재율 | 검수 없이 적재된 비율 — 현장의 업무 부담 |
+| 값 유무 정밀도·재현율 | 기계의 `has_value_raw` 대 검수의 `value`/`empty` — 값을 놓치거나 만들어 내는 오류 |
+| 교차검증 일치율 | 양쪽 다 횟수가 있는 칸 중 같은 비율, 기계 값 기준과 최종 값 기준 (정답 없이 인식기를 비교하는 수단) |
+
+`eval --target final|raw`: 최종값 또는 기계가 읽은 값을 비교한다. 검수값으로 만든 정답과 비교할 때는 `raw` 를 쓴다 (`final` 은 검수값 자신이라 언제나 맞는다).
 
 세 가지 시험이 있다.
 
@@ -232,7 +269,7 @@ class Corrector(Protocol):
       ↓
 DB (PostgreSQL 예정)
       ↓
-검수 화면 (예정)        pending 인 값을 정합 이미지의 그 자리와 함께 보여 주고 고친다 → reviewed
+검수 화면 (최소 형태 구현)  셀 크롭을 보여 주고 값을 입력한다 → reviews.jsonl + reviewed (review/). 문서 단위 화면은 예정
 ```
 
 구현 상태와 순서는 [ROADMAP.md](ROADMAP.md) 에 있다.
