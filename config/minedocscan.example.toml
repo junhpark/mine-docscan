@@ -1,0 +1,22 @@
+# minedocscan 설정 예시. 복사해서 저장소 루트에 minedocscan.toml 로 두거나 MINEDOCSCAN_CONFIG 로 경로를 준다.
+# (minedocscan.toml 은 커밋되지 않는다.)  우선순위: 명령줄 옵션 > 환경변수 > 이 파일 > 기본값
+
+[paths]
+archive_root = "D:/shared/mine-docscan"                      # 스캔 원본. 읽기 전용으로 취급
+site         = "D:/shared/mine-docscan/site-packs/my-site"   # 사이트 팩
+work_root    = "C:/minedocscan-work"                         # DB·정합 이미지. 로컬 디스크, 동기화 폴더 밖
+
+[pipeline]
+dpi = 200                    # 템플릿 좌표계의 해상도. 템플릿을 만든 해상도와 같아야 한다
+auto_accept_conf = 0.90      # 이 신뢰도 이상이면 검수 없이 적재
+classify_min_margin = 1.5    # 양식 분류 1위/2위 비율이 이보다 낮으면 표시
+save_aligned = true          # 정합 이미지를 work_root/aligned 에 저장 (검수·디버깅용)
+
+[recognize]
+backend = "null"             # 등록된 인식 백엔드 이름 (minedocscan info 로 확인)
+
+[correct]
+backend = "none"
+
+[database]
+# url = "sqlite:///C:/minedocscan-work/minedocscan.db"       # 기본: sqlite:///<work_root>/minedocscan.db

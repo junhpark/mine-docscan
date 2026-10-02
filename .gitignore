@@ -1,0 +1,55 @@
+# ── 데이터는 저장소에 넣지 않는다 (docs/DATA.md) ─────────────────────────────
+# 스캔 원본·정답·사이트 팩에는 작업자 이름, 서명, 차량번호가 들어 있다.
+/data/
+/work/
+/out/
+/sites/
+/site-*/
+*.db
+*.sqlite
+*.sqlite3
+# 실제 양식 이미지가 실수로 섞이는 것을 막는다. 저장소에 두는 이미지는 합성 예제뿐이며
+# 필요하면 `git add -f` 로 명시적으로 추가한다.
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.xlsx
+*.xls
+*.csv
+!tests/fixtures/**
+
+# 로컬 설정·비밀값
+minedocscan.toml
+.env
+.env.*
+!.env.example
+
+# 모델 가중치
+*.pt
+*.pth
+*.safetensors
+*.gguf
+*.onnx
+/models/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+/dist/
+/build/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 편집기·OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

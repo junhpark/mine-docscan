@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "minedocscan"
+version = "0.2.0"
+description = "광산 현장 수기 문서 스캔 → 인식 → 데이터베이스 파이프라인"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+  "numpy>=1.26",
+  "opencv-python-headless>=4.9",
+  "pymupdf>=1.24",
+  "pyyaml>=6.0",
+  "rapidfuzz>=3.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.scripts]
+minedocscan = "minedocscan.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/minedocscan"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+  "realdata: 실제 현장 데이터가 필요한 회귀 테스트 (MINEDOCSCAN_SITE, MINEDOCSCAN_ARCHIVE_ROOT 가 없으면 건너뜀)",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
