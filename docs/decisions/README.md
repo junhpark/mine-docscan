@@ -11,3 +11,4 @@
 | [0004](0004-slot-as-join-key.md) | 교차검증의 조인 키는 자리(slot) | 채택 |
 | [0005](0005-sqlite-first.md) | SQLite 로 시작하고 PostgreSQL 로 옮길 수 있게 | 채택 |
 | [0006](0006-show-discrepancies.md) | 불일치는 고치지 않고 보여 준다 | 채택 |
+| [0007](0007-labels-by-review.md) | 숫자 정답은 검수로 만들고, 그 전에는 교차검증 일치율로 본다 | 채택 |

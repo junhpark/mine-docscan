@@ -79,6 +79,7 @@ config/        설정 예시
 | [docs/SITE_PACK.md](docs/SITE_PACK.md) | 사이트 팩과 템플릿 형식, 새 양식 추가 절차 |
 | [docs/DATA.md](docs/DATA.md) | 데이터 위치, 커밋 금지 대상, 평가·회귀 방법 |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | 현재 상태, 다음 단계, 결정이 필요한 사항 |
+| [docs/PRIOR_WORK.md](docs/PRIOR_WORK.md) | 선행 연구에서 이어받은 요구사항과 바꾼 것 |
 | [docs/decisions/](docs/decisions/) | 설계 결정 기록 |
 | [CLAUDE.md](CLAUDE.md) | Claude Code 로 작업할 때의 규칙과 요약 |
 
