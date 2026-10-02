@@ -126,12 +126,12 @@ def test_old_schema_db_is_refused(tmp_path):
 # ── 합성 하루치로: 재실행에 붙이기, 업무 테이블 전파, 불변식 ───────────────────────
 from dataclasses import replace  # noqa: E402
 
-from minedocscan.config import Settings  # noqa: E402
+from conftest import run_day  # noqa: E402
 from minedocscan.pipeline import Pipeline  # noqa: E402
 from minedocscan.recognize import OracleRecognizer, load_answers_json  # noqa: E402
 from minedocscan.report import build_report  # noqa: E402
 from minedocscan.review.store import save  # noqa: E402
-from minedocscan.tools.synth import T_INSP, expected_xcheck, generate  # noqa: E402
+from minedocscan.tools.synth import T_INSP, expected_xcheck  # noqa: E402
 
 TABLES = ("doc_field", "prod_haul", "insp_daily", "xcheck_haul", "eq_assignment_obs", "doc_document")
 
@@ -152,12 +152,7 @@ def _haul_fields(con):
 @pytest.fixture(scope="module")
 def day1(tmp_path_factory):
     """하루치 합성 데이터를 null 백엔드로 돌리고, 운반 셀 전부와 점검내역 몇 개를 검수로 저장해 둔다."""
-    root = tmp_path_factory.mktemp("review_day1")
-    synth = generate(root / "data", days=1, seed=0)
-    settings = Settings(site=synth.site, archive_root=synth.scans, work_root=root / "work",
-                        reviews=root / "검수" / "reviews.jsonl")          # 세션 픽스처의 사이트 팩을 더럽히지 않는다
-    pipe = Pipeline(settings)
-    pipe.run([synth.scans])
+    synth, settings, pipe = run_day(tmp_path_factory.mktemp("review_day1"))
     before = build_report(pipe.con)
     answers = load_answers_json(synth.answers_path)
     con, site = pipe.con, pipe.site

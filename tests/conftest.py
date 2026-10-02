@@ -30,6 +30,17 @@ def run_pipeline(synth, work_root: Path, recognizer=None) -> Pipeline:
     return pipe
 
 
+def run_day(root: Path, seed: int = 0, recognizer=None) -> tuple:
+    """검수 테스트용 하루치: 합성 → null 실행. 검수 파일은 사이트 팩이 아니라 root 아래에 둔다 (세션 픽스처를 더럽히지 않게).
+    돌려주는 값: (synth, settings, pipe)."""
+    synth = generate(root / "data", days=1, seed=seed)
+    settings = Settings(site=synth.site, archive_root=synth.scans, work_root=root / "work",
+                        reviews=root / "검수" / "reviews.jsonl")
+    pipe = Pipeline(settings, recognizer=recognizer)
+    pipe.run([synth.scans])
+    return synth, settings, pipe
+
+
 @pytest.fixture(scope="session")
 def null_run(synth, tmp_path_factory) -> Pipeline:
     """인식기 없이 돌린 결과 — 분류·정합·셀 추출·체크 판정·값 유무 교차검증까지."""
