@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>minedocscan 검수</title>
+<!-- 외부 글꼴·스크립트·CDN 을 쓰지 않는다. 현장은 외부 네트워크가 없다. -->
+<style>
+  :root { --fg:#1b1b1b; --muted:#6b6b6b; --line:#d9d9d9; --accent:#1f5fbf; --bad:#b4232c; --ok:#1d7a3a; --bg:#f6f6f4; }
+  * { box-sizing: border-box; }
+  body { margin:0; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; color:var(--fg); background:var(--bg); }
+  header { display:flex; flex-wrap:wrap; gap:8px 20px; align-items:baseline; padding:10px 16px; background:#fff; border-bottom:1px solid var(--line); position:sticky; top:0; }
+  header .q { font-weight:600; }
+  header .hint { color:var(--muted); width:100%; font-size:13px; }
+  header .prog b { font-variant-numeric: tabular-nums; }
+  main { max-width: 1400px; margin: 0 auto; padding: 14px 16px 60px; }
+  h1 { font-size:17px; margin: 8px 0 12px; font-weight:600; }
+  .item { background:#fff; border:1px solid var(--line); border-radius:6px; padding:12px 14px; margin-bottom:14px; }
+  .cell { display:grid; grid-template-columns: 1fr; gap:8px; padding:10px 0; border-top:1px dashed var(--line); }
+  .cell:first-of-type { border-top:0; }
+  .label { font-size:13px; color:var(--muted); }
+  .row img { max-width:100%; height:auto; border:1px solid var(--line); background:#fff; }
+  .big { display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
+  .big img { max-height:260px; border:1px solid var(--line); image-rendering:auto; }
+  input.val { font-size:34px; width: 10ch; padding:4px 10px; border:2px solid var(--line); border-radius:6px; }
+  input.val:focus { outline:none; border-color:var(--accent); }
+  input.val.text { width: 28ch; font-size:24px; }
+  .prev { font-size:13px; color:var(--muted); }
+  .prev b { color:var(--ok); }
+  .ro { font-size:22px; color:var(--ok); }
+  .msg { min-height:1.4em; color:var(--bad); }
+  .keys { color:var(--muted); font-size:13px; margin-top:6px; }
+  kbd { font: 12px ui-monospace, monospace; border:1px solid var(--line); border-bottom-width:2px; border-radius:3px; padding:0 5px; background:#fafafa; }
+  .done { padding:40px 0; text-align:center; color:var(--muted); font-size:18px; }
+  button { font: inherit; padding:4px 10px; border:1px solid var(--line); background:#fff; border-radius:4px; cursor:pointer; }
+</style>
+</head>
+<body>
+<header>
+  <span class="q" id="qname">…</span>
+  <span>검수자 <b id="reviewer">…</b></span>
+  <span class="prog">진행 <b id="done">0</b> / <b id="total">0</b></span>
+  <span id="pos" class="prog"></span>
+  <span class="hint">종이에 적힌 <b>그대로</b> 입력합니다. 두 문서의 값이 달라도 각각 적힌 대로 — 어느 쪽이 맞는지는 정하지 않습니다.
+    <kbd>Enter</kbd> 저장·다음 &nbsp; 빈 채로 <kbd>Enter</kbd> 빈 칸 &nbsp; <kbd>?</kbd><kbd>Enter</kbd> 읽을 수 없음 &nbsp;
+    <kbd>PgUp</kbd>/<kbd>PgDn</kbd> 이전/다음 &nbsp; 묶음은 <kbd>Tab</kbd> 으로 이동</span>
+</header>
+<main>
+  <div id="view"></div>
+  <div class="msg" id="msg"></div>
+</main>
+<script>
+(function () {
+  'use strict';
+  const qs = new URLSearchParams(location.search);
+  const state = { items: [], idx: 0, done: 0, total: 0, showMachine: false, entered: {}, templates: {} };
+  const $ = (id) => document.getElementById(id);
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+  function msg(t, ok) { const m = $('msg'); m.textContent = t || ''; m.style.color = ok ? 'var(--ok)' : 'var(--bad)'; }
+
+  async function loadQueue() {
+    const r = await fetch('/api/queue?' + qs.toString());
+    const q = await r.json();
+    if (!r.ok) { msg(q.error || '대기열을 받지 못했습니다'); return; }
+    state.items = q.items; state.done = q.done; state.total = q.total; state.showMachine = q.show_machine;
+    state.templates = q.templates || {};
+    $('qname').textContent = '대기열 ' + q.name + ' · ' + (q.site || '');
+    $('reviewer').textContent = q.reviewer;
+    document.title = 'minedocscan 검수 — ' + q.name;
+    state.idx = 0;
+    render();
+  }
+
+  function updateProgress() {
+    $('done').textContent = state.done; $('total').textContent = state.total;
+    $('pos').textContent = state.items.length ? ('항목 ' + (state.idx + 1) + ' / ' + state.items.length) : '';
+  }
+
+  function titleOf(item) {
+    // 제목의 두 번째 조각이 템플릿 이름이면 사람이 읽는 제목으로 바꾼다
+    const parts = item.title.split(' · ');
+    if (parts.length > 1 && state.templates[parts[1]]) parts[1] = state.templates[parts[1]];
+    return parts.join(' · ');
+  }
+
+  function render() {
+    updateProgress();
+    const v = $('view');
+    if (!state.items.length || state.idx >= state.items.length) {
+      v.innerHTML = '<div class="done">이 대기열은 끝났습니다. <button id="reload">다시 받기</button></div>';
+      $('reload').onclick = loadQueue;
+      return;
+    }
+    const item = state.items[state.idx];
+    let h = '<div class="item"><h1>' + esc(titleOf(item)) + '</h1>';
+    item.cells.forEach((c, i) => {
+      const prev = state.entered[c.field_id] || c.review;
+      const isNum = c.kind === 'handwritten_number';
+      h += '<div class="cell">';
+      h += '<div class="label">' + esc(c.label) + '</div>';
+      h += '<div class="row"><img src="/crop?field_id=' + encodeURIComponent(c.field_id) + '&kind=row" alt="행"></div>';
+      h += '<div class="big"><img src="/crop?field_id=' + encodeURIComponent(c.field_id) + '&kind=cell&scale=3" alt="셀">';
+      if (c.review && !state.entered[c.field_id] && item.cells.length > 1) {
+        // 묶음에서 이미 검수된 셀은 참고용으로만 보여 준다 (다시 입력하지 않는다)
+        h += '<div class="ro">' + esc(shown(c.review)) + ' <span class="label">(검수됨 · ' + esc(c.review.reviewer) + ')</span></div>';
+      } else {
+        let init = '';
+        if (prev) init = prev.verdict === 'value' ? prev.value : (prev.verdict === 'illegible' ? '?' : '');
+        else if (state.showMachine && c.machine && c.machine.value_raw) init = c.machine.value_raw;
+        h += '<input class="val ' + (isNum ? 'num' : 'text') + '" data-i="' + i + '" data-fid="' + esc(c.field_id) + '"'
+          + (isNum ? ' inputmode="numeric"' : '') + ' value="' + esc(init) + '" autocomplete="off" spellcheck="false">';
+        if (prev) h += '<span class="prev">입력했던 값: <b>' + esc(shown(prev)) + '</b></span>';
+      }
+      h += '</div></div>';
+    });
+    h += '<div class="keys">' + (item.cells.filter(c => !(c.review && !state.entered[c.field_id] && item.cells.length > 1)).length > 1
+      ? '마지막 칸에서 <kbd>Enter</kbd> 하면 전부 저장합니다.' : '') + '</div></div>';
+    v.innerHTML = h;
+    const inputs = v.querySelectorAll('input.val');
+    inputs.forEach(inp => {
+      inp.addEventListener('keydown', onKey);
+      if (inp.classList.contains('num')) inp.addEventListener('input', () => { inp.value = inp.value.replace(/[^0-9?]/g, ''); });
+    });
+    if (inputs.length) { inputs[0].focus(); inputs[0].select(); }
+    msg('');
+  }
+
+  function shown(r) { return r.verdict === 'value' ? r.value : (r.verdict === 'empty' ? '(빈 칸)' : '(읽을 수 없음)'); }
+
+  function parse(inp) {
+    const raw = inp.value.trim();
+    if (raw === '?') return { verdict: 'illegible', value: '' };
+    if (raw === '') return { verdict: 'empty', value: '' };
+    return { verdict: 'value', value: raw };
+  }
+
+  async function post(fid, p) {
+    const r = await fetch('/api/review', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ field_id: fid, verdict: p.verdict, value: p.value, note: '' }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || ('저장 실패 ' + r.status));
+    return j;
+  }
+
+  async function saveItem() {
+    const item = state.items[state.idx];
+    const inputs = Array.from($('view').querySelectorAll('input.val'));
+    const plans = [];
+    for (const inp of inputs) {
+      const p = parse(inp);
+      if (p.verdict === 'value' && inp.classList.contains('num')) {
+        if (!/^[0-9]+$/.test(p.value)) { msg('숫자만 입력합니다'); inp.focus(); return; }
+        if (p.value.length >= 3 && !confirm('세 자리 이상입니다: ' + p.value + ' — 맞습니까?')) { inp.focus(); inp.select(); return; }
+      }
+      plans.push([inp.dataset.fid, p]);
+    }
+    try {
+      for (const [fid, p] of plans) {
+        await post(fid, p);
+        if (!state.entered[fid]) {               // 처음 저장한 항목만 진행 수에 더한다
+          if (item.cells.length === 1) state.done += 1;
+        }
+        state.entered[fid] = { verdict: p.verdict, value: p.value };
+      }
+      if (item.cells.length > 1 && item.cells.every(c => state.entered[c.field_id] || c.review) && !item._counted) { item._counted = true; state.done += 1; }
+      msg('저장했습니다', true);
+      next();
+    } catch (e) { msg(e.message); }
+  }
+
+  function next() { if (state.idx < state.items.length) state.idx += 1; render(); }
+  function prev() { if (state.idx > 0) state.idx -= 1; render(); }
+
+  function onKey(ev) {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      const inputs = Array.from($('view').querySelectorAll('input.val'));
+      const i = inputs.indexOf(ev.target);
+      if (i < inputs.length - 1) { inputs[i + 1].focus(); inputs[i + 1].select(); return; }   // 묶음: 다음 칸으로
+      saveItem();
+    }
+  }
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'PageDown') { ev.preventDefault(); next(); }
+    else if (ev.key === 'PageUp') { ev.preventDefault(); prev(); }
+  });
+
+  loadQueue();
+})();
+</script>
+</body>
+</html>

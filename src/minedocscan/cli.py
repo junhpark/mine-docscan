@@ -7,6 +7,7 @@
   regress    사이트 팩의 기준 수치와 비교하는 실데이터 회귀 검사
   template   새 양식의 템플릿 뼈대 만들기
   synth      개인정보 없는 합성 사이트 팩과 스캔 문서 만들기
+  review     검수: serve(로컬 화면), stats(진행 현황), export-answers(검수값 → 정답 파일)
 
 경로는 --site / --archive-root / --work-root 또는 환경변수·설정 파일로 준다 (config.py).
 """
@@ -76,6 +77,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("out", help="출력 폴더 (site/, scans/, truth.json, answers.json)")
     p.add_argument("--days", type=int, default=3)
     p.add_argument("--seed", type=int, default=0)
+
+    p = sub.add_parser("review", parents=[common], help="검수 도구")
+    rsub = p.add_subparsers(dest="review_command", required=True)
+    r = rsub.add_parser("serve", parents=[common], help="로컬 검수 화면 (127.0.0.1)")
+    r.add_argument("--queue", default="haul-numbers", choices=["haul-numbers", "mismatch", "pending"])
+    r.add_argument("--n", type=int, default=1500, help="haul-numbers 표본 크기 (기본 1500)")
+    r.add_argument("--seed", type=int, default=0, help="표본의 순서를 정하는 씨앗. 같은 값이면 같은 표본")
+    r.add_argument("--empty-share", type=float, default=0.1, help="표본 중 빈 칸 비율 (기본 0.1)")
+    r.add_argument("--template", help="pending: 이 템플릿만")
+    r.add_argument("--kind", choices=["handwritten_number", "handwritten_text"], help="pending: 이 종류만")
+    r.add_argument("--reviewer", help="검수자 식별자 (짧은 영문). 없으면 서버를 띄우지 않는다")
+    r.add_argument("--port", type=int, default=8765)
+    rsub.add_parser("stats", parents=[common], help="검수 진행 현황")
+    r = rsub.add_parser("export-answers", parents=[common], help="유효한 검수(value, empty) → answers.json")
+    r.add_argument("out", help="출력 파일 (eval --answers 로 읽는 형식)")
     return ap
 
 
@@ -271,8 +287,59 @@ def _only_inspection_template(site) -> str:
     return names[0]
 
 
+def _review_db(a):
+    """검수 명령 공통: 사이트 팩, DB, 검수 파일 읽어 들이기."""
+    from .review.store import import_into
+    from .store.db import open_db
+
+    s = _settings(a)
+    site = _need_site(s)
+    con = open_db(s.resolved_db_url)
+    imported = import_into(con, s.reviews_path(site.root))
+    return s, site, con, imported
+
+
+def cmd_review(a) -> int:
+    if a.review_command == "serve":
+        from .review.server import ReviewApp, serve
+
+        if not a.reviewer:
+            raise SystemExit("검수자를 지정하세요: --reviewer <짧은 영문 식별자>. 검수 기록마다 남습니다.")
+        s, site, con, imported = _review_db(a)
+        if imported["skipped"]:
+            print(f"주의: 검수 파일에서 깨진 줄 {imported['skipped']}개를 건너뛰었습니다 ({imported['path']})", file=sys.stderr)
+        app = ReviewApp(con, site, s, a.reviewer, a.queue,
+                        {"n": a.n, "seed": a.seed, "empty_share": a.empty_share, "template": a.template, "kind": a.kind})
+        try:
+            serve(app, port=a.port)
+        except OSError as e:
+            raise SystemExit(str(e)) from e
+        return 0
+    if a.review_command == "stats":
+        from .review.store import stats
+
+        s, site, con, imported = _review_db(a)
+        st = stats(con)
+        kv = lambda d: ", ".join(f"{k} {v}" for k, v in d.items()) or "-"      # noqa: E731
+        lines = [f"검수 파일: {imported['path']} — 기록 {st['records']}건 (깨진 줄 {imported['skipped']}개), 필드 {st['fields']}개",
+                 "판정별: " + kv(st["by_verdict"]), "양식별: " + kv(st["by_template"]), "날짜별: " + kv(st["by_date"]),
+                 "검수자별(기록): " + kv(st["by_reviewer"]),
+                 f"템플릿 좌표가 달라진 기록 {st['bbox_changed']}개, 이 DB 에 없는 필드 {st['fields_not_in_db']}개"]
+        _emit(a, {"reviews": imported, "stats": st}, "\n".join(lines))
+        return 0
+    if a.review_command == "export-answers":
+        from .review.store import export_answers
+
+        s, site, con, _imported = _review_db(a)
+        n = export_answers(con, a.out)
+        _emit(a, {"out": a.out, "answers": n},
+              f"정답 {n}개를 썼습니다: {a.out}\n비교: minedocscan eval --answers {a.out} --target raw --only-listed")
+        return 0
+    raise SystemExit(f"알 수 없는 review 명령: {a.review_command}")
+
+
 COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "eval": cmd_eval, "regress": cmd_regress,
-            "template": cmd_template, "synth": cmd_synth}
+            "template": cmd_template, "synth": cmd_synth, "review": cmd_review}
 
 
 def main(argv: list[str] | None = None) -> int:

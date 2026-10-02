@@ -43,7 +43,9 @@ def open_db(url: str) -> sqlite3.Connection:
     path = url[len("sqlite:///"):]
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(path)
+    # check_same_thread=False: 검수 서버(review/server.py)는 요청을 받는 스레드에서 이 연결을 쓴다.
+    # 동시에 여러 스레드가 쓰지는 않는다 (서버는 단일 스레드).
+    con = sqlite3.connect(path, check_same_thread=False)
     con.row_factory = sqlite3.Row
     _check_version(con, path)
     con.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))

@@ -229,3 +229,46 @@ def save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
         applied = True
     con.commit()
     return {"review_id": review.review_id, "seq": seq, "path": str(path), "applied": applied}
+
+
+# ── 현황 ───────────────────────────────────────────────────────────────────
+def stats(con: sqlite3.Connection) -> dict:
+    """얼마나 했는지: 유효한 검수의 판정별·양식별·날짜별 건수, 검수자별 기록 수, bbox 가 달라진 기록 수."""
+    eff = effective(con)
+    by_verdict: dict[str, int] = {}
+    by_template: dict[str, int] = {}
+    by_date: dict[str, int] = {}
+    bbox_changed = not_in_db = 0
+    dates = dict(con.execute("SELECT page_id, work_date FROM doc_page"))
+    fields = {r["field_id"]: r for r in con.execute("SELECT field_id, x0, y0, x1, y1 FROM doc_field")}
+    for fid, rv in eff.items():
+        by_verdict[rv.verdict] = by_verdict.get(rv.verdict, 0) + 1
+        by_template[rv.template or "unknown"] = by_template.get(rv.template or "unknown", 0) + 1
+        d = dates.get(rv.page_id) or "unknown"
+        by_date[d] = by_date.get(d, 0) + 1
+        f = fields.get(fid)
+        if f is None:
+            not_in_db += 1
+        elif rv.bbox and list(rv.bbox) != [f["x0"], f["y0"], f["x1"], f["y1"]]:
+            bbox_changed += 1
+    by_reviewer = dict(con.execute("SELECT reviewer, COUNT(*) FROM doc_review GROUP BY 1 ORDER BY 1"))
+    return {"records": con.execute("SELECT COUNT(*) FROM doc_review").fetchone()[0], "fields": len(eff),
+            "by_verdict": dict(sorted(by_verdict.items())), "by_template": dict(sorted(by_template.items())),
+            "by_date": dict(sorted(by_date.items())), "by_reviewer": by_reviewer,
+            "bbox_changed": bbox_changed, "fields_not_in_db": not_in_db}
+
+
+def export_answers(con: sqlite3.Connection, out: str | Path) -> int:
+    """유효한 검수(value, empty) → answers.json (recognize.load_answers_json 형식). illegible 은 뺀다.
+    표본만 검수했다면 `eval --only-listed` 로 비교한다 — 정답에 없는 셀을 빈 칸으로 치면 안 되므로."""
+    items = []
+    for rv in effective(con).values():
+        if rv.verdict == "illegible" or not rv.source:
+            continue
+        items.append({"source": rv.source, "template": rv.template, "region": rv.region, "field_name": rv.field_name,
+                      "row_key": rv.row_key, "text": rv.value if rv.verdict == "value" else ""})
+    items.sort(key=lambda a: (a["source"], a["template"], a["region"], a["row_key"], a["field_name"]))
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+    return len(items)
