@@ -9,6 +9,7 @@
 
 이 파일은 단계 순서와 상태 기록만 안다. 양식의 의미는 핸들러가, 글자 읽기는 인식 백엔드가 안다.
 같은 파일을 다시 넣으면 같은 키로 덮어쓰므로(멱등) 인식기를 바꾼 뒤 그대로 다시 돌리면 된다.
+시작할 때 사이트 팩의 검수 파일을 doc_review 로 읽어 들이므로, DB 를 지우고 다시 돌려도 사람이 입력한 값은 다시 붙는다.
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from ..imaging.align import align_to_template
 from ..imaging.cells import observe_cells
 from ..imaging.io import SUPPORTED_EXT, imwrite, load_pages
 from ..recognize import Recognizer, get_recognizer
+from ..review.store import import_into
 from ..store.db import open_db, upsert
 
 
@@ -47,6 +49,7 @@ class Pipeline:
         self._handlers: dict[str, object] = {}
         self.summary: dict = {"documents": 0, "pages": 0, "by_form": {}, "by_status": {}, "low_margin": [],
                               "handlers": {}}
+        self.summary["reviews"] = import_into(self.con, settings.reviews_path(self.site.root))
 
     # ── 입력 ───────────────────────────────────────────────────────────────
     @staticmethod
@@ -79,12 +82,8 @@ class Pipeline:
         pages = []
         for page_no, gray in load_pages(path, self.settings.dpi):
             pages.append(self.process_page(document_id, source_name, page_no, gray, template))
-        n_pending = self.con.execute(
-            "SELECT COUNT(*) FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id "
-            "WHERE p.document_id = ? AND f.review_status = 'pending'", (document_id,)).fetchone()[0]
-        needs_review = n_pending > 0 or any(p["status"] in ("unknown_form", "align_failed") for p in pages)
-        self.con.execute("UPDATE doc_document SET n_pages=?, status=? WHERE document_id=?",
-                         (len(pages), "needs_review" if needs_review else "processed", document_id))
+        self.con.execute("UPDATE doc_document SET n_pages=? WHERE document_id=?", (len(pages), document_id))
+        update_document_status(self.con, document_id)
         self.con.commit()
         self.summary["documents"] += 1
         return {"document_id": document_id, "pages": pages}
@@ -161,6 +160,19 @@ class Pipeline:
                 self.summary.setdefault("finalize", {})[name] = extra
         self.con.commit()
         return self.summary
+
+
+def update_document_status(con: sqlite3.Connection, document_id: str) -> str:
+    """문서 상태를 DB 에서 다시 계산한다: 검수 대기 필드가 있거나 양식·정합에 실패한 쪽이 있으면 needs_review.
+    처리 직후와 검수 저장 직후에 같은 규칙을 쓴다."""
+    n_pending = con.execute(
+        "SELECT COUNT(*) FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id "
+        "WHERE p.document_id = ? AND f.review_status = 'pending'", (document_id,)).fetchone()[0]
+    n_bad = con.execute("SELECT COUNT(*) FROM doc_page WHERE document_id = ? AND status IN ('unknown_form', 'align_failed')",
+                        (document_id,)).fetchone()[0]
+    status = "needs_review" if (n_pending or n_bad) else "processed"
+    con.execute("UPDATE doc_document SET status=? WHERE document_id=?", (status, document_id))
+    return status
 
 
 def _finite(v: float) -> float | None:

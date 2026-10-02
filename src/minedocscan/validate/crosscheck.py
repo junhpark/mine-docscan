@@ -10,6 +10,10 @@
 순서로 자리를 정한다. 그 결과는 eq_assignment_obs 에 남긴다 (그날의 실제 배차).
 
 하루에 행렬 양식이 여러 장일 수 있으므로(상차 장비마다 한 장) 그날의 모든 장을 합쳐서 비교한다.
+
+판정(status)은 최종 값(검수가 있으면 검수값)으로 한다. 기계가 읽은 횟수(trips_raw)의 합은 log_trips_raw,
+matrix_trips_raw 에 같이 적어 인식기끼리 비교하는 일치율의 재료로 쓴다 (report.py).
+dates 를 주면 그 날짜만 다시 계산한다 — 검수를 저장한 직후에 쓴다.
 """
 from __future__ import annotations
 
@@ -18,9 +22,11 @@ import sqlite3
 from ..store.db import upsert
 
 
-def crosscheck_haul(con: sqlite3.Connection, exclude_materials: list[str] | None = None) -> dict:
+def crosscheck_haul(con: sqlite3.Connection, exclude_materials: list[str] | None = None,
+                    dates: list[str] | None = None) -> dict:
     exclude = set(exclude_materials or [])
-    dates = [r[0] for r in con.execute("SELECT DISTINCT work_date FROM prod_haul WHERE work_date IS NOT NULL ORDER BY 1")]
+    if dates is None:
+        dates = [r[0] for r in con.execute("SELECT DISTINCT work_date FROM prod_haul WHERE work_date IS NOT NULL ORDER BY 1")]
     totals: dict[str, int] = {}
     for date in dates:
         for k, v in _crosscheck_date(con, date, exclude).items():
@@ -73,10 +79,10 @@ def _crosscheck_date(con: sqlite3.Connection, date: str, exclude: set[str]) -> d
     upsert(con, "eq_assignment_obs", obs)
 
     # ── 값 모으기: (자리, 광종, 편) → 값 유무·횟수 ──
-    m_has, m_trips = _collect([(r["slot"], r) for r in matrix])
+    m_has, m_trips, m_raw = _collect([(r["slot"], r) for r in matrix])
     resolved = [(page_slot[r["page_id"]][0], r) for r in log if r["page_id"] in page_slot]
     unresolved = [(f"unresolved:{pages[r['page_id']][0] or r['page_id']}", r) for r in log if r["page_id"] not in page_slot]
-    l_has, l_trips = _collect(resolved + unresolved)
+    l_has, l_trips, l_raw = _collect(resolved + unresolved)
     who = {slot: pages[pid] for pid, (slot, _how) in page_slot.items()}
     log_slots = {k[0] for k in l_has}
 
@@ -96,20 +102,24 @@ def _crosscheck_date(con: sqlite3.Connection, date: str, exclude: set[str]) -> d
         vehicle, operator = who.get(slot, (None, None))
         out.append({"work_date": date, "slot": slot, "material": material, "level": level, "operator": operator,
                     "vehicle_no": vehicle, "log_has": lh, "matrix_has": mh, "log_trips": l_trips.get(key),
-                    "matrix_trips": m_trips.get(key), "status": status})
+                    "matrix_trips": m_trips.get(key), "log_trips_raw": l_raw.get(key),
+                    "matrix_trips_raw": m_raw.get(key), "status": status})
         counts[status] = counts.get(status, 0) + 1
     con.execute("DELETE FROM xcheck_haul WHERE work_date=?", (date,))
     upsert(con, "xcheck_haul", out)
     return counts
 
 
-def _collect(items) -> tuple[dict, dict]:
-    """같은 (자리, 광종, 편)에 여러 행(근무조·여러 장)이 있으면 값 유무는 OR, 횟수는 합."""
+def _collect(items) -> tuple[dict, dict, dict]:
+    """같은 (자리, 광종, 편)에 여러 행(근무조·여러 장)이 있으면 값 유무는 OR, 횟수는 합 (최종값과 기계값 각각)."""
     has: dict[tuple, int] = {}
     trips: dict[tuple, int] = {}
+    raw: dict[tuple, int] = {}
     for slot, r in items:
         key = (slot, r["material"], r["level"])
         has[key] = max(has.get(key, 0), r["has_value"])
         if r["trips"] is not None:
             trips[key] = trips.get(key, 0) + r["trips"]
-    return has, trips
+        if r["trips_raw"] is not None:
+            raw[key] = raw.get(key, 0) + r["trips_raw"]
+    return has, trips, raw

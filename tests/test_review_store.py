@@ -121,3 +121,139 @@ def test_old_schema_db_is_refused(tmp_path):
     open_db(path).close()
     con = open_db(path)
     assert con.execute("SELECT value FROM meta_schema WHERE key='schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
+
+
+# ── 합성 하루치로: 재실행에 붙이기, 업무 테이블 전파, 불변식 ───────────────────────
+from dataclasses import replace  # noqa: E402
+
+from minedocscan.config import Settings  # noqa: E402
+from minedocscan.pipeline import Pipeline  # noqa: E402
+from minedocscan.recognize import OracleRecognizer, load_answers_json  # noqa: E402
+from minedocscan.report import build_report  # noqa: E402
+from minedocscan.review.store import save  # noqa: E402
+from minedocscan.tools.synth import T_INSP, expected_xcheck, generate  # noqa: E402
+
+TABLES = ("doc_field", "prod_haul", "insp_daily", "xcheck_haul", "eq_assignment_obs", "doc_document")
+
+
+def _dump(con, table):
+    cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})") if r[1] != "created_at"]   # 실행 시각만 뺀다
+    return sorted(tuple(r) for r in con.execute(f"SELECT {', '.join(cols)} FROM {table}"))
+
+
+def _haul_fields(con):
+    """운반 숫자 셀 전부: (field_id, 정답 키)."""
+    return con.execute(
+        "SELECT f.field_id, d.source_name || '#' || p.page_no AS source, p.template_name, f.region, f.field_name, f.row_key "
+        "FROM prod_haul h JOIN doc_field f ON h.source_field_id = f.field_id JOIN doc_page p ON f.page_id = p.page_id "
+        "JOIN doc_document d ON p.document_id = d.document_id ORDER BY f.field_id").fetchall()
+
+
+@pytest.fixture(scope="module")
+def day1(tmp_path_factory):
+    """하루치 합성 데이터를 null 백엔드로 돌리고, 운반 셀 전부와 점검내역 몇 개를 검수로 저장해 둔다."""
+    root = tmp_path_factory.mktemp("review_day1")
+    synth = generate(root / "data", days=1, seed=0)
+    settings = Settings(site=synth.site, archive_root=synth.scans, work_root=root / "work",
+                        reviews=root / "검수" / "reviews.jsonl")          # 세션 픽스처의 사이트 팩을 더럽히지 않는다
+    pipe = Pipeline(settings)
+    pipe.run([synth.scans])
+    before = build_report(pipe.con)
+    answers = load_answers_json(synth.answers_path)
+    con, site = pipe.con, pipe.site
+
+    # 1) 운반 셀 전부를 정답대로 (값이 있으면 value, 없으면 empty)
+    for f in _haul_fields(con):
+        text = answers.get((f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"]))
+        v = Review(f["field_id"], "value", text, "jp") if text else Review(f["field_id"], "empty", reviewer="jp")
+        save(con, site, settings, v)
+    # 2) 점검내역: 값 하나, 빈 칸 하나, 읽을 수 없음 하나, 그리고 한 셀은 두 번(나중 것이 유효)
+    insp = {r["row_key"]: r["field_id"] for r in con.execute(
+        "SELECT f.row_key, f.field_id FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id "
+        "WHERE p.template_name = ? AND f.field_name = 'remark' ORDER BY f.row_no", (T_INSP,))}
+    keys = list(insp)
+    save(con, site, settings, Review(insp[keys[0]], "value", "oil leak (검수)", "jp", reviewed_at="2030-01-08T01:00:00Z"))
+    save(con, site, settings, Review(insp[keys[0]], "value", "oil leak", "jp", reviewed_at="2030-01-08T01:00:01Z"))
+    save(con, site, settings, Review(insp[keys[1]], "empty", reviewer="jp"))
+    save(con, site, settings, Review(insp[keys[2]], "illegible", reviewer="jp"))
+    con.commit()
+    return {"synth": synth, "settings": settings, "pipe": pipe, "before": before, "answers": answers,
+            "insp": {"value": insp[keys[0]], "empty": insp[keys[1]], "illegible": insp[keys[2]]}}
+
+
+def test_full_day_review_makes_crosscheck_compare_trips(day1):
+    con, synth = day1["pipe"].con, day1["synth"]
+    day = synth.truth["days"][0]
+    assert day1["before"]["xcheck_haul"] == expected_xcheck([day], with_trips=False)     # 검수 전: 값 유무만
+    assert build_report(con)["xcheck_haul"] == expected_xcheck([day], with_trips=True)   # 검수 후: 횟수까지
+    # 횟수가 다른 칸은 기계 값 기준(null → NULL)이 아니라 최종 값으로 잡혔다
+    want = {(x["slot"], x["material"], x["level"]) for x in day["discrepancies"]}
+    got = {tuple(r) for r in con.execute("SELECT slot, material, level FROM xcheck_haul WHERE status='mismatch'")}
+    assert got == want
+    assert con.execute("SELECT COUNT(*) FROM xcheck_haul WHERE log_trips_raw IS NOT NULL").fetchone()[0] == 0
+    # 운반 행은 전부 reviewed, trips 는 최종값, trips_raw 는 기계값(null 이라 NULL)
+    assert {r[0] for r in con.execute("SELECT DISTINCT review_status FROM prod_haul")} == {"reviewed"}
+    assert con.execute("SELECT COUNT(*) FROM prod_haul WHERE trips_raw IS NOT NULL").fetchone()[0] == 0
+    assert con.execute("SELECT COUNT(*) FROM prod_haul WHERE has_value=1 AND trips IS NULL").fetchone()[0] == 0
+
+
+def test_verdicts_on_fields_and_inspection_rows(day1):
+    con, ids = day1["pipe"].con, day1["insp"]
+    f = lambda fid: con.execute("SELECT * FROM doc_field WHERE field_id=?", (fid,)).fetchone()   # noqa: E731
+    v, e, i = f(ids["value"]), f(ids["empty"]), f(ids["illegible"])
+    assert (v["value_final"], v["has_value"], v["review_status"], v["reviewed_by"]) == ("oil leak", 1, "reviewed", "jp")
+    assert (e["value_final"], e["has_value"], e["review_status"]) == ("", 0, "reviewed")
+    assert i["review_status"] == "pending" and i["reviewed_by"] == "jp"
+    for r in (v, e, i):                                       # 기계 값은 그대로
+        assert r["value_raw"] == ("" if r["has_value_raw"] else "") and r["backend"] in ("null", "ink")
+    rows = {r["source_field_id"]: r for r in con.execute("SELECT * FROM insp_daily")}
+    assert rows[ids["value"]]["remark"] == "oil leak" and rows[ids["value"]]["review_status"] == "reviewed"
+    assert rows[ids["empty"]]["remark"] == "" and rows[ids["empty"]]["review_status"] in ("reviewed", "pending")
+    assert rows[ids["illegible"]]["review_status"] == "pending"
+    # 기존 항목은 검수가 없을 때와 같다 (점검 유/무 판정은 검수와 무관)
+    rep = build_report(con)
+    for k in ("documents", "pages", "pages_by_form", "align", "equipment"):
+        assert rep[k] == day1["before"][k]
+    assert rep["fields"]["pending"] < day1["before"]["fields"]["pending"]
+
+
+def test_rebuild_from_review_file_equals_live_db(day1, tmp_path):
+    """4.4 의 불변식: save 를 거친 DB == 같은 검수 파일로 새 WORK_ROOT 에서 처음부터 돌린 DB."""
+    live = day1["pipe"].con
+    fresh = Pipeline(replace(day1["settings"], work_root=tmp_path / "work2"))
+    fresh.run([day1["synth"].scans])
+    assert fresh.summary["reviews"]["imported"] == live.execute("SELECT COUNT(*) FROM doc_review").fetchone()[0]
+    assert build_report(fresh.con) == build_report(live)
+    for t in TABLES:
+        assert _dump(fresh.con, t) == _dump(live, t), t
+
+
+def test_oracle_rerun_keeps_machine_raw_and_review_final(day1, tmp_path):
+    """검수된 셀도 인식기를 돌린다: value_raw 는 오라클 값, value_final 은 검수값."""
+    con, answers = day1["pipe"].con, day1["answers"]
+    f = next(r for r in _haul_fields(con)
+             if (r["source"], r["template_name"], r["region"], r["field_name"], r["row_key"]) in answers)
+    truth = answers[(f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"])]
+    wrong = str(int(truth) + 1)
+    reviews = tmp_path / "reviews.jsonl"
+    reviews.write_bytes(day1["settings"].reviews.read_bytes())
+    append(reviews, Review(f["field_id"], "value", wrong, "kim"))             # 일부러 정답과 다르게
+    s = replace(day1["settings"], work_root=tmp_path / "work3", reviews=reviews)
+    pipe = Pipeline(s, recognizer=OracleRecognizer(answers))
+    pipe.run([day1["synth"].scans])
+    r = pipe.con.execute("SELECT * FROM doc_field WHERE field_id=?", (f["field_id"],)).fetchone()
+    assert (r["value_raw"], r["backend"], r["value_final"], r["review_status"]) == (truth, "oracle", wrong, "reviewed")
+    h = pipe.con.execute("SELECT * FROM prod_haul WHERE haul_id=?", (f["field_id"],)).fetchone()
+    assert (h["trips_raw"], h["trips"], h["review_status"]) == (int(truth), int(wrong), "reviewed")
+    # 교차검증: 기계 값 기준 횟수는 양쪽 다 적혀 있다
+    assert pipe.con.execute("SELECT COUNT(*) FROM xcheck_haul WHERE log_trips_raw IS NOT NULL "
+                            "AND matrix_trips_raw IS NOT NULL").fetchone()[0] > 0
+
+
+def test_save_for_unknown_field_only_records(day1):
+    """DB 에 없는 필드(다른 WORK_ROOT 의 것)도 파일과 doc_review 에는 남는다 — 나중에 그 페이지가 적재되면 붙는다."""
+    con, settings, site = day1["pipe"].con, day1["settings"], day1["pipe"].site
+    n = con.execute("SELECT COUNT(*) FROM doc_review").fetchone()[0]
+    out = save(con, site, settings, Review("0000000000000000-p1:haul:trips_day:0", "value", "3", "jp"))
+    assert out["applied"] is False
+    assert con.execute("SELECT COUNT(*) FROM doc_review").fetchone()[0] == n + 1

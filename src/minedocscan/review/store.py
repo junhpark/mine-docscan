@@ -200,3 +200,32 @@ def review_from_field(con: sqlite3.Connection, field_id: str, verdict: str, valu
                   bbox=[r["x0"], r["y0"], r["x1"], r["y1"]],
                   machine={"has_value": r["has_value_raw"], "value_raw": r["value_raw"], "backend": r["backend"],
                            "confidence": r["confidence"]})
+
+
+# ── 저장 ───────────────────────────────────────────────────────────────────
+def save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
+    """검수 한 건을 저장한다: 파일 추가 → doc_review → doc_field → 핸들러의 on_review(업무 테이블·그 날짜의 교차검증)
+    → 문서 상태. 파이프라인을 다시 돌리지 않아도 DB 가, 같은 파일로 처음부터 돌린 것과 같아진다 (불변식, 테스트로 고정).
+    """
+    from ..handlers import get_handler
+    from ..pipeline.runner import update_document_status
+
+    path = settings.reviews_path(site.root)
+    seq = append(path, review)                                   # 파일이 원본: 먼저 쓴다
+    upsert(con, "doc_review", review.db_row(seq))
+    row = con.execute("SELECT f.*, p.template_name, p.document_id FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id "
+                      "WHERE f.field_id = ?", (review.field_id,)).fetchone()
+    applied = False
+    if row is not None:
+        tpl = site.templates.get(row["template_name"])
+        handler = get_handler(tpl.handler if tpl else "generic")
+        frow = {k: row[k] for k in row.keys() if k not in ("template_name", "document_id")}
+        if frow["reviewed_by"] is not None:                      # 이미 검수가 덮인 행: 기계 상태로 되돌린 뒤 적용한다
+            frow.update(has_value=frow["has_value_raw"], value_final=handler.machine_final(frow))
+        eff = effective(con, field_ids=[review.field_id]).get(review.field_id, review)
+        upsert(con, "doc_field", apply_verdict(frow, eff))
+        handler.on_review(con, site, settings, review.field_id)
+        update_document_status(con, row["document_id"])
+        applied = True
+    con.commit()
+    return {"review_id": review.review_id, "seq": seq, "path": str(path), "applied": applied}
