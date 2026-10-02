@@ -164,8 +164,8 @@
         state.entered[fid] = { verdict: p.verdict, value: p.value };
       }
       if (item.cells.length > 1 && item.cells.every(c => state.entered[c.field_id] || c.review) && !item._counted) { item._counted = true; state.done += 1; }
-      msg('저장했습니다', true);
       next();
+      msg('저장했습니다', true);
     } catch (e) { msg(e.message); }
   }
 

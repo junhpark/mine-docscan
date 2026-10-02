@@ -57,6 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--answers", help="정답 JSON (synth 가 만드는 answers.json 형식)")
     g.add_argument("--inspection-csv", metavar="DIR", help="점검표 정답 CSV 폴더 (YYMMDD.csv)")
     p.add_argument("--template", help="--inspection-csv 가 가리키는 템플릿 (기본: 핸들러가 inspection 인 유일한 템플릿)")
+    p.add_argument("--target", choices=["final", "raw"], default="final",
+                   help="final = 최종값(교정·검수 후), raw = 기계가 읽은 값. 검수값과 비교할 때는 raw")
+    p.add_argument("--only-listed", action="store_true",
+                   help="정답에 있는 셀만 평가 (표본 검수로 만든 정답). 기본은 정답이 있는 표의 셀 전부(없는 셀은 빈 칸)")
 
     p = sub.add_parser("regress", parents=[common], help="사이트 팩 기준 수치와 비교 (실데이터 회귀)")
     p.add_argument("--update", action="store_true", help="지금 결과를 새 기준으로 저장")
@@ -197,26 +201,32 @@ def cmd_report(a) -> int:
 
 
 def cmd_eval(a) -> int:
-    from .evaluate.fields import evaluate_fields
+    from .evaluate.fields import evaluate_fields, evaluate_presence
     from .evaluate.inspection_csv import evaluate_inspection, load_answers
     from .recognize import load_answers_json
     from .store.db import open_db
 
     s = _settings(a)
     con = open_db(s.resolved_db_url)
+    kw = {"target": a.target, "only_listed": a.only_listed}
     if a.answers:
-        data = {"fields": evaluate_fields(con, load_answers_json(a.answers))}
+        data = {"fields": evaluate_fields(con, load_answers_json(a.answers), **kw)}
     else:
         site = _need_site(s)
         name = a.template or _only_inspection_template(site)
         answers = load_answers(a.inspection_csv, site.templates[name])
-        data = {"fields": evaluate_fields(con, answers),
+        data = {"fields": evaluate_fields(con, answers, **kw),
                 "insp_daily": evaluate_inspection(con, answers, site.templates[name])}
-    f = data["fields"]
-    lines = [f"필드 {f['n']}개: CER {f['cer']}, 필드 정확도 {f['field_accuracy']}, 자동 적재율 {f['auto_rate']}"
-             f" (DB 에 없는 정답 {f['answers_not_in_db']}개)"]
+    data["presence"] = evaluate_presence(con)
+    f, pr = data["fields"], data["presence"]
+    lines = [f"필드 {f['n']}개 ({a.target}): CER {f['cer']}, 필드 정확도 {f['field_accuracy']}, 자동 적재율 {f['auto_rate']}"
+             f" (DB 에 없는 정답 {f['answers_not_in_db']}개)",
+             f"  정답에 값이 있는 셀 {f['n_value']}개 정확도 {f['accuracy_value']}, 빈 칸 {f['n_empty']}개 정확도 {f['accuracy_empty']}"]
     for k, v in f["by_field_kind"].items():
-        lines.append(f"  {k}: n={v['n']} CER {v['cer']} 정확도 {v['field_accuracy']} 자동 {v['auto_rate']}")
+        lines.append(f"  {k}: n={v['n']} CER {v['cer']} 정확도 {v['field_accuracy']} (값 {v['accuracy_value']} / 빈 칸 "
+                     f"{v['accuracy_empty']}) 자동 {v['auto_rate']}")
+    lines.append(f"값 유무 판단 (검수 {pr['n']}셀): 정밀도 {pr['precision']}, 재현율 {pr['recall']} "
+                 f"(tp {pr['tp']}, fp {pr['fp']}, fn {pr['fn']}, tn {pr['tn']})")
     if "insp_daily" in data:
         d = data["insp_daily"]
         lines.append(f"점검 행 {d['rows']}개: 점검내역 CER {d['remark_corpus_cer']}, "

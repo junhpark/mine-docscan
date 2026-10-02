@@ -211,15 +211,22 @@ def save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
     from ..pipeline.runner import update_document_status
 
     path = settings.reviews_path(site.root)
+    row = con.execute("SELECT f.*, p.template_name, p.document_id, p.page_no, d.source_name FROM doc_field f "
+                      "JOIN doc_page p ON f.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
+                      "WHERE f.field_id = ?", (review.field_id,)).fetchone()
+    if row is not None and not review.source:                   # 문맥이 비어 있으면 DB 에서 채운다 (파일만 봐도 알 수 있게)
+        review.source, review.template, review.region = f"{row['source_name']}#{row['page_no']}", row["template_name"] or "", row["region"]
+        review.field_name, review.row_no, review.row_key = row["field_name"], row["row_no"], row["row_key"] or ""
+        review.bbox = [row["x0"], row["y0"], row["x1"], row["y1"]]
+        review.machine = review.machine or {"has_value": row["has_value_raw"], "value_raw": row["value_raw"],
+                                            "backend": row["backend"], "confidence": row["confidence"]}
     seq = append(path, review)                                   # 파일이 원본: 먼저 쓴다
     upsert(con, "doc_review", review.db_row(seq))
-    row = con.execute("SELECT f.*, p.template_name, p.document_id FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id "
-                      "WHERE f.field_id = ?", (review.field_id,)).fetchone()
     applied = False
     if row is not None:
         tpl = site.templates.get(row["template_name"])
         handler = get_handler(tpl.handler if tpl else "generic")
-        frow = {k: row[k] for k in row.keys() if k not in ("template_name", "document_id")}
+        frow = {k: row[k] for k in row.keys() if k not in ("template_name", "document_id", "page_no", "source_name")}
         if frow["reviewed_by"] is not None:                      # 이미 검수가 덮인 행: 기계 상태로 되돌린 뒤 적용한다
             frow.update(has_value=frow["has_value_raw"], value_final=handler.machine_final(frow))
         eff = effective(con, field_ids=[review.field_id]).get(review.field_id, review)

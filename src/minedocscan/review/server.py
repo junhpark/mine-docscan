@@ -132,6 +132,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(200, self.app.stats_json())
             elif u.path == "/crop":
                 self._send(200, self.app.crop_png(params), "image/png")
+            elif u.path == "/favicon.ico":
+                self._send(204, b"", "image/x-icon")
             else:
                 self._json(404, {"error": "없는 경로"})
         except ApiError as e:

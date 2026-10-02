@@ -45,12 +45,26 @@ def build_report(con: sqlite3.Connection) -> dict:
             "with_trips": one("SELECT COUNT(*) FROM prod_haul WHERE trips IS NOT NULL"),
         },
         "xcheck_haul": _pairs(con, "SELECT status, COUNT(*) FROM xcheck_haul GROUP BY 1 ORDER BY 1"),
+        # 일치율: 양쪽 다 횟수가 있는 칸 중 횟수가 같은 비율. 최종 값 기준과 기계 값 기준을 따로 (ADR 0007).
+        # 정확도가 아니다 — 두 문서를 같은 방식으로 틀리게 읽으면 일치로 잡힌다. 분모(칸 수)를 같이 본다.
+        "xcheck_agreement": {"final": _agreement(con, "log_trips", "matrix_trips"),
+                             "raw": _agreement(con, "log_trips_raw", "matrix_trips_raw")},
+        "reviews": {
+            "fields": one("SELECT COUNT(DISTINCT field_id) FROM doc_review"),
+            "fields_reviewed": one("SELECT COUNT(*) FROM doc_field WHERE review_status = 'reviewed'"),
+        },
         "assignments": {
             "n": one("SELECT COUNT(*) FROM eq_assignment_obs"),
             "header_mismatch": one("SELECT COUNT(*) FROM eq_assignment_obs WHERE header_mismatch = 1"),
         },
         "equipment": one("SELECT COUNT(*) FROM eq_equipment"),
     }
+
+
+def _agreement(con: sqlite3.Connection, log_col: str, matrix_col: str) -> dict:
+    both, same = con.execute(f"SELECT COUNT(*), COALESCE(SUM({log_col} = {matrix_col}), 0) FROM xcheck_haul "
+                             f"WHERE {log_col} IS NOT NULL AND {matrix_col} IS NOT NULL").fetchone()
+    return {"both": both, "same": same, "rate": None if not both else round(same / both, 4)}
 
 
 def xcheck_by_date(con: sqlite3.Connection) -> list[dict]:
@@ -81,6 +95,10 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
         f"판정 불가 {i['abnormal_undecided']}",
         f"운반 셀 {h['cells']}개 — 값 있음 {h['filled']} ({kv(h['filled_by_role'])}), 횟수 인식 {h['with_trips']}",
         "교차검증(일보↔행렬): " + kv(rep["xcheck_haul"]),
+        "횟수 일치율(양쪽 값 있는 칸): " + ", ".join(
+            f"{k} {a['same']}/{a['both']}" + ("" if a["rate"] is None else f" = {a['rate']}")
+            for k, a in rep["xcheck_agreement"].items()),
+        f"검수: 필드 {rep['reviews']['fields']}개 검수 기록, reviewed 상태 {rep['reviews']['fields_reviewed']}개",
         f"배차 관측 {rep['assignments']['n']}건 — 인쇄된 머리글과 다름 {rep['assignments']['header_mismatch']}건",
         f"장비 마스터 {rep['equipment']}대",
     ]
