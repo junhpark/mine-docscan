@@ -113,7 +113,13 @@ def test_train_from_crops_writes_a_card_without_images_or_reviewers(crops, tmp_p
     dates = {json.loads(x)["work_date"] for x in (crops["root"] / "crops-train" / "train" / "labels.jsonl").read_text().splitlines()}
     assert dt["train"]["dates"] + dt["val"]["dates"] == len(dates) and dt["synthetic"]["cells"] == 400
     assert card["validation"]["source"] == ("real" if dt["val"]["cells"] else "synthetic")
-    text = (d / "card.json").read_text(encoding="utf-8") + (d / "train-log.jsonl").read_text(encoding="utf-8")
+    # 검증 칸이 100개도 안 되면 오류가 0 이어도 기준을 정하지 않는다 (ADR 0012) — 3일치의 반이면 그렇다
+    aa = card["auto_accept"]
+    assert aa["min_auto"] == calib.MIN_AUTO
+    if card["validation"]["source"] == "real" and card["validation"]["cells"] < calib.MIN_AUTO:
+        assert aa["met"] is False and aa["threshold"] is None and aa["upper95"] is None
+        assert aa["reason"] == calib.why_no_threshold(aa["table"], aa["target"])
+    text =(d / "card.json").read_text(encoding="utf-8") + (d / "train-log.jsonl").read_text(encoding="utf-8")
     for forbidden in ("reviewer", '"jp"', "field_id", ":haul:", ":matrix:", "png", "base64"):
         assert forbidden not in text, forbidden
     log = [json.loads(x) for x in (d / "train-log.jsonl").read_text().splitlines()]

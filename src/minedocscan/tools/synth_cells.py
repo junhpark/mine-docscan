@@ -14,7 +14,8 @@
 인자로 받는다 — 실제 크롭의 규격에 맞춰 만들 수 있게. 칸은 doc_field 의 bbox 와 같은 뜻이다: 괘선으로 둘러싼 칸에서
 안쪽 여백(inset, 템플릿 기본 4 px)을 뺀 상자. 괘선은 그 바깥 inset 자리에 그린다. 같은 씨앗이면 같은 셀이 화소까지 같다.
 
-글자는 OpenCV 내장 글꼴을 한 글자씩 비틀어 그린다 (글꼴 파일·외부 데이터에 의존하지 않는다). 그래서 이 셀로 잴 수 있는
+글자는 자체 획 정의(tools/handfont.py)를 한 글자씩 흔들고 비틀어 그린다 (글꼴 파일·외부 데이터·OpenCV 의 내장 글꼴에 의존하지
+않는다 — OpenCV 5.0 에서 내장 글꼴의 모양이 바뀌어 판마다 다른 숫자가 그려졌다). 그래서 이 셀로 잴 수 있는
 것은 학습·추론 경로가 맞는지이지 손글씨 인식률이 아니다 (CLAUDE.md).
 """
 from __future__ import annotations
@@ -25,10 +26,9 @@ import cv2
 import numpy as np
 
 from ..imaging.cropspec import CropSpec
+from . import handfont
 
 KINDS = ("value", "x", "scribble", "note", "spill", "blank")
-FONTS = [cv2.FONT_HERSHEY_SIMPLEX, cv2.FONT_HERSHEY_DUPLEX, cv2.FONT_HERSHEY_COMPLEX, cv2.FONT_HERSHEY_TRIPLEX,
-         cv2.FONT_HERSHEY_SCRIPT_SIMPLEX, cv2.FONT_HERSHEY_SCRIPT_COMPLEX, cv2.FONT_HERSHEY_PLAIN]
 NOTE_WORDS = ["stop", "rain", "repair", "closed", "blast", "x", "move", "check", "late", "pump", "wait", "full"]
 
 
@@ -39,7 +39,7 @@ class CellParams:
     cell_w: int = 92                       # 칸(doc_field bbox) 폭 (템플릿 px, 200 dpi) — 실제 운반 칸은 괘선 사이 약 100 px
     cell_h: int = 21                       # 칸 높이 — 괘선 사이 28–30 px 에서 inset 을 뺀 것
     inset: int = 4                         # 괘선과 bbox 사이 (forms/template.Template.cells 의 inset)
-    value_h: tuple[float, float] = (0.6, 1.45)    # 가운데 값의 글자 높이 / 괘선 사이 높이. 1 을 넘으면 괘선을 넘는다
+    value_h: tuple[float, float] = (0.6, 1.2)     # 가운데 값의 글자 높이 / 괘선 사이 높이. 1 을 넘으면 괘선을 넘는다
     spec: CropSpec = field(default_factory=lambda: CropSpec("source", 1.5, None))
     source_dpi_ratio: float = 1.5          # 원본 해상도 / 템플릿 해상도 (300 / 200)
     p_value: float = 0.55                  # 가운데 칸에 값이 있는 몫
@@ -150,14 +150,14 @@ def make_cell(rng: np.random.Generator, params: CellParams, kind: str, neighbors
                  cv2.LINE_AA)
     style = _style(rng)
 
-    # 이웃 칸의 숫자: 칸보다 크게 써서 괘선을 넘어 들어온다. 넘어오는 것은 꼬리 쪽이다 (괘선 사이 높이의 35 % 까지)
+    # 이웃 칸의 숫자: 칸보다 크게 써서 괘선을 넘어 들어온다. 넘어오는 것은 꼬리 쪽이다 (괘선 사이 높이의 25 % 까지)
     if neighbors:
         sides = ["up", "down", "left", "right"]
         rng.shuffle(sides)
         for side in sides[: int(rng.integers(1, 4))]:
             text = random_value(rng, params.max_value)
             h = gh * rng.uniform(1.0, 1.5)
-            depth = gh * rng.uniform(0.05, 0.35)                           # 괘선에서 가운데 칸 안으로 들어오는 깊이
+            depth = gh * rng.uniform(0.05, 0.25)                           # 괘선에서 가운데 칸 안으로 들어오는 깊이
             if side == "up":
                 cx, cy = cw * 0.5 + jit(cw * 0.3), -ins + depth - h / 2
             elif side == "down":
@@ -209,34 +209,19 @@ def make_cell(rng: np.random.Generator, params: CellParams, kind: str, neighbors
 
 # ── 그리기 ─────────────────────────────────────────────────────────────────
 def _style(rng: np.random.Generator) -> dict:
-    """쓰는 사람마다 다른 버릇: 글꼴, 굵기, 기울기, 잉크 진하기."""
-    return {"font": FONTS[int(rng.integers(len(FONTS)))], "italic": bool(rng.random() < 0.3),
-            "thick": float(rng.uniform(0.9, 2.6)), "slant": float(rng.uniform(-0.35, 0.25)),
-            "ink": float(rng.uniform(0.45, 1.0)), "gap": float(rng.uniform(-0.12, 0.25))}
+    """쓰는 사람마다 다른 버릇: 숫자의 꼴, 굵기, 기울기, 잉크 진하기, 글자 사이."""
+    return {"variants": handfont.random_variants(rng),
+            # 기울기: 음수 = 앞으로(위가 오른쪽). 뒤로 많이 기울면 7 의 사선이 서서 1 과 같아진다 — 뒤로는 조금만
+            "thick": float(rng.uniform(1.0, 2.8)), "slant": float(rng.uniform(-0.35, 0.1)),
+            # 글자 사이: 글자 높이 대비. 획 글꼴은 "1" 의 폭이 거의 없어 음수면 두 숫자가 포개진다 (16 → 6) — 겹치지 않게
+            "ink": float(rng.uniform(0.45, 1.0)), "gap": float(rng.uniform(0.04, 0.28))}
 
 
 def _glyph(ch: str, height_px: float, style: dict, rng: np.random.Generator) -> np.ndarray:
-    """한 글자를 따로 그려 비튼다. 결과는 잉크 마스크(0–1)."""
-    font = style["font"] | (cv2.FONT_ITALIC if style["italic"] else 0)
-    base_h = cv2.getTextSize("8", font, 1.0, 1)[0][1]
-    scale = max(0.2, height_px / max(1, base_h))
-    thick = max(1, int(round(style["thick"] * height_px / 22.0 * rng.uniform(0.8, 1.25))))
-    (tw, th), bl = cv2.getTextSize(ch, font, scale, thick)
-    m = int(height_px * 0.6) + thick * 2
-    g8 = np.zeros((th + bl + 2 * m, tw + 2 * m), np.uint8)               # putText 는 8비트 그림에만 그린다 (OpenCV 5)
-    cv2.putText(g8, ch, (m, m + th), font, scale, 255, thick, cv2.LINE_AA)
-    g = g8.astype(np.float32) / 255.0
-    # 글자마다 기울기·회전·크기·찌그러짐
-    hh, ww = g.shape
-    ang = float(rng.uniform(-12, 12))
-    sx, sy = float(rng.uniform(0.8, 1.2)), float(rng.uniform(0.85, 1.15))
-    shear = style["slant"] + float(rng.uniform(-0.12, 0.12))
-    a = cv2.getRotationMatrix2D((ww / 2, hh / 2), ang, 1.0)
-    a = np.vstack([a, [0, 0, 1]]) @ np.array([[sx, shear, -shear * hh / 2 + (1 - sx) * ww / 2],
-                                              [0, sy, (1 - sy) * hh / 2], [0, 0, 1]])
-    g = cv2.warpAffine(g, a[:2], (ww, hh), flags=cv2.INTER_LINEAR, borderValue=0)
-    g = _elastic(g, rng, alpha=height_px * 0.06, sigma=max(2.0, height_px * 0.12))
-    return g
+    """한 글자를 자체 획 정의(tools/handfont.py)로 그려 비튼다 — OpenCV 내장 글꼴을 쓰지 않으므로 판에 상관없이 같다.
+    결과는 잉크 마스크(0–1)."""
+    g = handfont.draw_glyph(ch, height_px, style, rng)
+    return _elastic(g, rng, alpha=height_px * 0.06, sigma=max(2.0, height_px * 0.12))
 
 
 def _elastic(g: np.ndarray, rng: np.random.Generator, alpha: float, sigma: float) -> np.ndarray:
@@ -277,15 +262,14 @@ def _ink_width(g: np.ndarray) -> float:
 
 
 def _draw_text_line(ink: np.ndarray, words: str, x_start: float, cy: float, height: float, rng, style: dict) -> None:
+    """메모 한 줄: 낱말마다 이어 쓴 꼴(tools/handfont.draw_word)로, 낱말 사이는 띄운다."""
     x = x_start
-    for ch in words:
-        if ch == " ":
-            x += height * 0.45
-            continue
-        g = _glyph(ch, height * float(rng.uniform(0.8, 1.0)), style, rng)
+    for word in words.split():
+        g = handfont.draw_word(word, height * float(rng.uniform(0.8, 1.0)), style, rng)
+        g = _elastic(g, rng, alpha=height * 0.04, sigma=max(2.0, height * 0.12))
         w = _ink_width(g)
         _paste(ink, g, x + w / 2, cy, style["ink"])
-        x += w + height * 0.05
+        x += w + height * 0.45
 
 
 def _scribble(ink: np.ndarray, cx: float, cy: float, height: float, rng, style: dict) -> None:

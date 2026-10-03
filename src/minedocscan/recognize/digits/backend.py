@@ -82,6 +82,9 @@ class DigitsRecognizer:
         return {"backend": self.name, "model": c["name"], "path": str(self.model_dir), "spec": self.spec.describe(),
                 "auto_accept_conf": None if math.isinf(self.threshold) else self.threshold,
                 "auto_accept_source": self.threshold_source, "temperature": self.temperature,
+                # 카드의 기준을 쓸 때만: 검증에서 그 기준이 말해 주는 자동 적재 오류율의 95 % 상한 (설정으로 준 기준에는 근거가 없다)
+                "auto_accept_upper95": (c.get("auto_accept") or {}).get("upper95") if self.threshold_source == "card" else None,
+                "auto_accept_reason": (c.get("auto_accept") or {}).get("reason") if self.threshold_source == "card" else None,
                 "train_cells": c["data"]["train"]["cells"], "synthetic_cells": c["data"]["synthetic"]["cells"],
                 "created_at": c["created_at"]}
 

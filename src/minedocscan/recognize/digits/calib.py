@@ -108,12 +108,36 @@ def threshold_table(preds: list[tuple[str, float]], truths: list[str], trips_max
     return rows
 
 
-def choose_threshold(table: list[dict], target: float) -> dict | None:
-    """오류율이 목표 이하인 가장 낮은 임계값의 행. 자동 적재가 하나도 없는 임계값은 고르지 않는다. 없으면 None."""
+# 기준을 정하려면 그 임계값에서 자동 적재된 검증 칸이 이만큼은 있어야 한다. 13칸 중 오류 0 으로 정해진 기준(윌슨 95 % 상한 23 %)이
+# 1 % 목표를 충족한 것으로 보고된 일이 있었다 (첫 실데이터 시험, 2026-10). 오류 0 일 때 n칸이 말해 주는 상한은 약 3.84 / (n + 3.84):
+# 100칸이면 3.7 %, 300칸이면 1.3 %, 380칸이면 1 %. 100 은 "기준을 정하는 것 자체가 의미 있는" 하한이고, 목표를 뒷받침하는 수가 아니다 —
+# 그래서 기준 옆에 상한을 늘 같이 적는다 (카드 auto_accept.upper95, info, recognizer list).
+MIN_AUTO = 100
+
+
+def zero_error_cells_for(target: float, z: float = 1.96) -> int:
+    """오류 0 으로 윌슨 상한이 target 이하가 되려면 필요한 칸 수."""
+    return math.ceil(z * z * (1 - target) / target)
+
+
+def choose_threshold(table: list[dict], target: float, min_auto: int = MIN_AUTO) -> dict | None:
+    """오류율이 목표 이하인 가장 낮은 임계값의 행 (tasks/0003 4.6). 자동 적재된 칸이 min_auto 미만인 임계값은 고르지 않는다
+    — 칸이 적으면 오류 0 이어도 목표를 말할 수 없다. 없으면 None."""
     for r in sorted(table, key=lambda r: r["threshold"]):
-        if r["auto"] > 0 and r["errors"] / r["auto"] <= target:
+        if r["auto"] >= max(1, min_auto) and r["errors"] / r["auto"] <= target:
             return r
     return None
+
+
+def why_no_threshold(table: list[dict], target: float, min_auto: int = MIN_AUTO) -> str:
+    """choose_threshold 가 None 일 때의 이유 (카드·명령줄에 그대로 적는다)."""
+    meets = [r for r in table if r["auto"] > 0 and r["errors"] / r["auto"] <= target]
+    if meets and all(r["auto"] < min_auto for r in meets):
+        best = max(meets, key=lambda r: r["auto"])
+        return (f"검증에서 자동 적재된 칸이 {min_auto}칸 미만이다 (목표를 만족한 임계값 중 가장 많은 것이 {best['auto']}칸, "
+                f"오류 {best['errors']} — 95 % 상한 {best['error_ci95'][1]:.1%}). 오류 0 으로 목표 {target:.1%} 를 뒷받침하려면 "
+                f"약 {zero_error_cells_for(target)}칸이 필요하다")
+    return "검증 셀에서 목표를 만족하는 임계값이 없다"
 
 
 def score(preds: list[tuple[str, float]], truths: list[str]) -> dict:

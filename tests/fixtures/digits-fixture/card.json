@@ -1,9 +1,9 @@
 {
  "name": "digits-fixture",
- "created_at": "2026-10-03T14:10:56Z",
+ "created_at": "2026-10-03T16:08:32Z",
  "code_version": {
   "minedocscan": "0.2.0",
-  "git": "1bbd889"
+  "git": "7df737a"
  },
  "spec": {
   "res": "source",
@@ -41,6 +41,7 @@
   "synthetic": 8000,
   "val_share": 0.2,
   "target_auto_error": 0.005,
+  "min_val_auto": 100,
   "geometry": [
    [
     112,
@@ -101,17 +102,17 @@
   "source": "synthetic",
   "cells": 950,
   "excluded_no_ink": 0,
-  "best_step": 2000,
+  "best_step": 2500,
   "score": {
    "all": {
     "n": 950,
-    "correct": 939,
-    "accuracy": 0.9884
+    "correct": 938,
+    "accuracy": 0.9874
    },
    "value": {
     "n": 550,
-    "correct": 540,
-    "accuracy": 0.9818
+    "correct": 539,
+    "accuracy": 0.98
    },
    "empty": {
     "n": 400,
@@ -124,8 +125,8 @@
     "accuracy": null
    }
   },
-  "train_seconds": 92.9,
-  "total_seconds": 114.4,
+  "train_seconds": 91.9,
+  "total_seconds": 112.2,
   "export_check": {
    "max_abs_diff": 1.430511474609375e-05,
    "same_answers": true,
@@ -133,31 +134,35 @@
   },
   "calibration": {
    "cells": 950,
-   "nll_at_1": 0.04609,
-   "nll": 0.04592
+   "nll_at_1": 0.04915,
+   "nll": 0.04868
   }
  },
- "temperature": 1.05,
+ "temperature": 1.1,
  "auto_accept": {
   "target": 0.005,
   "threshold": 0.8,
   "met": true,
   "reason": null,
   "trips_max": null,
+  "min_auto": 100,
+  "auto": 928,
+  "errors": 3,
+  "upper95": 0.0095,
   "basis": "검증 셀 (synthetic)",
   "rule": "오류율(자동 적재된 칸 중 정답과 다른 비율)이 목표 이하인 가장 낮은 임계값 (tasks/0003 4.6)",
   "table": [
    {
     "threshold": 0.5,
-    "auto": 945,
-    "auto_value": 547,
-    "auto_empty": 398,
-    "auto_rate": 0.9947,
-    "errors": 8,
-    "error_rate": 0.0085,
+    "auto": 947,
+    "auto_value": 548,
+    "auto_empty": 399,
+    "auto_rate": 0.9968,
+    "errors": 10,
+    "error_rate": 0.0106,
     "error_ci95": [
-     0.0043,
-     0.0166
+     0.0057,
+     0.0193
     ]
    },
    {
@@ -166,19 +171,19 @@
     "auto_value": 545,
     "auto_empty": 398,
     "auto_rate": 0.9926,
-    "errors": 7,
-    "error_rate": 0.0074,
+    "errors": 8,
+    "error_rate": 0.0085,
     "error_ci95": [
-     0.0036,
-     0.0152
+     0.0043,
+     0.0167
     ]
    },
    {
     "threshold": 0.7,
-    "auto": 938,
-    "auto_value": 540,
+    "auto": 937,
+    "auto_value": 539,
     "auto_empty": 398,
-    "auto_rate": 0.9874,
+    "auto_rate": 0.9863,
     "errors": 6,
     "error_rate": 0.0064,
     "error_ci95": [
@@ -188,36 +193,36 @@
    },
    {
     "threshold": 0.8,
-    "auto": 932,
-    "auto_value": 534,
-    "auto_empty": 398,
-    "auto_rate": 0.9811,
-    "errors": 4,
-    "error_rate": 0.0043,
+    "auto": 928,
+    "auto_value": 532,
+    "auto_empty": 396,
+    "auto_rate": 0.9768,
+    "errors": 3,
+    "error_rate": 0.0032,
     "error_ci95": [
-     0.0017,
-     0.011
+     0.0011,
+     0.0095
     ]
    },
    {
     "threshold": 0.85,
-    "auto": 927,
-    "auto_value": 530,
-    "auto_empty": 397,
-    "auto_rate": 0.9758,
-    "errors": 4,
-    "error_rate": 0.0043,
+    "auto": 924,
+    "auto_value": 528,
+    "auto_empty": 396,
+    "auto_rate": 0.9726,
+    "errors": 3,
+    "error_rate": 0.0032,
     "error_ci95": [
-     0.0017,
-     0.011
+     0.0011,
+     0.0095
     ]
    },
    {
     "threshold": 0.9,
-    "auto": 923,
-    "auto_value": 526,
-    "auto_empty": 397,
-    "auto_rate": 0.9716,
+    "auto": 921,
+    "auto_value": 525,
+    "auto_empty": 396,
+    "auto_rate": 0.9695,
     "errors": 3,
     "error_rate": 0.0033,
     "error_ci95": [
@@ -227,10 +232,10 @@
    },
    {
     "threshold": 0.93,
-    "auto": 917,
-    "auto_value": 521,
-    "auto_empty": 396,
-    "auto_rate": 0.9653,
+    "auto": 915,
+    "auto_value": 520,
+    "auto_empty": 395,
+    "auto_rate": 0.9632,
     "errors": 3,
     "error_rate": 0.0033,
     "error_ci95": [
@@ -240,93 +245,93 @@
    },
    {
     "threshold": 0.95,
-    "auto": 907,
+    "auto": 905,
     "auto_value": 511,
-    "auto_empty": 396,
-    "auto_rate": 0.9547,
-    "errors": 2,
-    "error_rate": 0.0022,
+    "auto_empty": 394,
+    "auto_rate": 0.9526,
+    "errors": 3,
+    "error_rate": 0.0033,
     "error_ci95": [
-     0.0006,
-     0.008
+     0.0011,
+     0.0097
     ]
    },
    {
     "threshold": 0.97,
-    "auto": 889,
-    "auto_value": 498,
-    "auto_empty": 391,
-    "auto_rate": 0.9358,
-    "errors": 1,
-    "error_rate": 0.0011,
+    "auto": 895,
+    "auto_value": 502,
+    "auto_empty": 393,
+    "auto_rate": 0.9421,
+    "errors": 3,
+    "error_rate": 0.0034,
     "error_ci95": [
-     0.0002,
-     0.0063
+     0.0011,
+     0.0098
     ]
    },
    {
     "threshold": 0.98,
-    "auto": 878,
-    "auto_value": 490,
-    "auto_empty": 388,
-    "auto_rate": 0.9242,
-    "errors": 1,
-    "error_rate": 0.0011,
+    "auto": 885,
+    "auto_value": 493,
+    "auto_empty": 392,
+    "auto_rate": 0.9316,
+    "errors": 3,
+    "error_rate": 0.0034,
     "error_ci95": [
-     0.0002,
-     0.0064
+     0.0012,
+     0.0099
     ]
    },
    {
     "threshold": 0.99,
-    "auto": 862,
-    "auto_value": 476,
-    "auto_empty": 386,
-    "auto_rate": 0.9074,
-    "errors": 1,
-    "error_rate": 0.0012,
+    "auto": 855,
+    "auto_value": 470,
+    "auto_empty": 385,
+    "auto_rate": 0.9,
+    "errors": 3,
+    "error_rate": 0.0035,
     "error_ci95": [
-     0.0002,
-     0.0065
+     0.0012,
+     0.0103
     ]
    },
    {
     "threshold": 0.995,
-    "auto": 829,
-    "auto_value": 446,
-    "auto_empty": 383,
-    "auto_rate": 0.8726,
-    "errors": 0,
-    "error_rate": 0.0,
+    "auto": 824,
+    "auto_value": 440,
+    "auto_empty": 384,
+    "auto_rate": 0.8674,
+    "errors": 2,
+    "error_rate": 0.0024,
     "error_ci95": [
-     0.0,
-     0.0046
+     0.0007,
+     0.0088
     ]
    },
    {
     "threshold": 0.998,
-    "auto": 761,
-    "auto_value": 395,
-    "auto_empty": 366,
-    "auto_rate": 0.8011,
+    "auto": 712,
+    "auto_value": 343,
+    "auto_empty": 369,
+    "auto_rate": 0.7495,
     "errors": 0,
     "error_rate": 0.0,
     "error_ci95": [
      0.0,
-     0.005
+     0.0054
     ]
    },
    {
     "threshold": 0.999,
-    "auto": 548,
-    "auto_value": 274,
-    "auto_empty": 274,
-    "auto_rate": 0.5768,
+    "auto": 411,
+    "auto_value": 167,
+    "auto_empty": 244,
+    "auto_rate": 0.4326,
     "errors": 0,
     "error_rate": 0.0,
     "error_ci95": [
      0.0,
-     0.007
+     0.0093
     ]
    }
   ]
@@ -338,5 +343,5 @@
   "numpy": "2.4.6",
   "opencv": "5.0.0"
  },
- "model_sha256": "8f251a5a88617e1580769e9ec69c54fd80a0bac57a1b286d87a016134fb09f08"
+ "model_sha256": "c2d928eb3044859c116f15ec6fae75778bc34bf99b33375f01e98416fda721fe"
 }

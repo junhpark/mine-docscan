@@ -165,6 +165,17 @@ def test_info_shows_backend_and_model(low_synth, tmp_path, capsys):
     assert d["synthetic_cells"] > 0 and d["train_cells"] == 0
     assert info["recognizer"]["by_kind"]["handwritten_text"]["backend"] == "null"
     assert "digits" in info["backends"]["recognizers"]
+    # 카드의 기준이면 그 기준의 검증 오류율 95 % 상한을 같이 보인다 (기준만 보고 믿지 않도록)
+    card = json.loads((FIXTURE_MODEL / "card.json").read_text(encoding="utf-8"))["auto_accept"]
+    assert d["auto_accept_source"] == "card" and d["auto_accept_upper95"] == card["upper95"] < 0.02
+    assert card["auto"] >= card["min_auto"] == 100
+    assert main(["info", "--config", str(cfg), "--site", str(low_synth.site)]) == 0
+    assert f"95 % 상한 {card['upper95']:.1%}" in capsys.readouterr().out
+    # 설정으로 준 기준에는 검증 근거가 없다 — 상한을 보이지 않는다
+    cfg.write_text(cfg.read_text(encoding="utf-8") + "auto_accept_conf = 0.9\n", encoding="utf-8")
+    assert main(["info", "--config", str(cfg), "--site", str(low_synth.site), "--json"]) == 0
+    d = json.loads(capsys.readouterr().out)["recognizer"]["by_kind"]["handwritten_number"]
+    assert d["auto_accept_conf"] == 0.9 and d["auto_accept_source"] == "config" and d["auto_accept_upper95"] is None
 
 
 def test_invariant_holds_with_digits_and_range_is_checked(low_synth, tmp_path):

@@ -92,6 +92,7 @@ class TrainArgs:
     seed: int = 0
     val_share: float = 0.2
     target_auto_error: float = 0.01
+    min_val_auto: int = calib.MIN_AUTO      # 기준을 정하는 데 필요한, 그 임계값에서 자동 적재된 검증 칸의 최소 수
     geometry: list[tuple[int, int]] | None = None     # 합성 칸 크기 (실제 셀이 없을 때). None 이면 DEFAULT_GEOMETRY
     channels: tuple[int, int, int, int, int] = (16, 32, 64, 64, 96)
     eval_every: int = 500
@@ -374,8 +375,8 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
         preds = calib.predict(list(cv_logits), temp)
         pc = [(a, c) for a, c, _cand in preds]
         table = calib.threshold_table(pc, va_y, trips_max)
-        chosen = calib.choose_threshold(table, args.target_auto_error)
-        reason = None if chosen else "검증 셀에서 목표를 만족하는 임계값이 없다"
+        chosen = calib.choose_threshold(table, args.target_auto_error, args.min_val_auto)
+        reason = None if chosen else calib.why_no_threshold(table, args.target_auto_error, args.min_val_auto)
         if real_tr and not real_va:
             # 현장 글씨로 학습했는데 현장 글씨의 검증 날짜가 없다: 합성 셀의 수치로 현장의 기준을 정하지 않는다 (4.6)
             chosen, reason = None, "실제 검증 날짜의 셀이 없어 기준을 정하지 않았다 (합성 셀의 수치는 참고만)"
@@ -415,6 +416,10 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
             "temperature": temp,
             "auto_accept": {"target": args.target_auto_error, "threshold": None if chosen is None else chosen["threshold"],
                             "met": chosen is not None, "reason": reason, "trips_max": trips_max,
+                            "min_auto": args.min_val_auto,
+                            "auto": None if chosen is None else chosen["auto"],
+                            "errors": None if chosen is None else chosen["errors"],
+                            "upper95": None if chosen is None else chosen["error_ci95"][1],
                             "basis": f"검증 셀 ({val_source})",
                             "rule": "오류율(자동 적재된 칸 중 정답과 다른 비율)이 목표 이하인 가장 낮은 임계값 (tasks/0003 4.6)",
                             "table": table},
@@ -433,7 +438,7 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     progress(f"모델: {out_dir} · 검증 {val_source} {len(va_y)}셀 · 온도 {temp:g} · 자동 적재 기준 "
-             f"{f'없음 ({reason})' if chosen is None else chosen['threshold']} · "
+             f"{f'없음 ({reason})' if chosen is None else _with_upper(chosen)} · "
              f"{time.time() - t_start:.0f}s")
     return card
 
@@ -467,6 +472,10 @@ def export_onnx(torch, net, path: Path) -> str:
         with redirect_stdout(io.StringIO()):
             torch.onnx.export(net, (x,), str(path), **(common | {"opset_version": 18}), dynamo=True, **extra)
         return "dynamo, opset 18"
+
+
+def _with_upper(row: dict) -> str:
+    return f"{row['threshold']} (자동 적재 {row['auto']}칸 중 오류 {row['errors']}, 95 % 상한 {row['error_ci95'][1]:.1%})"
 
 
 def _check_export(torch, channels) -> None:

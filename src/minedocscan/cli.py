@@ -141,6 +141,8 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--val-share", type=float, default=0.2, help="검증으로 떼는 train 날짜의 비율 (기본 0.2)")
     n.add_argument("--target-auto-error", type=float, default=0.01,
                    help="자동 적재 오류율의 목표 (검증 날짜, 기본 0.01). 이 이하인 가장 낮은 임계값을 고른다")
+    n.add_argument("--min-val-auto", type=int, default=100,
+                   help="기준을 정하려면 그 임계값에서 자동 적재된 검증 칸이 이만큼은 있어야 한다 (기본 100). 모자라면 자동 적재 없음")
     n.add_argument("--steps", type=int, default=2500, help="학습 스텝 (배치 64, 기본 2500 — CPU 4코어에서 약 1분 반)")
     n.add_argument("--synthetic-geometry", metavar="WxH[,WxH…]",
                    help="합성 칸 크기(템플릿 px, doc_field bbox). 실제 셀이 없을 때만 쓴다 (있으면 실제 칸 크기). 기본 92x21")
@@ -200,7 +202,9 @@ def cmd_info(a) -> int:
     else:
         for kind, d in rec["by_kind"].items():
             m = (f" — 모델 {d['model']} ({d['path']}), 규격 {d['spec']}, 자동 적재 기준 "
-                 f"{d['auto_accept_conf'] if d['auto_accept_conf'] is not None else '없음'} ({d['auto_accept_source']}), "
+                 f"{d['auto_accept_conf'] if d['auto_accept_conf'] is not None else '없음'} ({d['auto_accept_source']}"
+                 + (f", 검증 오류율 95 % 상한 {d['auto_accept_upper95']:.1%}" if d.get("auto_accept_upper95") is not None else "")
+                 + "), "
                  f"학습 셀 {d['train_cells']} + 합성 {d['synthetic_cells']}") if "model" in d else ""
             lines.append(f"인식기 [{kind}]: {d['backend']}{m}")
     if site is not None:
@@ -552,7 +556,8 @@ def cmd_recognizer(a) -> int:
         site = _need_site(s) if (s.site or not a.out) else None
         out = Path(a.out) if a.out else models_dir(site.root) / a.name
         args = TrainArgs(name=a.name, steps=a.steps, synthetic=a.synthetic, seed=a.seed, val_share=a.val_share,
-                         target_auto_error=a.target_auto_error, geometry=_geometry(a.synthetic_geometry))
+                         target_auto_error=a.target_auto_error, min_val_auto=a.min_val_auto,
+                         geometry=_geometry(a.synthetic_geometry))
         trips_max = site.option("haul", "trips_max") if site else None
         try:
             card = train(a.crops, out, args, split_salt=site.split_salt if site else "synthetic",
@@ -561,7 +566,8 @@ def cmd_recognizer(a) -> int:
             raise SystemExit(str(e)) from e
         v = card["validation"]
         aa = card["auto_accept"]
-        thr = aa["threshold"] if aa["met"] else f"없음 ({aa.get('reason') or '목표를 만족하는 임계값이 없다'} — 자동 적재하지 않는다)"
+        thr = (f"{aa['threshold']} (검증에서 자동 적재 {aa['auto']}칸 중 오류 {aa['errors']}, 오류율 95 % 상한 {aa['upper95']:.1%})"
+               if aa["met"] else f"없음 ({aa.get('reason') or '목표를 만족하는 임계값이 없다'} — 자동 적재하지 않는다)")
         _emit(a, {"model": str(out), "card": card},
               f"모델을 만들었습니다: {out}\n"
               f"  검증({v['source']}) {v['cells']}셀: 값 있는 칸 {v['score']['value']['accuracy']}, "

@@ -234,7 +234,8 @@ def list_models(site_root: str | Path) -> list[dict]:
             continue
         aa, v, dt = card["auto_accept"], card["validation"], card["data"]
         row.update(created_at=card["created_at"], spec=CropSpec.from_dict(card["spec"]).describe(),
-                   threshold=aa["threshold"] if aa.get("met") else "없음", train_cells=dt["train"]["cells"],
+                   threshold=(f"{aa['threshold']} (상한 {aa['upper95']:.1%})" if aa.get("upper95") is not None
+                              else aa["threshold"]) if aa.get("met") else "없음", train_cells=dt["train"]["cells"],
                    train_dates=dt["train"]["dates"], synthetic_cells=dt["synthetic"]["cells"], val_source=v["source"],
                    val_cells=v["cells"], val_value_acc=v["score"]["value"]["accuracy"],
                    val_empty_acc=v["score"]["empty"]["accuracy"])

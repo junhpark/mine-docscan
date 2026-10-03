@@ -151,9 +151,17 @@ def test_threshold_table_by_hand():
     assert (rows[0.9]["auto"], rows[0.9]["errors"], rows[0.9]["auto_rate"]) == (4, 1, round(4 / 7, 4))
     assert rows[0.9]["auto_value"] == 3 and rows[0.9]["auto_empty"] == 1
     assert (rows[0.5]["auto"], rows[0.5]["errors"]) == (5, 1) and (rows[0.98]["auto"], rows[0.98]["errors"]) == (1, 0)
-    assert calib.choose_threshold(list(rows.values()), 0.01)["threshold"] == 0.98
-    assert calib.choose_threshold(list(rows.values()), 0.25)["threshold"] == 0.5
-    assert calib.choose_threshold([r | {"errors": r["auto"]} for r in rows.values()], 0.01) is None
+    assert calib.choose_threshold(list(rows.values()), 0.01, min_auto=1)["threshold"] == 0.98
+    assert calib.choose_threshold(list(rows.values()), 0.25, min_auto=1)["threshold"] == 0.5
+    assert calib.choose_threshold(list(rows.values()), 0.25, min_auto=5)["threshold"] == 0.5      # 0.5 에서 자동 5칸
+    assert calib.choose_threshold(list(rows.values()), 0.25, min_auto=6) is None
+    assert calib.choose_threshold([r | {"errors": r["auto"]} for r in rows.values()], 0.01, min_auto=1) is None
+    # 기본은 자동 적재된 검증 칸이 100칸 이상이어야 한다: 칸이 적으면 오류 0 이어도 기준을 정하지 않고 이유와 상한을 말한다
+    assert calib.choose_threshold(list(rows.values()), 0.01) is None
+    why = calib.why_no_threshold(list(rows.values()), 0.01)
+    assert "100칸 미만" in why and "1칸" in why and "381칸" in why
+    assert calib.why_no_threshold([r | {"errors": r["auto"]} for r in rows.values()], 0.01) == "검증 셀에서 목표를 만족하는 임계값이 없다"
+    assert calib.zero_error_cells_for(0.01) == 381 and calib.wilson(0, 381)[1] <= 0.01 < calib.wilson(0, 380)[1]
     # 범위 밖(trips_max)은 자동 적재 대상이 아니다
     assert calib.threshold_table(preds, truth, trips_max=10, grid=(0.5,))[0]["auto"] == 4
     lo, hi = calib.wilson(1, 4)

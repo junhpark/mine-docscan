@@ -490,18 +490,19 @@ def _fill_inspection(blank, spec, dt, rng) -> np.ndarray:
 
 
 def _rough_number(img: np.ndarray, text: str, bbox, rng) -> None:
-    """낮은 칸의 거친 숫자: 칸 높이의 1.0–1.35배로 써서 위아래 괘선을 넘는다. 가로로는 칸 안에 머문다
-    (imaging/blobs.py 가 가로로 칸 폭의 절반까지 붙여 묶기 때문 — 이웃 칸 숫자와 한 덩어리가 되면 메모로 판정된다)."""
+    """낮은 칸의 거친 숫자: 칸 높이의 1.0–1.25배로 써서 위아래 괘선을 넘는다. 가로로는 칸 안에 머문다
+    (imaging/blobs.py 가 가로로 칸 폭의 절반까지 붙여 묶기 때문 — 이웃 칸 숫자와 한 덩어리가 되면 메모로 판정된다).
+    세로로 더 넘치면 윗칸·아랫칸의 숫자와 붙어 한 덩어리가 되고, 그러면 이 칸은 값 없음으로 판정된다 (1.35배·±3 px 에서
+    받침 있는 1 이 윗칸 9 에 붙어 사라진 일이 있었다) — oracle 로 CER 0 을 확인하는 양식이라 그 경우는 만들지 않는다."""
     x0, y0, x1, y1 = bbox
     ch = y1 - y0
-    h = ch * float(rng.uniform(1.0, 1.35))
-    cx, cy = (x0 + x1) / 2 + rng.uniform(-5, 5), (y0 + y1) / 2 + rng.uniform(-3, 3)
+    h = ch * float(rng.uniform(1.0, 1.25))
+    cx, cy = (x0 + x1) / 2 + rng.uniform(-5, 5), (y0 + y1) / 2 + rng.uniform(-2, 2)
     m = int(h * 1.5)
     ox, oy = int(cx) - m, int(cy) - m
     ink = np.zeros((2 * m, 2 * m), np.float32)
     style = synth_cells._style(rng)
-    style.update(font=int(rng.choice([cv2.FONT_HERSHEY_SIMPLEX, cv2.FONT_HERSHEY_SCRIPT_SIMPLEX, cv2.FONT_HERSHEY_DUPLEX])),
-                 gap=float(rng.uniform(-0.05, 0.1)), ink=float(rng.uniform(0.75, 1.0)))
+    style.update(gap=float(rng.uniform(0.04, 0.15)), ink=float(rng.uniform(0.75, 1.0)))
     synth_cells._draw_number(ink, text, cx - ox, cy - oy, h, rng, style)
     _composite(img, ink, ox, oy, int(rng.integers(20, 70)))
 
