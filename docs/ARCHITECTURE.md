@@ -248,11 +248,13 @@ class Corrector(Protocol):
 - 답 (ADR 0012): 숫자열(앞의 0 을 뗀다) · 빈 칸 `""` (X 표·지운 것·이웃 칸 글씨·메모) · 거절 `"?"`. 신뢰도 = 그 답으로 접히는 경로의 확률 합(빔 탐색)
   을 온도로 보정한 것. 후보 상위 5개. `Recognition.answer` 에 답의 종류를, `threshold` 에 자동 적재 기준을 담는다.
 - 자동 적재 (`handlers/base.number_status`): 숫자열(범위 안)·빈 칸은 신뢰도 ≥ 기준이면 자동 적재(빈 칸은 `has_value_raw` 0),
-  아니면 값 있음 + 검수 대기. 범위 밖(`site.toml [haul] trips_max`)과 거절은 늘 검수 대기. 잉크 판정이 "값 없음"인 칸은 인식기에 가지 않는다.
+  아니면 값 있음 + 검수 대기. 거절은 늘 검수 대기, 운반 횟수 칸(운반 핸들러의 `region`)은 범위 밖(`site.toml [haul] trips_max`)도 늘 검수 대기.
+  잉크 판정이 "값 없음"인 칸은 인식기에 가지 않는다.
   답의 종류를 말하지 않는 백엔드(`null`·`oracle`)는 예전 규칙.
 - 학습 (`recognize/digits/train.py`, 선택 의존성 `[train]` — torch 는 여기서만): `review export-crops` 의 크롭 + 합성 셀(`tools/synth_cells.py`,
   실제 크롭의 규격·칸 크기로)을 배치마다 반반. test 줄이 있거나 규격이 섞인 폴더는 거절. 검증은 train 날짜 안에서 날짜 단위(소금값 + `":val"`).
-  ONNX 로 내보낸 뒤 그 파일을 OpenCV 로 다시 읽어 검증 셀에서 온도·자동 적재 기준(오류율 ≤ 목표인 가장 낮은 임계값)·성적을 정해 카드에 적는다.
+  ONNX 로 내보낸 뒤 그 파일을 OpenCV 로 다시 읽어 검증 셀(잉크가 있던 칸)에서 온도·자동 적재 기준(오류율 ≤ 목표인 가장 낮은 임계값)·성적을 정해
+  카드에 적는다. 검증 날짜의 실제 셀이 없으면 기준을 정하지 않는다(자동 적재 없음).
 
 ### 참조한 특허 세 건이 놓이는 자리
 
@@ -284,7 +286,8 @@ class Corrector(Protocol):
 
 **평가셋 분할**: 날짜 단위로 `test` / `train` 을 나누고, 어느 날짜가 `test` 인지는 날짜와 사이트 팩의 소금값(`[eval] split_salt`, `test_share`)만으로 정한다
 (`evaluate/split.py`, ADR 0009). `review export-answers --split`, `eval --split`, `review export-crops --split` 이 둘을 섞지 않는다.
-`test` 는 학습·문구 사전·임계값 조정에 쓰지 않는다. 내보낸 크롭(`OUT/<split>/<kind>/<field_id>.png` + `labels.jsonl`)은 저장소 밖에 둔다.
+`test` 는 학습·문구 사전·임계값 조정에 쓰지 않는다. 내보낸 크롭(`OUT/<split>/<kind>/<이름>.png` + `labels.jsonl` — 이름은 field_id 에서 파일 이름에
+못 쓰는 글자를 바꾼 것이라 읽는 쪽은 `labels.jsonl` 의 `file` 을 본다)은 저장소 밖에 둔다.
 
 세 가지 시험이 있다.
 

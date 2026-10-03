@@ -40,9 +40,9 @@ trips_max = 40
 exclude_materials = ["SURFACE"]
 
 [recognize.digits]
-# 숫자 인식기 모델 (models/<이름>). 설정 파일의 같은 항목이 이긴다 — 현장 PC 마다 다르게 둘 필요가 없으면 여기에
+# 숫자 인식기 모델 (models/<이름>). 설정 파일의 같은 항목이 이긴다 — 현장 PC 마다 다르게 둘 필요가 없으면 여기에.
+# 자동 적재 기준을 카드와 다르게 하려면 설정 파일의 [recognize.digits] auto_accept_conf (사이트 팩에는 두지 않는다)
 # model = "digits-v1"
-# auto_accept_conf = 0.97          # (선택) 모델 카드의 자동 적재 기준 대신
 
 [eval]
 # 평가셋 분할 (ADR 0009): 날짜 단위, hash(split_salt, 날짜) < test_share 면 test. 없으면 소금값은 사이트 이름, 비율 0.2.

@@ -149,7 +149,8 @@ minedocscan review export-crops ~/minedocscan-crops --split train       # 학습
 
 - **평가셋은 날짜로 나눈다** (ADR 0009). `site.toml` 의 `[eval] split_salt`, `test_share` 가 정하고, 검수가 늘어도 분할은 바뀌지 않는다.
   `test` 는 학습·문구 사전·임계값 조정에 쓰지 않는다. `review stats` 가 분할별 셀 수와 날짜 수를 보여 준다.
-- 내보낸 크롭은 `OUT/<split>/<kind>/<field_id>.png` 와 `OUT/<split>/labels.jsonl` 이다. 기본은 원본 300 dpi 를 호모그래피로 다시 정합한
+- 내보낸 크롭은 `OUT/<split>/<kind>/<이름>.png` 와 `OUT/<split>/labels.jsonl` 이다 (이름은 field_id 의 `:` 처럼 파일 이름에 못 쓰는 글자를
+  바꾼 것 — 읽는 쪽은 `labels.jsonl` 의 `file` 을 쓴다. 라벨에는 규격 `spec` 과 잉크 판정 `inked` 가 같이 적힌다). 기본은 원본 300 dpi 를 호모그래피로 다시 정합한
   템플릿 좌표 1.5배 크기이고(`--res aligned` 면 200 dpi 정합 이미지), 라벨에 어느 해상도인지 적힌다. **저장소 밖에만** 둔다 — git 작업 트리 안이면 거절한다.
 
 - **검수 규칙 (숫자 칸)** — 이 규칙이 숫자 인식기의 "빈 칸"과 "거절"의 정답이 된다 (tasks/0003 4.3):
@@ -185,7 +186,8 @@ minedocscan report                          # 백엔드별 칸 수·자동·대�
 - **test 는 마지막에 한 번 본다.** 학습 명령은 `labels.jsonl` 에 test 줄이 하나라도 있으면 거절한다. 학습을 언제 멈출지, 온도, 자동 적재 기준,
   규격·구조의 비교는 전부 검증 날짜(train 날짜 안에서 날짜 단위로 뗀 20 %)로 한다. test 를 본 뒤에 모델을 다시 고르지 않는다.
 - 자동 적재 기준은 검증 날짜에서 자동 적재 오류율이 목표(`--target-auto-error`, 기본 1 %) 이하인 가장 낮은 임계값이다. 카드에 임계값별 표가 있다.
-  표를 보고 더 보수적으로 하려면 `[recognize.digits] auto_accept_conf`.
+  표를 보고 더 보수적으로 하려면 설정의 `[recognize.digits] auto_accept_conf`. 검증 날짜의 실제 셀이 하나도 없으면(날짜가 적을 때) 기준을 정하지 않고
+  (자동 적재 없음) 그렇게 알린다 — 날짜가 늘면 다시 학습한다. 검증·평가는 잉크 판정이 "값 있음"이던 칸만 센다 (인식기가 실제로 받는 칸).
 - 크롭의 규격(해상도·배율·여유)은 학습한 모델이 기억한다. 다른 규격을 비교하려면 `export-crops --res aligned --scale 1` 처럼 따로 내보내 따로 학습한다
   (한 폴더에 규격이 섞이면 거절한다). 정답이 몇 백 셀뿐이어도 한 번 돌려 볼 수 있다 — 합성 셀(`tools/synth_cells.py`)이 반을 채운다. 수치가 거칠다는 것만 안다.
 - 범위: `site.toml` 의 `[haul] trips_max` 보다 큰 값은 신뢰도가 높아도 검수로 간다.
