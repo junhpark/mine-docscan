@@ -1,6 +1,6 @@
 # 작업 지시서 0002 — 전체 묶음으로 정답 만들기
 
-상태: **단계 1–6 구현** (2026-10-03, 브랜치 `feat/full-archive-evalset`). 단계 7 은 선택으로 남아 있고, 8절은 사람의 일이다.
+상태: **단계 1–6 완료** (2026-10-03, PR #3). 단계 7 은 선택으로 남아 있고, 8절은 사람의 일이다. 리뷰에서 남은 손질은 [0003](0003-digit-recognizer.md) 단계 1 로 옮겼다.
 범위나 순서를 바꾸려면 코드보다 이 파일을 먼저 고친다.
 관련: [ROADMAP.md](../ROADMAP.md) M2·M3, [0001](0001-review-tool.md), [ADR 0007](../decisions/0007-labels-by-review.md), [ADR 0008](../decisions/0008-review-records.md)
 
