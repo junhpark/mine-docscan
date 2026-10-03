@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS doc_field (
   candidates      TEXT,                      -- JSON 배열
   backend         TEXT,                      -- 값을 만든 주체: template | ink | <인식 백엔드 이름>
   review_status   TEXT NOT NULL,             -- auto | pending | reviewed
+  status_raw      TEXT,                      -- 기계가 정한 상태 (auto | pending) — 검수해도 바뀌지 않는다. 자동 적재 오류율의 분모
   reviewed_by     TEXT,
   reviewed_at     TEXT
 );

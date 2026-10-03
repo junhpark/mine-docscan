@@ -11,6 +11,9 @@
 
 수치가 달라졌다면 둘 중 하나다: 고쳐서 좋아졌거나(기준을 갱신), 망가뜨렸거나(코드를 고친다).
 어느 쪽인지는 사람이 본다. 기준 갱신은 `minedocscan regress --update`.
+
+기준에 없던 항목(코드가 리포트에 새로 더한 것 — 예: warnings, fields_by_backend)은 어긋남으로 치지 않고 new_keys 로 따로
+알린다. 있던 수치가 바뀌었는지가 회귀이고, 새 항목은 --update 로 기준에 넣으면 그때부터 비교된다.
 """
 from __future__ import annotations
 
@@ -41,10 +44,16 @@ def flatten(d: dict, prefix: str = "") -> dict:
     return out
 
 
+def new_keys(expected: dict, actual: dict) -> list[str]:
+    """기준에 없던 묶음(리포트의 맨 위 항목)의 수치. 있던 묶음 안에 새로 생긴 칸(예: 새 상태의 개수)은 어긋남이다."""
+    return sorted(k for k in flatten(actual) if k.split(".")[0] not in expected)
+
+
 def diff_reports(expected: dict, actual: dict, float_tol: float = 0.01) -> list[tuple[str, object, object]]:
+    """기준에 있던 묶음만 비교한다. 기준에 없던 묶음은 new_keys()."""
     e, a = flatten(expected), flatten(actual)
     diffs = []
-    for k in sorted(set(e) | set(a)):
+    for k in sorted(set(e) | {k for k in a if k.split('.')[0] in expected}):
         ev, av = e.get(k), a.get(k)
         if isinstance(ev, float) or isinstance(av, float):
             if ev is None or av is None or abs(ev - av) > float_tol:
@@ -75,9 +84,10 @@ def run_regression(settings: Settings, site: SitePack | None = None, update: boo
         actual = build_report(pipe.con)
         pipe.con.close()
     diffs = diff_reports(spec.get("report", {}), actual) if spec.get("report") else []
+    added = new_keys(spec.get("report", {}), actual) if spec.get("report") else []
     if update:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"inputs": inputs, "recognizer": recognizer, "report": actual},
                                    ensure_ascii=False, indent=1), encoding="utf-8")
-    return {"ok": not diffs, "diffs": diffs, "report": actual, "baseline": str(path), "updated": update,
-            "had_baseline": bool(spec.get("report"))}
+    return {"ok": not diffs, "diffs": diffs, "new_keys": added, "report": actual, "baseline": str(path),
+            "updated": update, "had_baseline": bool(spec.get("report"))}

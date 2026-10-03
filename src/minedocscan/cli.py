@@ -9,7 +9,7 @@
   template   새 양식의 템플릿 뼈대 만들기
   synth      개인정보 없는 합성 사이트 팩과 스캔 문서 만들기
   review     검수: serve(로컬 화면), stats(진행 현황), export-answers(검수값 → 정답 파일), export-crops(학습용 크롭)
-  recognizer 숫자 인식기: train(학습, torch 필요), list(사이트 팩의 모델)
+  recognizer 숫자 인식기: train(학습, torch 필요), list(사이트 팩의 모델), eval(크롭에서 바로 평가)
 
 경로는 --site / --archive-root / --work-root 또는 환경변수·설정 파일로 준다 (config.py).
 """
@@ -146,6 +146,13 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--out", help="모델 폴더를 직접 지정 (기본: <site>/models/<이름>)")
     n.add_argument("--allow-in-repo", action="store_true", help="git 작업 트리 안에도 쓴다 (합성 셀만으로 만든 시험용 모델)")
     nsub.add_parser("list", parents=[common], help="사이트 팩의 모델과 카드 요약")
+    n = nsub.add_parser("eval", parents=[common], help="크롭 폴더에서 바로 평가 (파이프라인을 돌리지 않는다)")
+    n.add_argument("--crops", required=True, help="review export-crops 로 내보낸 폴더")
+    n.add_argument("--model", required=True, help="모델 이름(<site>/models/<이름>) 또는 폴더 경로")
+    n.add_argument("--split", choices=["val", "test", "train"], default="val",
+                   help="val = 카드의 검증 규칙이 고르는 train 날짜 (기본), train = 그 나머지, test = test 로 내보낸 폴더 — 마지막에 한 번")
+    n.add_argument("--errors", nargs="?", const="", metavar="DIR",
+                   help="틀린 칸을 한 장에 모은 그림 (기본 WORK_ROOT/recognizer-errors). git 작업 트리 안이면 거절")
     return ap
 
 
@@ -352,9 +359,14 @@ def cmd_eval(a) -> int:
              f"자동 적재율 {f['auto_rate']}"
              f" (DB 에 없는 정답 {f['answers_not_in_db']}개)",
              f"  정답에 값이 있는 셀 {f['n_value']}개 정확도 {f['accuracy_value']}, 빈 칸 {f['n_empty']}개 정확도 {f['accuracy_empty']}"]
+    ae = f["auto_error"]
+    lines.append(f"  자동 적재 오류율(인식기가 자동 적재한 칸, 기계 값): {ae['wrong']}/{ae['auto']} = {ae['rate']} "
+                 f"(95% {ae['ci95'][0]}–{ae['ci95'][1]}; 값 {ae['auto_value']}, 빈 칸 {ae['auto_empty']}; "
+                 f"잉크 없음으로 확정 {ae['ink_auto']})")
     for k, v in f["by_field_kind"].items():
+        e = v["auto_error"]
         lines.append(f"  {k}: n={v['n']} CER {v['cer']} 정확도 {v['field_accuracy']} (값 {v['accuracy_value']} / 빈 칸 "
-                     f"{v['accuracy_empty']}) 자동 {v['auto_rate']}")
+                     f"{v['accuracy_empty']}) 자동 {v['auto_rate']} · 자동 적재 오류 {e['wrong']}/{e['auto']}")
     lines.append(f"값 유무 판단 (검수 {pr['n']}셀): 정밀도 {pr['precision']}, 재현율 {pr['recall']} "
                  f"(tp {pr['tp']}, fp {pr['fp']}, fn {pr['fn']}, tn {pr['tn']})")
     if "insp_daily" in data:
@@ -376,6 +388,9 @@ def cmd_regress(a) -> int:
         lines += [f"  {k}: 기준 {e} → 지금 {v}" for k, e, v in res["diffs"]]
     elif res["had_baseline"]:
         lines.append("기준과 같습니다.")
+    if res["new_keys"]:
+        lines.append(f"기준에 없던 새 항목 {len(res['new_keys'])}개 (어긋남으로 치지 않는다 — --update 로 기준에 넣는다): "
+                     + ", ".join(res["new_keys"][:12]) + (" …" if len(res["new_keys"]) > 12 else ""))
     else:
         lines.append("기준이 아직 없습니다.")
     if res["updated"]:
@@ -552,7 +567,52 @@ def cmd_recognizer(a) -> int:
               f"빈 칸 {v['score']['empty']['accuracy']} · 온도 {card['temperature']} · 자동 적재 기준 {thr}\n"
               f"  설정: [recognize.by_kind] handwritten_number = \"digits\",  [recognize.digits] model = \"{a.name}\"")
         return 0
+    if a.recognizer_command == "eval":
+        return _recognizer_eval(a, s)
     raise SystemExit(f"알 수 없는 recognizer 명령: {a.recognizer_command}")
+
+
+def _recognizer_eval(a, s: Settings) -> int:
+    from .recognize.digits.evaluate import EvalError, evaluate
+    from .recognize.digits.model import resolve_model
+
+    site = _need_site(s) if s.site and Path(s.site).is_dir() else None
+    try:
+        model_dir = resolve_model(a.model, site.root if site else None)
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from e
+    opts = (s.recognizer_options or {}).get("digits", {})
+    thr = opts.get("auto_accept_conf", site.option("recognize.digits", "auto_accept_conf") if site else None)
+    errors = None if a.errors is None else (Path(a.errors) if a.errors else Path(s.work_root) / "recognizer-errors")
+    trips_max = site.option("haul", "trips_max") if site else None
+    try:
+        r = evaluate(a.crops, model_dir, split=a.split, threshold=None if thr is None else float(thr), errors=errors,
+                     trips_max=None if trips_max is None else int(trips_max))
+    except (EvalError, ValueError) as e:
+        raise SystemExit(str(e)) from e
+    r.pop("predictions")                                      # 칸마다의 답은 내놓지 않는다 (4.7)
+    acc = r["accuracy"]
+    at = r["at_threshold"]
+    lines = [f"모델 {r['model']} · 분할 {r['split']} · {r['cells']}셀 ({r['dates']}일) · 규격 {r['spec']}",
+             f"정확도: 전체 {acc['all']['accuracy']} ({acc['all']['correct']}/{acc['all']['n']}), "
+             f"값 있는 칸 {acc['value']['accuracy']} ({acc['value']['correct']}/{acc['value']['n']}), "
+             f"빈 칸 {acc['empty']['accuracy']} ({acc['empty']['correct']}/{acc['empty']['n']}), "
+             f"읽을 수 없음 {acc['illegible']['accuracy']} ({acc['illegible']['correct']}/{acc['illegible']['n']})",
+             "값별: " + ", ".join(f"{v['value'] or '빈칸'} {v['correct']}/{v['n']}" for v in r["by_value"]),
+             "많이 틀린 쌍(정답→읽은 값): " + (", ".join(f"{c['truth'] or '빈칸'}→{c['read'] or '빈칸'} {c['n']}"
+                                                   for c in r["confusions"]) or "-"),
+             "신뢰도 구간별 정확도: " + ", ".join(f"[{b['bin'][0]},{b['bin'][1]}) {b['n']}셀 평균 {b['mean_conf']} 정확 {b['accuracy']}"
+                                        for b in r["calibration"] if b["n"]),
+             "임계값별 자동 적재 (적재율 · 오류 분자/분모 · 95% 구간):"]
+    lines += [f"  {t['threshold']:<6} {t['auto_rate']:<7} {t['errors']}/{t['auto']} {t['error_ci95']}" for t in r["thresholds"]]
+    lines.append(f"모델의 기준 {r['threshold'] if r['threshold'] is not None else '없음(자동 적재 없음)'} ({r['threshold_source']})"
+                 + ("" if at is None else f": 자동 적재 {at['auto']}/{r['cells']} = {at['auto_rate']}, "
+                                          f"오류 {at['errors']}/{at['auto']} {at['error_ci95']}")
+                 + f" · 읽을 수 없음 칸 중 자동 적재될 것 {r['illegible']['auto']}/{r['illegible']['n']}")
+    if r["errors_image"]:
+        lines.append(f"틀린 칸 {r['errors']}개 모아 보기: {r['errors_image']} (현장 글씨 — 저장소·문서에 넣지 말 것)")
+    _emit(a, r, "\n".join(lines))
+    return 0
 
 
 COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "pages": cmd_pages, "eval": cmd_eval,

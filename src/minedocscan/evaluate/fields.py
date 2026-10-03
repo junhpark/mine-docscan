@@ -12,6 +12,11 @@ target:  final = value_final (교정·검수 후 최종값),  raw = value_raw (�
 검수값과 비교할 때는 raw 를 쓴다 — final 은 검수값 자신이라 언제나 맞는다.
 
 정답이 빈 칸인 셀과 값이 있는 셀의 정확도를 따로 낸다. 빈 칸이 대부분이라 합치면 인식기의 성적이 가려진다.
+
+자동 적재 오류율(auto_error): 인식기가 자동 적재한 칸(값이든 빈 칸이든 — doc_field.status_raw = auto, backend 가
+ink·template 이 아닌 것) 중 기계의 답이 정답과 다른 비율. 분자·분모와 윌슨 95 % 구간을 같이 낸다 (tasks/0003 4.6).
+기계의 답 = value_raw (기계가 값 없음으로 정했으면 빈 칸). 검수 여부와 상관없이 기계의 판단을 본다 — target 과 무관하다.
+잉크가 없어 빈 칸으로 확정한 칸(backend ink)은 따로 센다 (ink_auto).
 """
 from __future__ import annotations
 
@@ -35,7 +40,7 @@ def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final
     seen: set = set()
     for r in con.execute(
             "SELECT d.source_name, p.page_no, p.work_date, p.template_name, f.region, f.field_name, f.row_key, "
-            f"f.kind, {col}, f.review_status "
+            f"f.kind, {col}, f.review_status, f.status_raw, f.backend, f.has_value_raw, f.value_raw "
             "FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id "
             "JOIN doc_document d ON p.document_id = d.document_id WHERE f.kind LIKE 'handwritten%'"):
         source, work_date, template, region = f"{r[0]}#{r[1]}", r[2], r[3], r[4]
@@ -49,25 +54,43 @@ def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final
             seen.add(key)
         elif only_listed:
             continue
-        g = groups.setdefault(f"{template}/{r[7]}", {"pairs": [], "statuses": []})
-        g["pairs"].append((r[8] or "", answers.get(key, "")))
+        g = groups.setdefault(f"{template}/{r[7]}", {"pairs": [], "statuses": [], "machine": []})
+        truth = answers.get(key, "")
+        g["pairs"].append((r[8] or "", truth))
         g["statuses"].append(r[9])
+        machine = (r[13] or "") if r[12] else ""                 # 기계가 값 없음으로 정했으면 빈 칸
+        g["machine"].append((r[10], r[11], machine, truth))
 
-    def summarize(pairs, statuses) -> dict:
+    def summarize(pairs, statuses, machine) -> dict:
         valued = [p for p in pairs if normalize(p[1])]
         empty = [p for p in pairs if not normalize(p[1])]
         return {"n": len(pairs), "cer": round(corpus_cer(pairs), 4),
                 "field_accuracy": round(field_accuracy(pairs), 4), "auto_rate": round(auto_rate(statuses), 4),
                 "n_value": len(valued), "accuracy_value": None if not valued else round(field_accuracy(valued), 4),
-                "n_empty": len(empty), "accuracy_empty": None if not empty else round(field_accuracy(empty), 4)}
+                "n_empty": len(empty), "accuracy_empty": None if not empty else round(field_accuracy(empty), 4),
+                "auto_error": auto_error(machine)}
 
     out = summarize([p for g in groups.values() for p in g["pairs"]],
-                    [s for g in groups.values() for s in g["statuses"]])
+                    [s for g in groups.values() for s in g["statuses"]],
+                    [m for g in groups.values() for m in g["machine"]])
     out["target"] = target
     out["split"] = split
     out["answers_not_in_db"] = len(set(answers) - seen)      # 페이지가 적재되지 않아 비교하지 못한 정답
-    out["by_field_kind"] = {k: summarize(g["pairs"], g["statuses"]) for k, g in sorted(groups.items())}
+    out["by_field_kind"] = {k: summarize(g["pairs"], g["statuses"], g["machine"]) for k, g in sorted(groups.items())}
     return out
+
+
+def auto_error(machine: list[tuple]) -> dict:
+    """machine: [(status_raw, backend, 기계의 답, 정답)]. 인식기가 자동 적재한 칸 중 정답과 다른 것."""
+    from ..recognize.digits.calib import wilson
+
+    auto = [(a, t) for st, b, a, t in machine if st == "auto" and b not in ("ink", "template")]
+    wrong = sum(normalize(a) != normalize(t) for a, t in auto)
+    lo, hi = wilson(wrong, len(auto))
+    return {"auto": len(auto), "auto_value": sum(bool(normalize(a)) for a, _t in auto),
+            "auto_empty": sum(not normalize(a) for a, _t in auto), "wrong": wrong,
+            "rate": None if not auto else round(wrong / len(auto), 4), "ci95": [round(lo, 4), round(hi, 4)],
+            "ink_auto": sum(st == "auto" and b == "ink" for st, b, _a, _t in machine)}
 
 
 def evaluate_presence(con: sqlite3.Connection) -> dict:

@@ -17,7 +17,7 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 # 1: 처음 골격. 2: 검수(doc_review, has_value_raw, trips_raw, *_trips_raw) — docs/tasks/0001-review-tool.md
 # 3: 전체 묶음 운용(prod_haul.has_value_raw, 오류 격리, 호모그래피 …) — docs/tasks/0002-full-archive-and-evalset.md
-# 4: 숫자 인식기(doc_document.warning …) — docs/tasks/0003-digit-recognizer.md
+# 4: 숫자 인식기(doc_document.warning, doc_field.status_raw) — docs/tasks/0003-digit-recognizer.md
 SCHEMA_VERSION = 4
 
 # 테이블별 기본 키 (upsert 의 충돌 대상)

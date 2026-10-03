@@ -62,7 +62,7 @@ def field_row(ctx: PageContext, o: CellObs, *, has_value: bool | None, value_raw
         "has_value": None if has_value is None else int(has_value),
         "value_raw": value_raw, "value_final": value_final, "confidence": confidence,
         "candidates": json.dumps(candidates or [], ensure_ascii=False), "backend": backend,
-        "review_status": review_status, "reviewed_by": None, "reviewed_at": None,
+        "review_status": review_status, "status_raw": review_status, "reviewed_by": None, "reviewed_at": None,
     }
 
 

@@ -198,8 +198,9 @@ def test_export_crops_can_include_illegible(reviewed_day, tmp_path):
     settings = replace(settings, reviews=tmp_path / "r.jsonl")
     fid = con.execute("SELECT field_id FROM doc_field WHERE kind = 'handwritten_number' LIMIT 1").fetchone()[0]
     save(con, rsite, settings, Review(fid, "illegible", reviewer="jp"))
-    plain = export_crops(con, rsite, settings, tmp_path / "a", kind="handwritten_number")
-    withill = export_crops(con, rsite, settings, tmp_path / "b", kind="handwritten_number", include_illegible=True)
+    plain = export_crops(con, rsite, settings, tmp_path / "a", kind="handwritten_number", res="aligned")
+    withill = export_crops(con, rsite, settings, tmp_path / "b", kind="handwritten_number", res="aligned",
+                           include_illegible=True)
     assert withill["written"] == plain["written"] + 1 and plain["skipped_illegible"] >= 1
     lines = [json.loads(x) for p in (tmp_path / "b").rglob("labels.jsonl") for x in p.read_text().splitlines()]
     ill = [x for x in lines if x["field_id"] == fid]
