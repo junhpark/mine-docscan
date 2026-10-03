@@ -24,3 +24,18 @@ def test_file_then_env_then_override(tmp_path, monkeypatch):
     assert s.auto_accept_conf == 0.8 and s.recognizer == "oracle"
     s = load_settings(cfg, work_root="w_arg", site=None)
     assert s.work_root == Path("w_arg") and s.site == Path("from_file")     # None 은 덮어쓰지 않는다
+
+
+def test_damaged_pdf_policy(tmp_path, monkeypatch):
+    monkeypatch.delenv("MINEDOCSCAN_DAMAGED_PDF", raising=False)
+    cfg = tmp_path / "c.toml"
+    cfg.write_text('[pipeline]\ndamaged_pdf = "warn"\n', encoding="utf-8")
+    assert load_settings(tmp_path / "none.toml").damaged_pdf == "fail"
+    assert load_settings(cfg).damaged_pdf == "warn"
+    monkeypatch.setenv("MINEDOCSCAN_DAMAGED_PDF", "fail")
+    assert load_settings(cfg).damaged_pdf == "fail"                   # 환경변수가 이긴다
+    monkeypatch.setenv("MINEDOCSCAN_DAMAGED_PDF", "maybe")
+    import pytest
+
+    with pytest.raises(ValueError):
+        load_settings(cfg)

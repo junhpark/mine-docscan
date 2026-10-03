@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS doc_document (
   n_pages         INTEGER,
   status          TEXT NOT NULL,             -- received | processed | needs_review | failed (문서를 읽지 못함)
   error           TEXT,                      -- failed 일 때 예외 종류와 메시지. 셀 값은 적지 않는다
+  warning         TEXT,                      -- 처리는 했지만 알아야 할 것 (예: damaged_pdf = warn 으로 복구해서 연 PDF)
   created_at      TEXT NOT NULL
 );
 

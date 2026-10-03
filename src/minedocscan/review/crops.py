@@ -73,7 +73,7 @@ def crop_region(settings, r: sqlite3.Row, bbox: tuple[int, int, int, int], out_s
     if src is not None and r["homography"]:
         try:
             img = cell_from_source(src, r["page_no"], np.array(json.loads(r["homography"])), r["render_dpi"] or settings.dpi,
-                                   bbox, 0, out_scale, settings.source_dpi)
+                                   bbox, 0, out_scale, settings.source_dpi, settings.damaged_pdf)
             return img, "source"
         except (OSError, ValueError, KeyError, RuntimeError):
             if res == "source":

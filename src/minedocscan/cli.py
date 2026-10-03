@@ -119,8 +119,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--kind", choices=["handwritten_number", "handwritten_text"], help="이 종류의 셀만")
     r.add_argument("--res", choices=["auto", "source", "aligned"], default="auto",
                    help="source = 원본 해상도(호모그래피로 다시 정합), aligned = 200 dpi 정합 이미지, auto = 원본이 닿으면 원본")
-    r.add_argument("--scale", type=float, default=1.5, help="템플릿 좌표(200 dpi) 대비 배율 (기본 1.5 = 300 dpi 원본 그대로)")
-    r.add_argument("--pad", type=int, help="셀 둘레 여유(템플릿 px). 기본은 화면과 같이 행 높이의 절반(최소 8)")
+    r.add_argument("--scale", type=float, default=1.5,
+                   help="템플릿 좌표(200 dpi) 대비 배율, 0 초과 6 이하 (기본 1.5 = 300 dpi 원본 그대로)")
+    r.add_argument("--pad", type=int, help="셀 둘레 여유(템플릿 px, 0 이상). 기본은 화면과 같이 행 높이의 절반(최소 8)")
     r.add_argument("--allow-in-repo", action="store_true", help="git 작업 트리 안에도 쓴다 (글씨가 들어 있다 — 커밋하지 말 것)")
     return ap
 
@@ -211,7 +212,8 @@ def cmd_run(a) -> int:
         if not a.json:
             el = time.monotonic() - t0
             eta = el / i * (len(files) - i)
-            what = ("건너뜀" if r.get("skipped") else f"실패: {r['error']}" if r["status"] == "failed" else f"{len(r['pages'])}쪽")
+            what = ("건너뜀" if r.get("skipped") else f"실패: {r['error']}" if r["status"] == "failed" else f"{len(r['pages'])}쪽"
+                    + (f" · 경고: {r['warning']}" if r.get("warning") else ""))
             print(f"[{i}/{len(files)}] {f.name} · {what} · 지난 {_hms(el)} · 남은 약 {_hms(eta)}", file=sys.stderr)
     summary = pipe.finalize()
     rep = build_report(pipe.con)
@@ -223,6 +225,8 @@ def cmd_run(a) -> int:
         text += "\n실패한 문서:\n" + "\n".join(f"  {d['source_name']}: {d['error']}" for d in summary["failed"])
     if summary["page_errors"]:
         text += "\n오류 난 쪽:\n" + "\n".join(f"  {d['page_id']}: {d['error']}" for d in summary["page_errors"])
+    if summary["warnings"]:
+        text += "\n경고가 있는 문서:\n" + "\n".join(f"  {d['source_name']}: {d['warning']}" for d in summary["warnings"])
     _emit(a, {"run": summary, "report": rep}, text)
     return 1 if (summary["failed"] or summary["page_errors"]) else 0
 
@@ -427,7 +431,7 @@ def cmd_review(a) -> int:
         try:
             r = export_crops(con, site, s, a.out, split=a.split, kind=a.kind, res=a.res, out_scale=a.scale, pad=a.pad,
                              allow_in_repo=a.allow_in_repo)
-        except ExportError as e:
+        except (ExportError, ValueError) as e:
             raise SystemExit(str(e)) from e
         _emit(a, r, f"크롭 {r['written']}개를 썼습니다: {r['out']} — 분할별 {r['by_split']}, 해상도별 {r['by_source']}, "
                     f"읽을 수 없음 제외 {r['skipped_illegible']}개\n저장소에 넣지 마세요 — 현장의 글씨가 들어 있습니다.")

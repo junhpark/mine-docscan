@@ -58,7 +58,7 @@ class Pipeline:
         self.classifier = FormClassifier(list(site.templates.values()))
         self._handlers: dict[str, object] = {}
         self.summary: dict = {"documents": 0, "pages": 0, "by_form": {}, "by_status": {}, "low_margin": [],
-                              "handlers": {}, "skipped": 0, "failed": [], "page_errors": []}
+                              "handlers": {}, "skipped": 0, "failed": [], "page_errors": [], "warnings": []}
         self.summary["reviews"] = (import_into(self.con, settings.reviews_path(self.site.root)) if load_reviews
                                    else {"path": None, "imported": 0, "skipped": 0})
 
@@ -99,12 +99,15 @@ class Pipeline:
                 self.summary["skipped"] += 1
                 return {"document_id": document_id, "status": row[0], "skipped": True, "pages": []}
         snapshot = copy.deepcopy(self.summary)            # 문서가 실패하면 그 문서의 집계도 되돌린다
+        warnings: list[str] = []
         try:
             upsert(self.con, "doc_document", self._document_row(document_id, path, source_name, "received", None))
             pages = []
-            for page_no, gray in load_pages(path, self.settings.dpi):
+            for page_no, gray in load_pages(path, self.settings.dpi, self.settings.damaged_pdf, warnings):
                 pages.append(self.process_page(document_id, source_name, page_no, gray, template, strict=strict))
-            self.con.execute("UPDATE doc_document SET n_pages=? WHERE document_id=?", (len(pages), document_id))
+            warning = "; ".join(warnings) or None
+            self.con.execute("UPDATE doc_document SET n_pages=?, warning=? WHERE document_id=?",
+                             (len(pages), warning, document_id))
             update_document_status(self.con, document_id)
             self.con.commit()
         except Exception as e:                            # noqa: BLE001 — 한 문서의 실패가 전체를 멈추지 않는다
@@ -118,7 +121,9 @@ class Pipeline:
                          (str(path), document_id))
         self.con.commit()
         self.summary["documents"] += 1
-        return {"document_id": document_id, "status": "ok", "pages": pages}
+        if warning:                                       # 경고만으로는 종료 코드가 1 이 되지 않는다
+            self.summary["warnings"].append({"document_id": document_id, "source_name": source_name, "warning": warning})
+        return {"document_id": document_id, "status": "ok", "pages": pages, "warning": warning}
 
     def _document_row(self, document_id: str, path: Path, source_name: str, status: str, error: str | None) -> dict:
         rel = None
@@ -129,7 +134,7 @@ class Pipeline:
                 rel = None
         return {"document_id": document_id, "source_path": str(path), "source_rel": rel, "source_name": source_name,
                 "work_date": self.site.page_meta(source_name, 0).get("date"), "n_pages": None, "status": status,
-                "error": error, "created_at": datetime.now(UTC).isoformat(timespec="seconds")}
+                "error": error, "warning": None, "created_at": datetime.now(UTC).isoformat(timespec="seconds")}
 
     def _fail_document(self, document_id: str, path: Path, source_name: str, e: BaseException) -> dict:
         err = _error_text(e)

@@ -21,6 +21,9 @@ def build_report(con: sqlite3.Connection) -> dict:
     return {
         "documents": one("SELECT COUNT(*) FROM doc_document"),
         "documents_by_status": _pairs(con, "SELECT status, COUNT(*) FROM doc_document GROUP BY 1 ORDER BY 1"),
+        "warnings": {"n": one("SELECT COUNT(*) FROM doc_document WHERE warning IS NOT NULL"),
+                     "documents": [r[0] for r in con.execute(
+                         "SELECT source_name FROM doc_document WHERE warning IS NOT NULL ORDER BY source_name")]},
         "pages": one("SELECT COUNT(*) FROM doc_page"),
         "pages_by_form": _pairs(con, "SELECT template_name, COUNT(*) FROM doc_page GROUP BY 1 ORDER BY 1"),
         "pages_by_status": _pairs(con, "SELECT status, COUNT(*) FROM doc_page GROUP BY 1 ORDER BY 1"),
@@ -149,7 +152,8 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
         return ", ".join(f"{k} {v}" for k, v in d.items()) or "-"
 
     lines = [
-        f"문서 {rep['documents']}건 ({kv(rep['documents_by_status'])})",
+        f"문서 {rep['documents']}건 ({kv(rep['documents_by_status'])})"
+        + (f" — 경고 {rep['warnings']['n']}건: {', '.join(rep['warnings']['documents'])}" if rep["warnings"]["n"] else ""),
         f"페이지 {rep['pages']}장 — 상태: {kv(rep['pages_by_status'])}",
         "양식별 페이지: " + kv(rep["pages_by_form"]),
         "정합:",

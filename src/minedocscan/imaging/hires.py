@@ -16,15 +16,15 @@ from .io import load_page
 
 
 @lru_cache(maxsize=4)
-def _render(path: str, mtime: float, page_no: int, dpi: int) -> np.ndarray:
+def _render(path: str, mtime: float, page_no: int, dpi: int, damaged: str = "fail") -> np.ndarray:
     """원본의 한 쪽만 렌더링한다 (앞쪽을 차례로 렌더링하지 않는다 — 20쪽째가 2.5초 걸렸다).
     같은 쪽의 셀을 연달아 뜰 때를 위해 몇 장만 캐시한다 (mtime 은 캐시 무효화 키)."""
-    return load_page(path, page_no, dpi)
+    return load_page(path, page_no, dpi, damaged)
 
 
 def cell_from_source(source: str | Path, page_no: int, homography: np.ndarray, render_dpi: int,
                      bbox: tuple[int, int, int, int], pad: int = 0, out_scale: float = 1.0,
-                     source_dpi: int = 300) -> np.ndarray:
+                     source_dpi: int = 300, damaged: str = "fail") -> np.ndarray:
     """원본 쪽에서 셀 하나를 템플릿 좌표의 out_scale 배 크기로 정합해 뜬다.
 
     homography 는 render_dpi 로 렌더링한 쪽의 픽셀을 템플릿 픽셀로 보내는 3×3 이다. PDF 는 source_dpi 로 다시 렌더링하고
@@ -33,7 +33,7 @@ def cell_from_source(source: str | Path, page_no: int, homography: np.ndarray, r
     source = Path(source)
     mtime = source.stat().st_mtime
     if source.suffix.lower() == ".pdf":
-        img = _render(str(source), mtime, page_no, int(source_dpi))
+        img = _render(str(source), mtime, page_no, int(source_dpi), damaged)
         k = source_dpi / render_dpi                                  # 원본 픽셀 = 렌더링 픽셀 × k
     else:
         img = _render(str(source), mtime, 1, int(render_dpi))

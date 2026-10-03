@@ -1,6 +1,8 @@
 """검수값을 인식기에 넘길 형태로 내보낸다: 셀 이미지 + 라벨 (tasks/0002 단계 6).
 
-  OUT/<split>/<kind>/<field_id>.png      셀 크롭 (기본: 원본 해상도, 템플릿 좌표의 1.5배 = 300 dpi 원본 그대로)
+  OUT/<split>/<kind>/<이름>.png          셀 크롭 (기본: 원본 해상도, 템플릿 좌표의 1.5배 = 300 dpi 원본 그대로).
+                                         이름은 field_id 에서 파일 이름에 못 쓰는 글자(: 등)를 바꾼 것 — 읽는 쪽은
+                                         labels.jsonl 의 file 만 본다 (이름에서 field_id 를 되살리지 않는다)
   OUT/<split>/labels.jsonl               field_id, 값, 판정, 양식, 열, 행 키, 날짜, 해상도(source|aligned), 검수자
 
 illegible 은 뺀다. empty 는 빈 칸의 예로 넣는다. test 와 train 을 섞지 않는다 (날짜 분할, ADR 0009).
@@ -8,7 +10,9 @@ illegible 은 뺀다. empty 는 빈 칸의 예로 넣는다. test 와 train 을 
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -21,6 +25,23 @@ class ExportError(RuntimeError):
     pass
 
 
+_UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+MAX_SCALE = 6.0
+
+
+def safe_name(field_id: str) -> str:
+    """field_id → 어느 OS 에서나 쓸 수 있는 파일 이름 (확장자 없음). Windows 가 받지 않는 < > : " / \\ | ? * 를 바꾼다."""
+    return _UNSAFE.sub(".", field_id).rstrip(". ")
+
+
+def check_spec_args(out_scale: float, pad: int | None) -> None:
+    """배율은 0 초과 MAX_SCALE 이하, 여유는 0 이상. 어긋나면 아무것도 쓰기 전에 멈춘다."""
+    if not (out_scale > 0 and out_scale <= MAX_SCALE):
+        raise ValueError(f"--scale 은 0 초과 {MAX_SCALE:g} 이하: {out_scale}")
+    if pad is not None and pad < 0:
+        raise ValueError(f"--pad 는 0 이상: {pad}")
+
+
 def inside_git_tree(path: str | Path) -> bool:
     p = Path(path).resolve()
     return any((q / ".git").exists() for q in (p, *p.parents))
@@ -31,6 +52,7 @@ def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split
     """pad: 셀 둘레 여유(템플릿 px). None 이면 화면과 같이 행 높이의 절반(최소 8) — 칸 선을 넘은 획이 잘리지 않게.
     돌려주는 값: {"written": n, "by_split": {split: n}, "by_source": {source|aligned: n}, "skipped_illegible": n}."""
     out = Path(out)
+    check_spec_args(out_scale, pad)
     if inside_git_tree(out) and not allow_in_repo:
         raise ExportError(f"{out} 은 git 작업 트리 안입니다. 크롭에는 현장의 글씨가 들어 있으므로 저장소 밖에 내보내세요 "
                           "(정말 필요하면 --allow-in-repo)")
@@ -41,6 +63,7 @@ def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split
     by_source: dict[str, int] = {}
     skipped = 0
     handles: dict[str, object] = {}
+    used: set[str] = set()
     try:
         for rv, sp, d in sorted(effective_with_split(con, site), key=lambda t: (t[1], t[2] or "", t[0].field_id)):
             if rv.verdict == "illegible":
@@ -53,7 +76,11 @@ def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split
                 continue
             pd = _pad(r, pad)
             img, src = crop_region(settings, r, (r["x0"] - pd, r["y0"] - pd, r["x1"] + pd, r["y1"] + pd), out_scale, res)
-            rel = Path(sp) / r["kind"] / f"{rv.field_id}.png"
+            name = safe_name(rv.field_id)
+            if (sp, r["kind"], name) in used:                 # 바꾼 글자 때문에 겹치면 field_id 의 해시를 붙인다
+                name += "-" + hashlib.sha256(rv.field_id.encode()).hexdigest()[:8]
+            used.add((sp, r["kind"], name))
+            rel = Path(sp) / r["kind"] / f"{name}.png"
             imwrite(out / rel, img)
             if sp not in handles:
                 (out / sp).mkdir(parents=True, exist_ok=True)

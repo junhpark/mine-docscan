@@ -1,6 +1,6 @@
 # 작업 지시서 0003 — 숫자 인식기 (운반 횟수)
 
-상태: **시작 전** (2026-10-03 작성). 범위나 순서를 바꾸려면 코드보다 이 파일을 먼저 고친다.
+상태: **진행 중** (2026-10-03 작성, 브랜치 `feat/digit-recognizer`). 범위나 순서를 바꾸려면 코드보다 이 파일을 먼저 고친다.
 관련: [ROADMAP.md](../ROADMAP.md) M3, [0002](0002-full-archive-and-evalset.md),
 [ADR 0003](../decisions/0003-pluggable-recognizer.md), [ADR 0006](../decisions/0006-show-discrepancies.md),
 [ADR 0008](../decisions/0008-review-records.md), [ADR 0009](../decisions/0009-evalset-by-date.md)
