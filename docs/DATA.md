@@ -10,7 +10,9 @@
 | 정답 (CSV, 엑셀) | 공유 드라이브, 스캔 원본 옆 | **아니오** |
 | 검수 기록 (`reviews/reviews.jsonl`) | 사이트 팩 안 (= `SITE/reviews/`) | **아니오** — 사람이 입력한 값, 다시 만들 수 없다 |
 | 정합 이미지, SQLite DB, 리포트 | 각자의 로컬 디스크 (= `WORK_ROOT`) | 아니오 (언제든 다시 만든다) |
-| 모델 가중치 | 로컬 또는 모델 저장소 | 아니오 |
+| 숫자 인식기 모델 (`models/<이름>/`) | 사이트 팩 안 (= `SITE/models/`) — 현장 글씨로 학습한 것 | **아니오** (예외: 합성 셀만으로 만든 `tests/fixtures/digits-fixture`) |
+| 학습용 크롭(`export-crops`), 틀린 칸 모아 보기(`recognizer eval --errors`) | 저장소 밖 (기본 `WORK_ROOT/recognizer-errors`) | **아니오** — 현장 글씨. git 작업 트리 안이면 도구가 거절한다 |
+| 그 밖의 모델 가중치 | 로컬 또는 모델 저장소 | 아니오 |
 
 공유 드라이브의 현재 배치:
 
@@ -65,6 +67,7 @@ mine-docscan/                 ← MINEDOCSCAN_ARCHIVE_ROOT
 - 스캔 원본과 그 일부를 잘라낸 이미지 — 검수 화면의 갈무리도 마찬가지다
 - 기준 이미지(`reference.png`)와 실제 템플릿 YAML — 행렬 양식의 머리글에 이름·차량번호가 인쇄되어 있다
 - 페이지 라벨, 정답 CSV·엑셀, 검수 기록(`reviews.jsonl` — 적힌 값과 출처가 들어 있다)
+- 학습한 모델(`models/`), 내보낸 크롭, 틀린 칸 모아 보기 — 현장의 글씨에서 나온 것. 문서·PR·이슈에도 붙이지 않는다 (수치만 옮긴다)
 - 실제 이름·차량번호를 예시로 쓴 문서·주석·테스트·커밋 메시지
 - API 키와 비밀값 (`.env`, `minedocscan.toml`)
 
@@ -119,6 +122,9 @@ minedocscan pages --status error                 # 쪽 하나에서 예외가 �
 ```
 
 - 깨진 파일이 있어도 끝까지 간다. 그 문서는 `failed`, 요약에 목록이 나오고 종료 코드는 1 이다. 반쯤 쓰인 행은 남지 않는다.
+- PDF 라이브러리가 **복구해서 연** 파일(끝이 잘린 파일 등)은 기본으로 `failed` 다 (`[pipeline] damaged_pdf = "fail"`).
+  어느 스캐너의 멀쩡한 파일이 늘 "복구가 필요했습니다"로 실패하면 `damaged_pdf = "warn"` (또는 `MINEDOCSCAN_DAMAGED_PDF=warn`) —
+  그 문서는 처리하고 `doc_document.warning` 과 요약·`report` 에 경고로 남긴다 (종료 코드는 그대로 0).
 - **`--skip-existing` 을 쓰면 안 되는 때**: 템플릿(사이트 팩)이나 인식기·판정 규칙을 바꾼 뒤. 그때는 `--fresh` 로 처음부터 다시 돌린다.
   건너뛰기는 파일 해시만 보고 결과가 유효한지는 모른다.
 - 다른 컴퓨터에서 같은 DB 를 쓰려면 `archive_root` 만 그 컴퓨터의 경로로 준다. 원본은 `source_rel`(archive_root 기준 상대경로)로 찾는다.
@@ -155,6 +161,35 @@ minedocscan review export-crops ~/minedocscan-crops --split train       # 학습
 - 결과에는 정답이 빈 칸인 셀과 값이 있는 셀의 정확도가 따로 나오고, 값 유무 판단의 정밀도·재현율이 같이 나온다.
 - 검수 파일은 사람이 입력한 유일한 데이터다. 사이트 팩과 함께 백업한다. 한 번에 한 사람만 입력한다.
 - 검수자가 한 사람이면 그 사람의 오독이 정답에 들어간다. 표본의 일부는 두 번째 사람이 따로 입력해 일치도를 본다 (아직 도구에 없다).
+
+### 숫자 인식기: 학습에서 평가까지
+
+운반 횟수 숫자 칸의 인식기(`digits`, ADR 0011·0012). 학습만 torch 가 필요하다 (`pip install -e ".[train]"`). 현장 PC 의 추론은 OpenCV 만 쓴다.
+
+```bash
+minedocscan review export-crops ~/crops --split train --kind handwritten_number --include-illegible
+                                            # 검수한 숫자 칸 (illegible 은 "거절"로 학습). test 는 내보내지 않는다
+minedocscan recognizer train --crops ~/crops --name digits-v1
+                                            # → <site>/models/digits-v1/ (model.onnx, card.json, train-log.jsonl). CPU 몇 분
+minedocscan recognizer eval --crops ~/crops --model digits-v1 --split val --errors
+                                            # 검증 날짜에서: 정확도, 값별 표, 많이 틀린 쌍, 임계값별 자동 적재율·오류율, 틀린 칸 모아 보기
+minedocscan recognizer list                 # 사이트 팩의 모델과 카드 요약
+# 설정: [recognize.by_kind] handwritten_number = "digits",  [recognize.digits] model = "digits-v1"
+minedocscan info                            # 고른 백엔드와 모델(규격, 자동 적재 기준, 학습 셀 수)
+minedocscan run DB_scans --fresh
+minedocscan review export-answers answers-test.json --split test
+minedocscan eval --answers answers-test.json --target raw --only-listed --split test   # 자동 적재 오류율(분자·분모)이 같이 나온다
+minedocscan report                          # 백엔드별 칸 수·자동·대기, 횟수 일치율(기계 값 기준)
+```
+
+- **test 는 마지막에 한 번 본다.** 학습 명령은 `labels.jsonl` 에 test 줄이 하나라도 있으면 거절한다. 학습을 언제 멈출지, 온도, 자동 적재 기준,
+  규격·구조의 비교는 전부 검증 날짜(train 날짜 안에서 날짜 단위로 뗀 20 %)로 한다. test 를 본 뒤에 모델을 다시 고르지 않는다.
+- 자동 적재 기준은 검증 날짜에서 자동 적재 오류율이 목표(`--target-auto-error`, 기본 1 %) 이하인 가장 낮은 임계값이다. 카드에 임계값별 표가 있다.
+  표를 보고 더 보수적으로 하려면 `[recognize.digits] auto_accept_conf`.
+- 크롭의 규격(해상도·배율·여유)은 학습한 모델이 기억한다. 다른 규격을 비교하려면 `export-crops --res aligned --scale 1` 처럼 따로 내보내 따로 학습한다
+  (한 폴더에 규격이 섞이면 거절한다). 정답이 몇 백 셀뿐이어도 한 번 돌려 볼 수 있다 — 합성 셀(`tools/synth_cells.py`)이 반을 채운다. 수치가 거칠다는 것만 안다.
+- 범위: `site.toml` 의 `[haul] trips_max` 보다 큰 값은 신뢰도가 높아도 검수로 간다.
+- 인식기 수치는 실데이터 검증·test 날짜로만 말한다. 합성 셀의 수치는 학습·추론 경로가 맞는지의 확인이다.
 
 ### 정답 형식
 

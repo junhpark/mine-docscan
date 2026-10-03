@@ -12,9 +12,20 @@ dpi = 200                    # 템플릿 좌표계의 해상도. 템플릿을 �
 auto_accept_conf = 0.90      # 이 신뢰도 이상이면 검수 없이 적재
 classify_min_margin = 1.5    # 양식 분류 1위/2위 비율이 이보다 낮으면 표시
 save_aligned = true          # 정합 이미지를 work_root/aligned 에 저장 (검수·디버깅용)
+damaged_pdf = "fail"         # 라이브러리가 복구해서 연 PDF(끝이 잘린 파일 등): fail = 문서 실패 | warn = 처리하고 경고를 남김
+                             # 멀쩡한 스캔이 늘 "복구가 필요했습니다"로 실패하는 스캐너라면 warn (MINEDOCSCAN_DAMAGED_PDF)
 
 [recognize]
-backend = "null"             # 등록된 인식 백엔드 이름 (minedocscan info 로 확인)
+backend = "null"             # 등록된 인식 백엔드 이름 (minedocscan info 로 확인) — 아래 by_kind 에 없는 칸 종류에 쓴다
+
+# 칸 종류마다 다른 백엔드 (handwritten_number | handwritten_text). 없으면 모든 칸에 backend
+# [recognize.by_kind]
+# handwritten_number = "digits"
+
+# 숫자 인식기 (docs/DATA.md "숫자 인식기"). 모델은 사이트 팩의 models/<이름>/ — site.toml 의 같은 항목보다 이 파일이 이긴다
+# [recognize.digits]
+# model = "digits-v1"        # 이름 또는 모델 폴더 경로. 없으면 run 이 시작할 때 멈춘다
+# auto_accept_conf = 0.97    # (선택) 모델 카드의 자동 적재 기준 대신. 우선순위: 이것 > site.toml > 카드 > [pipeline] auto_accept_conf
 
 [correct]
 backend = "none"
