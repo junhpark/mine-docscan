@@ -60,6 +60,15 @@ def test_regress_roundtrip(env, capsys):
     baseline = root / "data" / "site" / "expected" / "regression.json"
     assert json.loads(baseline.read_text(encoding="utf-8"))["inputs"] == ["."]
     assert main(["regress"] + common) == 0                                    # 같은 코드, 같은 데이터 → 같아야 한다
+    # 검수가 쌓여도 회귀는 기계 값만 본다 — 사이트 팩의 검수 파일을 읽어 들이지 않는다
+    from minedocscan.review.store import Review, append
+    from minedocscan.store.db import open_db
+
+    con = open_db(f"sqlite:///{(root / 'work' / 'minedocscan.db').as_posix()}")
+    fid = con.execute("SELECT field_id FROM doc_field WHERE kind='handwritten_number' AND has_value=1").fetchone()[0]
+    con.close()
+    append(root / "data" / "site" / "reviews" / "reviews.jsonl", Review(fid, "value", "9", "jp"))
+    assert main(["regress"] + common) == 0
     spec = json.loads(baseline.read_text(encoding="utf-8"))
     spec["report"]["xcheck_haul"]["mismatch"] += 1
     baseline.write_text(json.dumps(spec), encoding="utf-8")

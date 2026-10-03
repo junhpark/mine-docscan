@@ -8,6 +8,14 @@
 --   eq_*    마스터   — 장비. ISO 23725 FleetDefinition 구조를 따른다
 --   insp_*, prod_*, xcheck_*  업무 층 — 2단계(통합DB·입력체계·대시보드)와 공유하는 면
 
+-- ── 스키마 버전 ────────────────────────────────────────────────────────────
+-- 마이그레이션은 만들지 않는다 (ADR 0005). 컬럼이 바뀌면 버전을 올리고, 버전이 다른 DB 는 열지 않고
+-- "--fresh 로 다시 만드세요" 라고 알린다. 사람이 입력한 값은 검수 파일(reviews.jsonl)에 있으므로 잃지 않는다.
+CREATE TABLE IF NOT EXISTS meta_schema (
+  key             TEXT PRIMARY KEY,          -- schema_version
+  value           TEXT NOT NULL
+);
+
 -- ── 문서 층 ────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS doc_document (
   document_id     TEXT PRIMARY KEY,          -- 원본 파일 SHA-256 앞 16자리: 같은 스캔의 중복 접수를 막는다
@@ -43,10 +51,11 @@ CREATE TABLE IF NOT EXISTS doc_field (
   row_key         TEXT,
   x0 INTEGER, y0 INTEGER, x1 INTEGER, y1 INTEGER,   -- 템플릿 좌표계 bbox → 출처 추적
   ink             REAL,                      -- 잉크 비율
-  has_value       INTEGER,                   -- 셀에 값이 적혀 있는가 (인식 전에도 알 수 있다)
-  value_raw       TEXT,                      -- 인식 원문
+  has_value_raw   INTEGER,                   -- 기계가 판단한 값 유무 (검수해도 바뀌지 않는다)
+  has_value       INTEGER,                   -- 최종 값 유무 (검수가 있으면 검수가 정한다)
+  value_raw       TEXT,                      -- 인식 원문 — 언제나 기계의 것
   value_final     TEXT,                      -- 교정·검수 후 값
-  confidence      REAL,
+  confidence      REAL,                      -- 기계의 신뢰도
   candidates      TEXT,                      -- JSON 배열
   backend         TEXT,                      -- 값을 만든 주체: template | ink | <인식 백엔드 이름>
   review_status   TEXT NOT NULL,             -- auto | pending | reviewed
@@ -55,6 +64,35 @@ CREATE TABLE IF NOT EXISTS doc_field (
 );
 CREATE INDEX IF NOT EXISTS ix_doc_field_page ON doc_field(page_id);
 CREATE INDEX IF NOT EXISTS ix_doc_field_review ON doc_field(review_status);
+
+-- 사람이 입력한 값. 원본은 사이트 팩의 추가 전용 파일(reviews/reviews.jsonl)이고 이 테이블은 그 사본이다
+-- (WORK_ROOT 는 언제든 지울 수 있어야 하므로). 한 필드에 여러 건이면 reviewed_at 이 가장 늦은 것이 유효하다.
+-- field_id 에 외래 키를 걸지 않는다: 파일을 읽어 들이는 시점에 그 페이지가 아직 DB 에 없을 수 있다.
+CREATE TABLE IF NOT EXISTS doc_review (
+  review_id       TEXT PRIMARY KEY,          -- field_id, reviewed_at, reviewer 에서 결정된다
+  field_id        TEXT NOT NULL,
+  page_id         TEXT NOT NULL,             -- field_id 의 앞부분 (조회용)
+  seq             INTEGER NOT NULL,          -- 파일에서의 줄 번호. 같은 시각이면 뒤의 것이 유효
+  verdict         TEXT NOT NULL,             -- value | empty | illegible
+  value           TEXT,                      -- verdict = value 일 때 종이에 적힌 그대로
+  reviewer        TEXT NOT NULL,
+  reviewed_at     TEXT NOT NULL,             -- ISO 8601 UTC
+  note            TEXT,
+  -- 여기부터는 DB 없이도 사람이 읽고 학습 데이터를 만들 수 있게 하는 문맥 (검수 당시의 값)
+  source          TEXT,                      -- "<파일명>#<쪽>"
+  template        TEXT,
+  region          TEXT,
+  field_name      TEXT,
+  row_no          INTEGER,
+  row_key         TEXT,
+  x0 INTEGER, y0 INTEGER, x1 INTEGER, y1 INTEGER,   -- 검수 당시의 bbox. 템플릿을 고치면 달라질 수 있다
+  machine_has_value  INTEGER,                -- 검수 당시 기계가 낸 값
+  machine_value_raw  TEXT,
+  machine_backend    TEXT,
+  machine_confidence REAL
+);
+CREATE INDEX IF NOT EXISTS ix_doc_review_field ON doc_review(field_id);
+CREATE INDEX IF NOT EXISTS ix_doc_review_page ON doc_review(page_id);
 
 -- ── 마스터 ─────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS eq_equipment (
@@ -109,8 +147,9 @@ CREATE TABLE IF NOT EXISTS prod_haul (
   material        TEXT NOT NULL,
   level           TEXT NOT NULL,
   shift           TEXT,                      -- day | night | NULL
-  has_value       INTEGER NOT NULL,
-  trips           INTEGER,                   -- 인식된 횟수 (인식기가 없으면 NULL)
+  has_value       INTEGER NOT NULL,          -- 최종 값 유무
+  trips           INTEGER,                   -- 최종 횟수 (검수가 있으면 검수값, 없으면 기계가 읽은 값)
+  trips_raw       INTEGER,                   -- 기계가 읽은 횟수 (인식기가 없으면 NULL). 검수해도 바뀌지 않는다
   confidence      REAL,
   source_field_id TEXT REFERENCES doc_field(field_id),
   review_status   TEXT NOT NULL
@@ -127,8 +166,10 @@ CREATE TABLE IF NOT EXISTS xcheck_haul (
   vehicle_no   TEXT,
   log_has      INTEGER,                      -- 차량별 일보 셀의 값 유무 (NULL = 그 차량의 일보가 없음)
   matrix_has   INTEGER,                      -- 행렬 셀의 값 유무
-  log_trips    INTEGER,
+  log_trips    INTEGER,                      -- 최종 값 기준 (status 는 이것으로 판정)
   matrix_trips INTEGER,
+  log_trips_raw    INTEGER,                  -- 기계 값 기준 — 인식기끼리 비교할 때 본다
+  matrix_trips_raw INTEGER,
   status       TEXT NOT NULL,                -- match | mismatch | missing_log | missing_matrix
   PRIMARY KEY (work_date, slot, material, level)
 );

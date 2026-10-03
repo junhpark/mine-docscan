@@ -18,6 +18,7 @@ from ..forms.sitepack import SitePack
 from ..forms.template import Template
 from ..imaging.cells import CellObs
 from ..recognize.base import CellContext, Recognition, Recognizer
+from ..review.store import apply_verdict, effective
 from ..store.db import upsert
 
 
@@ -55,11 +56,24 @@ def field_row(ctx: PageContext, o: CellObs, *, has_value: bool | None, value_raw
         "field_id": field_id(ctx, o), "page_id": ctx.page_id, "region": o.cell.region, "row_no": o.cell.row,
         "field_name": o.cell.name, "kind": o.cell.kind, "row_key": o.cell.row_key,
         "x0": x0, "y0": y0, "x1": x1, "y1": y1, "ink": o.ink,
+        "has_value_raw": None if has_value is None else int(has_value),
         "has_value": None if has_value is None else int(has_value),
         "value_raw": value_raw, "value_final": value_final, "confidence": confidence,
         "candidates": json.dumps(candidates or [], ensure_ascii=False), "backend": backend,
         "review_status": review_status, "reviewed_by": None, "reviewed_at": None,
     }
+
+
+def apply_reviews(ctx: PageContext, rows: list[dict]) -> list[dict]:
+    """기계가 만든 필드 행에 유효한 검수를 덮는다 (value_final·has_value·review_status·reviewed_by·reviewed_at).
+
+    기계 값(value_raw, confidence, backend, has_value_raw)은 그대로다. 검수된 셀도 인식기는 돌렸으므로
+    새 인식기의 value_raw 를 검수값과 비교할 수 있다. 업무 테이블은 이 함수가 돌려준 최종 행에서 만든다.
+    """
+    reviews = effective(ctx.con, page_id=ctx.page_id)
+    if not reviews:
+        return rows
+    return [apply_verdict(r, reviews[r["field_id"]]) if r["field_id"] in reviews else r for r in rows]
 
 
 def recognize(ctx: PageContext, cells: list[CellObs], choices: dict[str, list[str]] | None = None) -> list[Recognition]:
@@ -94,6 +108,7 @@ class FormHandler:
                                       value_final=None, confidence=None, candidates=None,
                                       backend="ink", review_status="auto"))
         rows += self.load_handwritten(ctx, hw)
+        rows = apply_reviews(ctx, rows)
         upsert(ctx.con, "doc_field", rows)
         return {"fields": len(rows), "pending": sum(r["review_status"] == "pending" for r in rows)}
 
@@ -116,6 +131,15 @@ class FormHandler:
     def finalize(self, con: sqlite3.Connection, site: SitePack, settings: Settings) -> dict:
         """모든 문서를 처리한 뒤 한 번 호출된다 (양식 간 교차검증 등)."""
         return {}
+
+    def machine_final(self, row: dict) -> str | None:
+        """기계만으로 정했을 때의 value_final. 검수를 다시 적용하기 전에 행을 기계 상태로 되돌릴 때 쓴다."""
+        return row["value_raw"]
+
+    def on_review(self, con: sqlite3.Connection, site: SitePack, settings: Settings, field_id: str) -> None:
+        """검수를 저장한 직후 호출된다: 이 필드로 만든 업무 행을 파이프라인을 다시 돌리지 않고 갱신한다.
+        기본은 아무것도 하지 않는다 (업무 테이블이 없는 핸들러)."""
+        return None
 
 
 def _printed_value(o: CellObs) -> str | None:

@@ -8,6 +8,7 @@
 | 스캔 원본 (PDF·이미지) | 공유 드라이브의 `mine-docscan/` (= `ARCHIVE_ROOT`) | **아니오** |
 | 사이트 팩 (템플릿·기준 이미지·라벨·회귀 기준) | 공유 드라이브의 `mine-docscan/site-packs/<현장>/` (= `SITE`) | **아니오** |
 | 정답 (CSV, 엑셀) | 공유 드라이브, 스캔 원본 옆 | **아니오** |
+| 검수 기록 (`reviews/reviews.jsonl`) | 사이트 팩 안 (= `SITE/reviews/`) | **아니오** — 사람이 입력한 값, 다시 만들 수 없다 |
 | 정합 이미지, SQLite DB, 리포트 | 각자의 로컬 디스크 (= `WORK_ROOT`) | 아니오 (언제든 다시 만든다) |
 | 모델 가중치 | 로컬 또는 모델 저장소 | 아니오 |
 
@@ -61,9 +62,9 @@ mine-docscan/                 ← MINEDOCSCAN_ARCHIVE_ROOT
 
 현장 문서에는 작업자 이름, 서명, 차량번호가 있다. 저장소에 한 번 들어가면 나중에 지워도 기록에 남는다.
 
-- 스캔 원본과 그 일부를 잘라낸 이미지
+- 스캔 원본과 그 일부를 잘라낸 이미지 — 검수 화면의 갈무리도 마찬가지다
 - 기준 이미지(`reference.png`)와 실제 템플릿 YAML — 행렬 양식의 머리글에 이름·차량번호가 인쇄되어 있다
-- 페이지 라벨, 정답 CSV·엑셀
+- 페이지 라벨, 정답 CSV·엑셀, 검수 기록(`reviews.jsonl` — 적힌 값과 출처가 들어 있다)
 - 실제 이름·차량번호를 예시로 쓴 문서·주석·테스트·커밋 메시지
 - API 키와 비밀값 (`.env`, `minedocscan.toml`)
 
@@ -97,6 +98,7 @@ mine-docscan/                 ← MINEDOCSCAN_ARCHIVE_ROOT
   pytest -m realdata                                # 같은 검사
   ```
   수치가 달라지면 좋아진 것인지 망가진 것인지 사람이 확인한다. 기준을 갱신할 때는 무엇이 왜 바뀌었는지 커밋 메시지에 적는다.
+  회귀는 **검수 파일을 읽지 않는다** — 코드(기계)의 수치만 본다. 검수가 쌓여도 기준과 어긋나지 않는다.
   기준은 실행 환경(OS, OpenCV 버전)에 따라 체크 판정 몇 건이 달라질 수 있다. 다른 컴퓨터에서 처음 돌렸을 때 차이가 나면
   코드가 아니라 환경 차이일 수 있으므로 먼저 변경 없는 코드로 비교한다.
 - **정답과 비교**:
@@ -105,6 +107,28 @@ mine-docscan/                 ← MINEDOCSCAN_ARCHIVE_ROOT
   minedocscan eval --answers <answers.json>                # 일반 형식
   ```
 - **오라클 확인**: `minedocscan run --inspection-csv <폴더> <입력>` 뒤 `eval` → CER 0 이어야 한다.
+
+### 검수값으로 평가하기
+
+운반 횟수의 정답은 검수 도구로 만든다 (ADR 0007). 검수 기록은 사이트 팩의 `reviews/reviews.jsonl` 에 쌓이고
+(한 줄 = 한 건, 추가 전용), DB 를 지우고 다시 돌려도 파이프라인이 시작할 때 읽어 들여 그대로 붙는다.
+
+```bash
+minedocscan review serve --queue haul-numbers --n 1500 --reviewer jp   # 표본 1,500셀(빈 칸 10 %), 브라우저 127.0.0.1:8765
+minedocscan review serve --queue mismatch --reviewer jp                 # 교차검증 불일치 칸: 두 문서의 셀을 같이 본다
+minedocscan review serve --queue pending --template <양식> --reviewer jp  # 운영용: 기계 값을 미리 채워 준다
+minedocscan review stats                                                # 판정·양식·날짜·검수자별 건수
+minedocscan review export-answers answers.json                          # value/empty 검수 → 정답 파일 (illegible 제외)
+minedocscan run DB_scans --fresh                                        # 새 인식기로 다시 돌린다. 검수값은 그대로 붙는다
+minedocscan eval --answers answers.json --target raw --only-listed      # 기계가 읽은 값(value_raw)을 검수값과 비교
+minedocscan report                                                      # 횟수 일치율: 최종 값 기준 / 기계 값 기준
+```
+
+- `--target raw` 를 써야 한다. `final` 은 검수값 자신이라 언제나 맞는다.
+- `--only-listed`: 표본만 검수했으므로 정답에 있는 셀만 평가한다. 없으면 그 표의 나머지 셀을 빈 칸 정답으로 친다.
+- 결과에는 정답이 빈 칸인 셀과 값이 있는 셀의 정확도가 따로 나오고, 값 유무 판단의 정밀도·재현율이 같이 나온다.
+- 검수 파일은 사람이 입력한 유일한 데이터다. 사이트 팩과 함께 백업한다. 한 번에 한 사람만 입력한다.
+- 검수자가 한 사람이면 그 사람의 오독이 정답에 들어간다. 표본의 일부는 두 번째 사람이 따로 입력해 일치도를 본다 (아직 도구에 없다).
 
 ### 정답 형식
 

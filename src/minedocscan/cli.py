@@ -7,6 +7,7 @@
   regress    사이트 팩의 기준 수치와 비교하는 실데이터 회귀 검사
   template   새 양식의 템플릿 뼈대 만들기
   synth      개인정보 없는 합성 사이트 팩과 스캔 문서 만들기
+  review     검수: serve(로컬 화면), stats(진행 현황), export-answers(검수값 → 정답 파일)
 
 경로는 --site / --archive-root / --work-root 또는 환경변수·설정 파일로 준다 (config.py).
 """
@@ -56,6 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--answers", help="정답 JSON (synth 가 만드는 answers.json 형식)")
     g.add_argument("--inspection-csv", metavar="DIR", help="점검표 정답 CSV 폴더 (YYMMDD.csv)")
     p.add_argument("--template", help="--inspection-csv 가 가리키는 템플릿 (기본: 핸들러가 inspection 인 유일한 템플릿)")
+    p.add_argument("--target", choices=["final", "raw"], default="final",
+                   help="final = 최종값(교정·검수 후), raw = 기계가 읽은 값. 검수값과 비교할 때는 raw")
+    p.add_argument("--only-listed", action="store_true",
+                   help="정답에 있는 셀만 평가 (표본 검수로 만든 정답). 기본은 정답이 있는 표의 셀 전부(없는 셀은 빈 칸)")
 
     p = sub.add_parser("regress", parents=[common], help="사이트 팩 기준 수치와 비교 (실데이터 회귀)")
     p.add_argument("--update", action="store_true", help="지금 결과를 새 기준으로 저장")
@@ -76,6 +81,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("out", help="출력 폴더 (site/, scans/, truth.json, answers.json)")
     p.add_argument("--days", type=int, default=3)
     p.add_argument("--seed", type=int, default=0)
+
+    p = sub.add_parser("review", parents=[common], help="검수 도구")
+    rsub = p.add_subparsers(dest="review_command", required=True)
+    r = rsub.add_parser("serve", parents=[common], help="로컬 검수 화면 (127.0.0.1)")
+    r.add_argument("--queue", default="haul-numbers", choices=["haul-numbers", "mismatch", "pending"])
+    r.add_argument("--n", type=int, default=1500, help="haul-numbers 표본 크기 (기본 1500)")
+    r.add_argument("--seed", type=int, default=0, help="표본의 순서를 정하는 씨앗. 같은 값이면 같은 표본")
+    r.add_argument("--empty-share", type=float, default=0.1, help="표본 중 빈 칸 비율 (기본 0.1)")
+    r.add_argument("--template", help="pending: 이 템플릿만")
+    r.add_argument("--kind", choices=["handwritten_number", "handwritten_text"], help="pending: 이 종류만")
+    r.add_argument("--reviewer", help="검수자 식별자 (짧은 영문). 없으면 서버를 띄우지 않는다")
+    r.add_argument("--port", type=int, default=8765)
+    rsub.add_parser("stats", parents=[common], help="검수 진행 현황")
+    r = rsub.add_parser("export-answers", parents=[common], help="유효한 검수(value, empty) → answers.json")
+    r.add_argument("out", help="출력 파일 (eval --answers 로 읽는 형식)")
     return ap
 
 
@@ -181,26 +201,32 @@ def cmd_report(a) -> int:
 
 
 def cmd_eval(a) -> int:
-    from .evaluate.fields import evaluate_fields
+    from .evaluate.fields import evaluate_fields, evaluate_presence
     from .evaluate.inspection_csv import evaluate_inspection, load_answers
     from .recognize import load_answers_json
     from .store.db import open_db
 
     s = _settings(a)
     con = open_db(s.resolved_db_url)
+    kw = {"target": a.target, "only_listed": a.only_listed}
     if a.answers:
-        data = {"fields": evaluate_fields(con, load_answers_json(a.answers))}
+        data = {"fields": evaluate_fields(con, load_answers_json(a.answers), **kw)}
     else:
         site = _need_site(s)
         name = a.template or _only_inspection_template(site)
         answers = load_answers(a.inspection_csv, site.templates[name])
-        data = {"fields": evaluate_fields(con, answers),
+        data = {"fields": evaluate_fields(con, answers, **kw),
                 "insp_daily": evaluate_inspection(con, answers, site.templates[name])}
-    f = data["fields"]
-    lines = [f"필드 {f['n']}개: CER {f['cer']}, 필드 정확도 {f['field_accuracy']}, 자동 적재율 {f['auto_rate']}"
-             f" (DB 에 없는 정답 {f['answers_not_in_db']}개)"]
+    data["presence"] = evaluate_presence(con)
+    f, pr = data["fields"], data["presence"]
+    lines = [f"필드 {f['n']}개 ({a.target}): CER {f['cer']}, 필드 정확도 {f['field_accuracy']}, 자동 적재율 {f['auto_rate']}"
+             f" (DB 에 없는 정답 {f['answers_not_in_db']}개)",
+             f"  정답에 값이 있는 셀 {f['n_value']}개 정확도 {f['accuracy_value']}, 빈 칸 {f['n_empty']}개 정확도 {f['accuracy_empty']}"]
     for k, v in f["by_field_kind"].items():
-        lines.append(f"  {k}: n={v['n']} CER {v['cer']} 정확도 {v['field_accuracy']} 자동 {v['auto_rate']}")
+        lines.append(f"  {k}: n={v['n']} CER {v['cer']} 정확도 {v['field_accuracy']} (값 {v['accuracy_value']} / 빈 칸 "
+                     f"{v['accuracy_empty']}) 자동 {v['auto_rate']}")
+    lines.append(f"값 유무 판단 (검수 {pr['n']}셀): 정밀도 {pr['precision']}, 재현율 {pr['recall']} "
+                 f"(tp {pr['tp']}, fp {pr['fp']}, fn {pr['fn']}, tn {pr['tn']})")
     if "insp_daily" in data:
         d = data["insp_daily"]
         lines.append(f"점검 행 {d['rows']}개: 점검내역 CER {d['remark_corpus_cer']}, "
@@ -271,13 +297,69 @@ def _only_inspection_template(site) -> str:
     return names[0]
 
 
+def _review_db(a):
+    """검수 명령 공통: 사이트 팩, DB, 검수 파일 읽어 들이기."""
+    from .review.store import import_into
+    from .store.db import open_db
+
+    s = _settings(a)
+    site = _need_site(s)
+    con = open_db(s.resolved_db_url)
+    imported = import_into(con, s.reviews_path(site.root))
+    return s, site, con, imported
+
+
+def cmd_review(a) -> int:
+    if a.review_command == "serve":
+        from .review.server import ReviewApp, serve
+
+        if not a.reviewer:
+            raise SystemExit("검수자를 지정하세요: --reviewer <짧은 영문 식별자>. 검수 기록마다 남습니다.")
+        s, site, con, imported = _review_db(a)
+        if imported["skipped"]:
+            print(f"주의: 검수 파일에서 깨진 줄 {imported['skipped']}개를 건너뛰었습니다 ({imported['path']})", file=sys.stderr)
+        app = ReviewApp(con, site, s, a.reviewer, a.queue,
+                        {"n": a.n, "seed": a.seed, "empty_share": a.empty_share, "template": a.template, "kind": a.kind})
+        try:
+            serve(app, port=a.port)
+        except OSError as e:
+            raise SystemExit(str(e)) from e
+        return 0
+    if a.review_command == "stats":
+        from .review.store import stats
+
+        s, site, con, imported = _review_db(a)
+        st = stats(con)
+        kv = lambda d: ", ".join(f"{k} {v}" for k, v in d.items()) or "-"      # noqa: E731
+        lines = [f"검수 파일: {imported['path']} — 기록 {st['records']}건 (깨진 줄 {imported['skipped']}개), 필드 {st['fields']}개",
+                 "판정별: " + kv(st["by_verdict"]), "양식별: " + kv(st["by_template"]), "날짜별: " + kv(st["by_date"]),
+                 "검수자별(기록): " + kv(st["by_reviewer"]),
+                 f"템플릿 좌표가 달라진 기록 {st['bbox_changed']}개, 이 DB 에 없는 필드 {st['fields_not_in_db']}개"]
+        _emit(a, {"reviews": imported, "stats": st}, "\n".join(lines))
+        return 0
+    if a.review_command == "export-answers":
+        from .review.store import export_answers
+
+        s, site, con, _imported = _review_db(a)
+        n = export_answers(con, a.out)
+        _emit(a, {"out": a.out, "answers": n},
+              f"정답 {n}개를 썼습니다: {a.out}\n비교: minedocscan eval --answers {a.out} --target raw --only-listed")
+        return 0
+    raise SystemExit(f"알 수 없는 review 명령: {a.review_command}")
+
+
 COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "eval": cmd_eval, "regress": cmd_regress,
-            "template": cmd_template, "synth": cmd_synth}
+            "template": cmd_template, "synth": cmd_synth, "review": cmd_review}
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .store.db import SchemaVersionError
+
     args = build_parser().parse_args(argv)
-    return COMMANDS[args.command](args)
+    try:
+        return COMMANDS[args.command](args)
+    except SchemaVersionError as e:                 # 안내문만 보이면 된다. 트레이스백은 필요 없다
+        raise SystemExit(str(e)) from e
 
 
 if __name__ == "__main__":

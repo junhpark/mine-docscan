@@ -9,7 +9,8 @@ HEADERS = {"T01": ("V-101", "ALPHA"), "T02": ("V-102", "BRAVO"), "T03": ("V-103"
 def _row(hid, role, page, slot, vehicle, operator, level, has, trips=None, material="ORE", shift=None):
     return {"haul_id": hid, "work_date": DAY, "source_form": role, "source_role": role, "page_id": page, "slot": slot,
             "vehicle_no": vehicle, "operator": operator, "material": material, "level": level, "shift": shift,
-            "has_value": has, "trips": trips, "confidence": None, "source_field_id": None, "review_status": "auto"}
+            "has_value": has, "trips": trips, "trips_raw": trips, "confidence": None, "source_field_id": None,
+            "review_status": "auto"}
 
 
 def _db(matrix: dict, logs: dict):
@@ -23,7 +24,7 @@ def _db(matrix: dict, logs: dict):
     for page, (veh, op, vals) in logs.items():
         for lv in ("L0", "L1"):
             for shift in ("day", "night"):
-                t = dict(vals.get(lv, [])).get(shift, 0)
+                t = dict(vals.get(lv, [])).get(shift, 0)        # 0 = 빈 칸, None = 값은 있는데 횟수 모름
                 rows.append(_row(f"l:{page}:{lv}:{shift}", "log", page, None, veh, op, lv, int(t != 0), t or None,
                                  shift=shift))
     upsert(con, "prod_haul", rows)
@@ -86,3 +87,19 @@ def test_excluded_material_and_rerun_is_idempotent():
     assert "missing_matrix" not in first
     assert crosscheck_haul(con, exclude_materials=["SURFACE"]) == first
     assert con.execute("SELECT COUNT(*) FROM xcheck_haul").fetchone()[0] == sum(first.values())
+
+
+def test_partial_counts_compare_presence_only():
+    """주간은 검수(2)했고 야간은 아직(값은 있는데 횟수 모름)이면 2 와 행렬 4 를 비교하지 않는다 — 값 유무만 본다."""
+    con = _db({("T01", "L0"): 4},
+              {"p1": ("V-101", "ALPHA", {"L0": [("day", 2), ("night", None)]})})
+    crosscheck_haul(con)
+    row = con.execute("SELECT status, log_trips, matrix_trips FROM xcheck_haul WHERE slot='T01' AND level='L0'").fetchone()
+    assert tuple(row) == ("match", None, 4)
+    # 야간까지 검수하면 횟수로 비교한다
+    con.execute("UPDATE prod_haul SET trips=2 WHERE haul_id='l:p1:L0:night'")
+    crosscheck_haul(con)
+    assert con.execute("SELECT status FROM xcheck_haul WHERE slot='T01' AND level='L0'").fetchone()[0] == "match"
+    con.execute("UPDATE prod_haul SET trips=3 WHERE haul_id='l:p1:L0:night'")
+    crosscheck_haul(con)
+    assert con.execute("SELECT status FROM xcheck_haul WHERE slot='T01' AND level='L0'").fetchone()[0] == "mismatch"

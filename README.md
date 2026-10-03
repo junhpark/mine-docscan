@@ -28,6 +28,7 @@ pytest                                                    # 약 1분
 minedocscan synth out/demo                                # 합성 사이트 팩 + 3일치 스캔 + 정답
 minedocscan run   --site out/demo/site --archive-root out/demo/scans --work-root out/demo/work
 minedocscan eval  --answers out/demo/answers.json --work-root out/demo/work
+minedocscan review serve --site out/demo/site --work-root out/demo/work --reviewer me   # 검수 화면 (127.0.0.1:8765)
 ```
 
 `run` 이 끝나면 양식별 페이지 수, 정합 품질, 검수 대기 필드 수, 교차검증 결과가 나옵니다.
@@ -86,7 +87,8 @@ config/        설정 예시
 
 ## 현재 상태
 
-1단계(스캐너–인식–데이터베이스)의 골격이 동작합니다. 손글씨를 읽는 인식 백엔드와 검수 화면은 아직 없습니다.
+1단계(스캐너–인식–데이터베이스)의 골격이 동작하고, 셀을 보고 값을 입력하는 최소 검수 도구가 있습니다
+(검수값이 곧 정답·학습 데이터가 됩니다). 손글씨를 읽는 인식 백엔드는 아직 없습니다.
 무엇이 구현되었고 무엇이 남았는지는 [docs/ROADMAP.md](docs/ROADMAP.md) 에 있습니다.
 
 ## 주의

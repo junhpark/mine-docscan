@@ -6,6 +6,9 @@
    "recognizer": "null",
    "report": { …build_report() 결과… }}
 
+검수 파일은 읽어 들이지 않는다. 회귀는 코드(기계)의 수치를 보는 것이고, 검수가 쌓일수록 pending 과 trips 가
+달라지면 코드 변경 없이도 기준과 어긋나기 때문이다. 검수값과 비교하는 평가는 eval --target raw 로 따로 한다.
+
 수치가 달라졌다면 둘 중 하나다: 고쳐서 좋아졌거나(기준을 갱신), 망가뜨렸거나(코드를 고친다).
 어느 쪽인지는 사람이 본다. 기준 갱신은 `minedocscan regress --update`.
 """
@@ -67,7 +70,7 @@ def run_regression(settings: Settings, site: SitePack | None = None, update: boo
     recognizer = spec.get("recognizer", "null")
     with tempfile.TemporaryDirectory(prefix="minedocscan-regress-") as tmp:
         s = replace(settings, work_root=Path(tmp), db_url=None, save_aligned=False)
-        pipe = Pipeline(s, site=site, recognizer=get_recognizer(recognizer))
+        pipe = Pipeline(s, site=site, recognizer=get_recognizer(recognizer), load_reviews=False)
         pipe.run([settings.archive_root / i for i in inputs])
         actual = build_report(pipe.con)
         pipe.con.close()

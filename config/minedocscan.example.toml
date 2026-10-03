@@ -5,6 +5,7 @@
 archive_root = "D:/shared/mine-docscan"                      # 스캔 원본. 읽기 전용으로 취급
 site         = "D:/shared/mine-docscan/site-packs/my-site"   # 사이트 팩
 work_root    = "C:/minedocscan-work"                         # DB·정합 이미지. 로컬 디스크, 동기화 폴더 밖
+# reviews    = "D:/shared/mine-docscan/site-packs/my-site/reviews/reviews.jsonl"   # 검수 기록 (기본: <site>/reviews/reviews.jsonl)
 
 [pipeline]
 dpi = 200                    # 템플릿 좌표계의 해상도. 템플릿을 만든 해상도와 같아야 한다
