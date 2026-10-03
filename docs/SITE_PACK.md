@@ -33,6 +33,12 @@ date_from_filename = '(?P<yyyy>\d{4})-(?P<mm>\d{2})-(?P<dd>\d{2})'
 [crosscheck.haul]
 # 교차검증에서 뺄 광종 (한쪽 양식에만 있는 행)
 exclude_materials = ["SURFACE"]
+
+[eval]
+# 평가셋 분할 (ADR 0009): 날짜 단위, hash(split_salt, 날짜) < test_share 면 test. 없으면 소금값은 사이트 이름, 비율 0.2.
+# 소금값을 바꾸는 것은 평가셋을 버리는 것이다 — 그 전의 수치와 비교하지 않는다
+split_salt = "synthetic-2030"
+test_share = 0.2
 ```
 
 코드에서는 `site.option("crosscheck.haul", "exclude_materials", [])` 처럼 읽는다. 새 옵션이 필요하면 여기에 절을 추가한다.
@@ -42,6 +48,8 @@ exclude_materials = ["SURFACE"]
 ```yaml
 name: synth_haul_log               # 템플릿 이름 (영문 소문자·밑줄). DB 의 template_name
 title: Dump truck daily haul log   # 사람이 읽는 이름
+# family: haul_matrix              # 선택: 같은 양식의 개정판 묶음. valid_from / valid_to (YYYY-MM-DD, 양 끝 포함) 로 가린다
+# valid_to: 2030-01-07
 reference_image: reference.png
 dpi: 200                           # 좌표계의 해상도. 설정의 dpi 와 같아야 한다
 page_size: [2339, 1654]            # 기준 이미지의 (폭, 높이) px
@@ -66,8 +74,13 @@ regions:                           # 한 페이지에 표가 여러 개일 수 �
       - {row: 1, key: "ORE|L1", material: ORE, level: L1}
 
 fields:                            # 표 밖의 자유 필드
-  - {name: vehicle_no, kind: handwritten_text, bbox: [340, 290, 730, 355]}    # x0, y0, x1, y1
+  - {name: vehicle_no, kind: handwritten_text, bbox: [340, 290, 730, 355], meta_key: vehicle_no}   # x0, y0, x1, y1
+  - {name: operator,   kind: handwritten_text, bbox: [920, 290, 1290, 355], meta_key: operator}
 ```
+
+`meta_key` 가 있는 자유 필드의 검수값은 그 쪽의 메타가 된다 (검수 화면 `--queue page-fields`). 쪽 메타의 우선순위는
+**검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙** 이다. `date` 는 받지 않는다 — 날짜는 파일명 규칙과 문서 라벨로 정한다.
+실제 사이트 팩의 일보 템플릿에는 위 두 줄처럼 차량번호·작성자 필드에 `meta_key` 를 넣는다 (bbox 는 그 양식의 값으로).
 
 ### 열의 종류 (`kind`)
 
@@ -96,7 +109,8 @@ fields:                            # 표 밖의 자유 필드
 - `handler_options`: `role`(`log` 또는 `matrix`), `region`(횟수 셀이 있는 표)
 - 행 메타: `material`, `level`
 - 열 메타: `role: log` 는 `shift`(`day`/`night`), `role: matrix` 는 `slot`, `header_vehicle_no`, `header_operator`
-- `role: log` 는 페이지마다 차량번호·작성자가 필요하다. 인식기가 생기기 전에는 라벨로 준다.
+- `role: log` 는 페이지마다 차량번호·작성자가 필요하다. `meta_key` 필드를 검수 화면에서 입력하거나(권장), 라벨로 준다.
+  행렬의 `header_vehicle_no`·`header_operator` 는 그 화면의 후보 목록이 된다.
 
 ## labels/pages.json
 
@@ -109,7 +123,8 @@ fields:                            # 표 밖의 자유 필드
 }
 ```
 
-우선순위: 페이지 라벨 > 문서 라벨 > 파일명 규칙.
+우선순위: 검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙. 차량번호·작성자는 이제 검수 화면(`--queue page-fields`)으로 넣는 것이 기본이고,
+라벨은 날짜를 고치거나 검수 전에 임시로 줄 때 쓴다.
 
 ## reviews/reviews.jsonl
 
@@ -150,6 +165,17 @@ fields:                            # 표 밖의 자유 필드
    ```
    정합 이미지는 `WORK_ROOT/aligned/<문서 ID>/pNN_<템플릿>.png` 에 있다. 괘선이 템플릿 좌표와 겹치는지 눈으로 본다.
 6. **기준 갱신** — `minedocscan regress --update` 로 새 양식을 포함한 수치를 기준으로 저장한다.
+
+## 개정판(같은 양식의 새 판)을 추가하는 절차
+
+`report --by-month` 에서 어느 달부터 어떤 양식의 정합 수치(괘선 오차·인라이어)가 나빠지거나 배차 관측의 "머리글과 다름"이 늘면 그 달에 양식이 개정된 것이다.
+
+1. 새 판의 깨끗한 쪽에서 기준 이미지를 다시 뜬다: `minedocscan template init <그 쪽> --name <이름>_v2 --roi …`. 열·행 메타(머리글의 운전자·차량번호)를 새 판대로 적는다.
+2. 두 템플릿에 같은 `family` 를 적고, **옛 판에 `valid_to`(마지막 날), 새 판에 `valid_from`(첫 날)** 을 적는다. 겹치면 사이트 팩을 읽을 때 오류다.
+3. `minedocscan info` 로 계열과 기간을 확인하고, 그 기간의 파일을 `run` 해 `report --by-month` 가 두 판으로 갈라지는지 본다.
+4. `regress --update`. 왜 바뀌었는지 커밋 메시지에 적는다.
+
+날짜를 모르는 쪽(파일명 규칙에 안 맞는 파일)은 모든 판이 후보라 틀린 판으로 갈 수 있다. 그런 파일은 문서 라벨로 날짜를 준다.
 
 ### 손봐야 할 때
 

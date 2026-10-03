@@ -36,9 +36,15 @@ minedocscan eval  --answers out/demo/answers.json --work-root out/demo/work
 
 minedocscan review serve --site out/demo/site --work-root out/demo/work --queue haul-numbers --reviewer jp
                                             # 127.0.0.1:8765 — 셀을 보고 값을 입력. 기록은 <site>/reviews/reviews.jsonl
-minedocscan review stats  --site … --work-root …          # 얼마나 했는지
-minedocscan review export-answers answers.json --site … --work-root …
-minedocscan eval --answers answers.json --target raw --only-listed --work-root …   # 기계 값을 검수값과 비교
+                                            # --queue page-fields 는 일보의 차량번호·작성자 (수동 라벨 대신)
+minedocscan review stats  --site … --work-root …          # 얼마나 했는지 (분할별 포함)
+minedocscan review export-answers answers.json --split test --site … --work-root …
+minedocscan eval --answers answers.json --target raw --only-listed --split test --work-root …   # 기계 값을 검수값과 비교
+minedocscan review export-crops ~/crops --split train --site … --archive-root … --work-root …  # 학습용 크롭 (저장소 밖)
+
+minedocscan run DB_scans --skip-existing    # 전체 묶음: 깨진 파일은 failed 로 격리, 한 것은 건너뜀 (템플릿·인식기를 바꾼 뒤엔 --fresh)
+minedocscan report --by-month               # 양식 × 월 진단 (개정판의 흔적)
+minedocscan pages --status unknown_form --thumbs   # 양식을 못 찾은 쪽 + 미리보기 (WORK_ROOT/thumbs)
 
 # 실데이터 (저장소 밖 — docs/DATA.md)
 export MINEDOCSCAN_SITE=…/site-packs/<현장>  MINEDOCSCAN_ARCHIVE_ROOT=…/mine-docscan  MINEDOCSCAN_WORK_ROOT=…/work
@@ -68,19 +74,21 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 | `imaging/cells.py` | 셀 크롭과 잉크 비율 |
 | `imaging/marks.py` | ✓ 판정 (나란한 두 칸 중 어디에 표시했나) |
 | `imaging/blobs.py` | 괘선 제거 + RLSA 로 글씨 덩어리를 셀에 배정, 여러 칸에 걸친 메모 구분 |
-| `forms/template.py` | 템플릿 로더·검증 |
-| `forms/sitepack.py` | 사이트 팩 (템플릿·현장 옵션·페이지 라벨) |
-| `forms/classify.py` | 페이지가 어느 양식인지 |
+| `imaging/hires.py` | 원본 해상도 크롭: 쪽의 호모그래피로 원본(300 dpi)에서 그 셀만 다시 정합 |
+| `forms/template.py` | 템플릿 로더·검증 (`meta_key`, `family`/`valid_from`/`valid_to`) |
+| `forms/sitepack.py` | 사이트 팩 (템플릿·현장 옵션·페이지 라벨·평가셋 소금값), `templates_for(date)` |
+| `forms/classify.py` | 페이지가 어느 양식인지 (그날 유효한 판만 후보) |
 | `recognize/` | 인식 백엔드 인터페이스와 등록소 (`null`, `oracle`) |
 | `correct/` | 교정 백엔드 인터페이스와 등록소 (`none`) |
 | `handlers/` | 양식의 의미: 셀 → `doc_field` → 업무 테이블 (`generic`, `inspection`, `haul`) |
 | `validate/crosscheck.py` | 양식 간 교차검증, 그날의 실제 배차 관측 (날짜 지정 재계산 가능) |
-| `review/` | 검수: `store.py`(추가 전용 `reviews.jsonl` ↔ `doc_review`, `save()`), `queue.py`(대기열 3종), `crops.py`, `server.py` + `static/index.html`(표준 라이브러리, 127.0.0.1) |
-| `store/` | `schema.sql`, `upsert()` |
-| `pipeline/runner.py` | 단계 순서와 상태 기록만 안다 |
-| `evaluate/` | CER·필드 정확도·자동 적재율, 실데이터 회귀 |
-| `report.py` | DB 현황 요약 (회귀 테스트가 비교하는 수치) |
-| `tools/synth.py` | 합성 양식·스캔·정답 생성기 |
+| `review/` | 검수: `store.py`(추가 전용 `reviews.jsonl` ↔ `doc_review`, `save()`, 쪽 메타 우선순위), `queue.py`(대기열 4종), `crops.py`(원본/정합), `export.py`(크롭 내보내기), `server.py` + `static/index.html`(표준 라이브러리, 127.0.0.1) |
+| `store/` | `schema.sql`, `upsert()`, 스키마 버전 |
+| `pipeline/runner.py` | 단계 순서와 상태 기록만 안다. 오류 격리(`failed`/`error`), `--skip-existing` |
+| `evaluate/` | CER·필드 정확도·자동 적재율, 값 유무 정밀도·재현율, 날짜 분할(`split.py`), 실데이터 회귀(검수 없이) |
+| `report.py` | DB 현황 요약 (회귀 테스트가 비교하는 수치), `by_month`, `list_pages` |
+| `tools/synth.py` | 합성 양식·스캔·정답 생성기 (같은 seed 면 바이트까지 같다, 행렬 개정판 선택) |
+| `tools/thumbs.py` | 쪽 미리보기 (1/4, WORK_ROOT/thumbs) |
 | `tools/mktemplate.py` | 새 양식의 템플릿 뼈대 |
 | `cli.py` | `minedocscan` 명령 |
 
@@ -134,6 +142,10 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 - PDF 는 200 dpi 회색조로 직접 렌더링한다. 렌더링 경로를 바꾸면 체크 판정 몇 개가 뒤집힌다 — 회귀 기준을 다시 잡아야 한다.
 - 스캔 원본은 300 dpi 다. 정합과 판정은 200 dpi 로 충분하지만, 인식기에 넘기는 크롭은 원본 해상도가 나을 수 있다 (아직 비교하지 않았다).
 - 언어모델에 문장을 다시 쓰게 하면 긴 셀에서 항목 순서가 바뀌고 수량이 달라진다 (선행 연구의 비교표). 교정은 후보 선택 + 숫자 불변 검사.
+- 합성 PDF 도 저장할 때 새 /ID 가 들어가면 같은 seed 인데 문서 해시가 달라져 테스트가 운에 따라 실패한다 → `no_new_id`.
+- 회귀 검사는 검수 파일을 읽지 않는다. 검수가 쌓이면 코드 변경 없이도 `pending`·`with_trips` 가 달라진다.
+- 한 묶음 안에서 양식이 개정되면 모양으로는 못 가린다(분류 여유 ≈ 1). 날짜로 가린다 (ADR 0010).
+- 주간만 검수하고 야간은 아직인 칸은 합을 모르는 것으로 둔다. 아니면 일부 검수 중에 가짜 불일치가 생긴다.
 
 ## 하지 말 것
 
