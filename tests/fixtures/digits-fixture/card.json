@@ -1,0 +1,340 @@
+{
+ "name": "digits-fixture",
+ "created_at": "2026-10-03T12:55:20Z",
+ "code_version": {
+  "minedocscan": "0.2.0",
+  "git": "99dffa2"
+ },
+ "spec": {
+  "res": "source",
+  "scale": 1.5,
+  "pad": "auto"
+ },
+ "input": {
+  "width": 96,
+  "height": 32,
+  "channels": 3,
+  "preprocess": "recognize/digits/model.py: resize_input → normalize (잉크, 세로 위치, 가로 위치)"
+ },
+ "chars": "0123456789?",
+ "kinds": [
+  "handwritten_number"
+ ],
+ "architecture": {
+  "layers": "conv3x3(16)-pool2-conv3x3(32)-pool2-conv3x3(64)-conv3x3(64)-pool(2,1)-conv3x3(96)-maxpool(4,1)-conv1x3(96)-conv1x1(12); 합성곱마다 BN+ReLU; CTC, T=24",
+  "channels": [
+   16,
+   32,
+   64,
+   64,
+   96
+  ],
+  "params": 145180,
+  "onnx_bytes": 581951,
+  "exporter": "torchscript, opset 13",
+  "batch": 1
+ },
+ "train_args": {
+  "steps": 2500,
+  "batch": 64,
+  "lr": 0.003,
+  "synthetic": 8000,
+  "val_share": 0.2,
+  "target_auto_error": 0.005,
+  "geometry": [
+   [
+    112,
+    22
+   ],
+   [
+    92,
+    21
+   ]
+  ],
+  "channels": [
+   16,
+   32,
+   64,
+   64,
+   96
+  ],
+  "eval_every": 500,
+  "augment": "이동 ±4%/±6%, 크기 0.9–1.1, 회전 ±3°, 기울임 ±0.12, 대비 0.7–1.2, 밝기 ±0.1, 흐림·잡음 30%; 뒤집기 없음",
+  "mix": "합성만"
+ },
+ "seed": 0,
+ "data": {
+  "crops": null,
+  "train": {
+   "cells": 0,
+   "dates": 0,
+   "by_verdict": {},
+   "by_value": {}
+  },
+  "val": {
+   "cells": 0,
+   "dates": 0,
+   "by_verdict": {},
+   "by_value": {}
+  },
+  "synthetic": {
+   "cells": 8000,
+   "geometry": [
+    [
+     112,
+     22
+    ],
+    [
+     92,
+     21
+    ]
+   ],
+   "val_cells": 1000
+  },
+  "val_rule": {
+   "salt": "synthetic:val",
+   "share": 0.2,
+   "rule": "sha256(salt:날짜) 앞 32비트 / 2^32 < share 이면 검증 (evaluate/split.py)"
+  }
+ },
+ "validation": {
+  "source": "synthetic",
+  "cells": 1000,
+  "best_step": 2000,
+  "score": {
+   "all": {
+    "n": 1000,
+    "correct": 989,
+    "accuracy": 0.989
+   },
+   "value": {
+    "n": 550,
+    "correct": 540,
+    "accuracy": 0.9818
+   },
+   "empty": {
+    "n": 450,
+    "correct": 449,
+    "accuracy": 0.9978
+   },
+   "illegible": {
+    "n": 0,
+    "correct": 0,
+    "accuracy": null
+   }
+  },
+  "train_seconds": 97.0,
+  "total_seconds": 118.2,
+  "export_check": {
+   "max_abs_diff": 1.430511474609375e-05,
+   "same_answers": true,
+   "cells": 1000
+  },
+  "calibration": {
+   "cells": 1000,
+   "nll_at_1": 0.04381,
+   "nll": 0.04367
+  }
+ },
+ "temperature": 1.05,
+ "auto_accept": {
+  "target": 0.005,
+  "threshold": 0.8,
+  "met": true,
+  "trips_max": null,
+  "basis": "검증 셀 (synthetic)",
+  "rule": "오류율(자동 적재된 칸 중 정답과 다른 비율)이 목표 이하인 가장 낮은 임계값 (tasks/0003 4.6)",
+  "table": [
+   {
+    "threshold": 0.5,
+    "auto": 995,
+    "auto_value": 547,
+    "auto_empty": 448,
+    "auto_rate": 0.995,
+    "errors": 8,
+    "error_rate": 0.008,
+    "error_ci95": [
+     0.0041,
+     0.0158
+    ]
+   },
+   {
+    "threshold": 0.6,
+    "auto": 993,
+    "auto_value": 545,
+    "auto_empty": 448,
+    "auto_rate": 0.993,
+    "errors": 7,
+    "error_rate": 0.007,
+    "error_ci95": [
+     0.0034,
+     0.0145
+    ]
+   },
+   {
+    "threshold": 0.7,
+    "auto": 988,
+    "auto_value": 540,
+    "auto_empty": 448,
+    "auto_rate": 0.988,
+    "errors": 6,
+    "error_rate": 0.0061,
+    "error_ci95": [
+     0.0028,
+     0.0132
+    ]
+   },
+   {
+    "threshold": 0.8,
+    "auto": 982,
+    "auto_value": 534,
+    "auto_empty": 448,
+    "auto_rate": 0.982,
+    "errors": 4,
+    "error_rate": 0.0041,
+    "error_ci95": [
+     0.0016,
+     0.0104
+    ]
+   },
+   {
+    "threshold": 0.85,
+    "auto": 977,
+    "auto_value": 530,
+    "auto_empty": 447,
+    "auto_rate": 0.977,
+    "errors": 4,
+    "error_rate": 0.0041,
+    "error_ci95": [
+     0.0016,
+     0.0105
+    ]
+   },
+   {
+    "threshold": 0.9,
+    "auto": 973,
+    "auto_value": 526,
+    "auto_empty": 447,
+    "auto_rate": 0.973,
+    "errors": 3,
+    "error_rate": 0.0031,
+    "error_ci95": [
+     0.001,
+     0.009
+    ]
+   },
+   {
+    "threshold": 0.93,
+    "auto": 967,
+    "auto_value": 521,
+    "auto_empty": 446,
+    "auto_rate": 0.967,
+    "errors": 3,
+    "error_rate": 0.0031,
+    "error_ci95": [
+     0.0011,
+     0.0091
+    ]
+   },
+   {
+    "threshold": 0.95,
+    "auto": 957,
+    "auto_value": 511,
+    "auto_empty": 446,
+    "auto_rate": 0.957,
+    "errors": 2,
+    "error_rate": 0.0021,
+    "error_ci95": [
+     0.0006,
+     0.0076
+    ]
+   },
+   {
+    "threshold": 0.97,
+    "auto": 939,
+    "auto_value": 498,
+    "auto_empty": 441,
+    "auto_rate": 0.939,
+    "errors": 1,
+    "error_rate": 0.0011,
+    "error_ci95": [
+     0.0002,
+     0.006
+    ]
+   },
+   {
+    "threshold": 0.98,
+    "auto": 928,
+    "auto_value": 490,
+    "auto_empty": 438,
+    "auto_rate": 0.928,
+    "errors": 1,
+    "error_rate": 0.0011,
+    "error_ci95": [
+     0.0002,
+     0.0061
+    ]
+   },
+   {
+    "threshold": 0.99,
+    "auto": 912,
+    "auto_value": 476,
+    "auto_empty": 436,
+    "auto_rate": 0.912,
+    "errors": 1,
+    "error_rate": 0.0011,
+    "error_ci95": [
+     0.0002,
+     0.0062
+    ]
+   },
+   {
+    "threshold": 0.995,
+    "auto": 879,
+    "auto_value": 446,
+    "auto_empty": 433,
+    "auto_rate": 0.879,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0044
+    ]
+   },
+   {
+    "threshold": 0.998,
+    "auto": 810,
+    "auto_value": 395,
+    "auto_empty": 415,
+    "auto_rate": 0.81,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0047
+    ]
+   },
+   {
+    "threshold": 0.999,
+    "auto": 588,
+    "auto_value": 274,
+    "auto_empty": 314,
+    "auto_rate": 0.588,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0065
+    ]
+   }
+  ]
+ },
+ "libraries": {
+  "python": "3.11.15",
+  "torch": "2.14.1+cu130",
+  "onnx": "1.23.1",
+  "numpy": "2.4.6",
+  "opencv": "5.0.0"
+ },
+ "model_sha256": "8f251a5a88617e1580769e9ec69c54fd80a0bac57a1b286d87a016134fb09f08"
+}

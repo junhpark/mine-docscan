@@ -96,6 +96,38 @@ def recognize(ctx: PageContext, cells: list[CellObs], choices: dict[str, list[st
     return ctx.corrector.correct(recs, contexts)
 
 
+def auto_threshold(r: Recognition, settings: Settings) -> float:
+    """자동 적재 기준: 백엔드가 정한 것(모델 카드·[recognize.<백엔드>]) 아니면 [pipeline] auto_accept_conf."""
+    return settings.auto_accept_conf if r.threshold is None else r.threshold
+
+
+def trips_max(site: SitePack) -> int | None:
+    """숫자 칸 값의 범위 — 현장의 것: site.toml 의 [haul] trips_max. 없으면 검사하지 않는다 (tasks/0003 4.4)."""
+    v = site.option("haul", "trips_max")
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+        raise ValueError(f"site.toml 의 [haul] trips_max 는 0 이상의 정수: {v!r}")
+    return v
+
+
+def number_status(r: Recognition, settings: Settings, max_value: int | None = None) -> tuple[bool, str]:
+    """숫자 칸의 인식 결과 → (기계의 값 유무, review_status). tasks/0003 4.4 의 표 — 답의 종류를 말하는 백엔드(r.answer)용:
+
+      숫자열, 범위 안   신뢰도 ≥ t → 그 값으로 자동 적재        그 밖 → 값 있음 + 검수 대기
+      숫자열, 범위 밖   검수 대기
+      빈 칸             신뢰도 ≥ t → 값 없음으로 자동 적재      그 밖 → 값 있음 + 검수 대기
+      거절("?")         검수 대기
+    인식기는 값을 만들어 내지 않는다: 잉크 판정이 "값 없음"인 칸은 여기 오지 않는다. 읽은 문자열은 value_raw 에 그대로 남긴다.
+    """
+    sure = r.confidence >= auto_threshold(r, settings)
+    if r.answer == "empty":
+        return (False, "auto") if sure else (True, "pending")
+    if r.answer == "value" and r.text.isdigit() and (max_value is None or int(r.text) <= max_value) and sure:
+        return True, "auto"
+    return True, "pending"
+
+
 class FormHandler:
     """기본 핸들러: 모든 셀을 doc_field 에만 적재한다 (업무 테이블 없음)."""
 
@@ -130,10 +162,14 @@ class FormHandler:
                 rows.append(field_row(ctx, o, has_value=False, value_raw="", value_final="", confidence=1.0,
                                       candidates=None, backend="ink", review_status="auto"))
             else:
-                ok = bool(r.text) and r.confidence >= ctx.settings.auto_accept_conf
-                rows.append(field_row(ctx, o, has_value=True, value_raw=r.text, value_final=r.text,
+                if r.answer is not None and o.cell.kind == "handwritten_number":      # 숫자 인식기: 4.4 의 표
+                    has, status = number_status(r, ctx.settings)
+                else:                                                               # 예전 규칙 (null·oracle·글자 칸)
+                    has = True
+                    status = "auto" if bool(r.text) and r.confidence >= auto_threshold(r, ctx.settings) else "pending"
+                rows.append(field_row(ctx, o, has_value=has, value_raw=r.text, value_final=r.text,
                                       confidence=r.confidence, candidates=r.candidates, backend=r.backend,
-                                      review_status="auto" if ok else "pending"))
+                                      review_status=status))
         return rows
 
     def finalize(self, con: sqlite3.Connection, site: SitePack, settings: Settings) -> dict:

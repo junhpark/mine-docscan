@@ -34,6 +34,8 @@ minedocscan.toml
 *.gguf
 *.onnx
 /models/
+# 예외 하나: 합성 셀만으로 학습한 시험용 모델 (torch 없이 추론 경로를 시험한다 — tests/fixtures/README.md)
+!tests/fixtures/digits-fixture/model.onnx
 
 # Python
 __pycache__/

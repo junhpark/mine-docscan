@@ -332,6 +332,10 @@ date_from_filename = '(?P<yyyy>\d{4})-(?P<mm>\d{2})-(?P<dd>\d{2})'
 "Excavator" = "Excavator"
 "LightVehicle" = "LightVehicle"
 
+[haul]
+# 운반 횟수의 범위: 이보다 큰 값은 인식기의 신뢰도가 높아도 검수로 보낸다 (숫자 인식기 — tasks/0003 4.4)
+trips_max = 40
+
 [crosscheck.haul]
 # SURFACE 행은 일보에만 있어 행렬과 비교할 수 없다
 exclude_materials = ["SURFACE"]

@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import pytest
 
+from conftest import day_pdf
 from minedocscan.config import Settings
 from minedocscan.imaging.cropspec import DEFAULT_SPEC, CropSpec, PageImages, crop_box, crop_cell
 from minedocscan.pipeline import Pipeline
@@ -23,7 +24,6 @@ from minedocscan.recognize import (
 )
 from minedocscan.review.export import export_crops
 from minedocscan.review.store import Review, save
-from minedocscan.tools.synth import generate
 
 SPEC_NUM = CropSpec("source", 1.5, None)          # 숫자 칸: 원본 해상도, 1.5배, 여유 = 행 높이의 절반
 SPEC_TXT = CropSpec("aligned", 1.5, 3)            # 텍스트 칸: 정합 이미지, 1.5배, 여유 3 px
@@ -45,9 +45,10 @@ class Capture:
 
 
 @pytest.fixture(scope="module")
-def captured(tmp_path_factory):
+def captured(tmp_path_factory, low_synth):
+    """낮은 칸 합성 양식의 첫째 날을 가짜 백엔드 둘로 (숫자 칸 → 원본 규격, 글자 칸 → 정합 이미지 규격)."""
     root = tmp_path_factory.mktemp("cropspec")
-    synth = generate(root / "data", days=1, seed=0)
+    synth = low_synth
     register("fake_num", lambda: Capture("fake_num", SPEC_NUM))
     register("fake_txt", lambda: Capture("fake_txt", SPEC_TXT))
     Capture.seen = {}
@@ -55,7 +56,7 @@ def captured(tmp_path_factory):
                         recognizer="fake_txt", recognizer_by_kind={"handwritten_number": "fake_num"})
     try:
         pipe = Pipeline(settings)
-        pipe.run([synth.scans])
+        pipe.run([day_pdf(synth, 0)])
     finally:
         REGISTRY.pop("fake_num", None)
         REGISTRY.pop("fake_txt", None)

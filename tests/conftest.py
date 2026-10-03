@@ -82,3 +82,78 @@ def reviewed_day(tmp_path_factory):
     assert export_answers(pipe.con, out) == n
     return {"synth": synth, "settings": settings, "null": pipe, "answers": answers, "exported": out, "root": root,
             "n_reviewed": n}
+
+
+# ── 낮은 칸 합성 양식과 숫자 인식기 (tasks/0003 단계 3·5·6) ─────────────────────
+FIXTURE_MODEL = Path(__file__).resolve().parent / "fixtures" / "digits-fixture"
+
+
+@pytest.fixture(scope="session")
+def low_synth(tmp_path_factory):
+    """낮은 칸·거친 숫자·X 표의 합성 3일치 (한 번만 만든다). 날짜별 PDF 는 low_synth.scans 아래."""
+    return generate(tmp_path_factory.mktemp("low_synth"), days=3, seed=0, low_cells=True)
+
+
+def day_pdf(synth, i: int) -> Path:
+    return sorted(synth.scans.glob("*.pdf"))[i]
+
+
+def answers_of(answers: dict, pdfs: list[Path], synth) -> dict:
+    """그 PDF 들의 정답만 (출처가 "<파일명>#<쪽>" 이거나 그 파일의 날짜인 것)."""
+    stems = {p.stem for p in pdfs}
+    dates = {d["date"] for d in synth.truth["days"] if any(d["date"] in st for st in stems)}
+    return {k: v for k, v in answers.items() if k[0].split("#")[0] in stems or k[0] in dates}
+
+
+@pytest.fixture(scope="session")
+def digits_low3(low_synth, tmp_path_factory):
+    """low_synth 3일치를 digits(시험용 모델) + null 로 돌린 것. 이 DB 에 쓰지 않는다 — 쓸 시험은 복사본(clone_db)에서."""
+    root = tmp_path_factory.mktemp("digits_low3")
+    pipe = Pipeline(digits_settings(low_synth, root / "work", reviews=root / "reviews.jsonl"))
+    pipe.run([low_synth.scans])
+    return {"root": root, "synth": low_synth, "answers": load_answers_json(low_synth.answers_path), "pipe": pipe}
+
+
+def clone_db(con):
+    """세션 픽스처의 DB 를 메모리로 복사한다 (검수를 넣어 볼 때)."""
+    import sqlite3
+
+    out = sqlite3.connect(":memory:")
+    con.backup(out)
+    out.row_factory = sqlite3.Row
+    return out
+
+
+def digits_settings(synth, work_root: Path, model_dir: Path = FIXTURE_MODEL, reviews: Path | None = None, **kw) -> Settings:
+    """숫자 칸은 digits(모델 폴더 경로로), 나머지는 null. 정합 이미지는 저장하지 않는다 (숫자 칸의 크롭은 원본에서 뜬다 —
+    쪽마다 PNG 저장이 약 60 ms 라 시험 시간을 아낀다). 저장이 필요하면 save_aligned=True."""
+    kw.setdefault("save_aligned", False)
+    return Settings(site=synth.site, archive_root=synth.scans, work_root=work_root, reviews=reviews,
+                    recognizer="null", recognizer_by_kind={"handwritten_number": "digits"},
+                    recognizer_options={"digits": {"model": str(model_dir)}}, **kw)
+
+
+def number_cells(con, answers) -> list[dict]:
+    """운반 숫자 셀(일보 haul, 행렬 matrix)마다 기계 상태와 정답("" = 빈 칸 — X 표 칸은 정답에 없다)."""
+    rows = con.execute(
+        "SELECT f.*, d.source_name || '#' || p.page_no AS source, p.template_name, p.work_date FROM doc_field f "
+        "JOIN doc_page p ON f.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
+        "WHERE f.kind = 'handwritten_number' AND f.region IN ('haul', 'matrix') ORDER BY f.field_id").fetchall()
+    out = []
+    for r in rows:
+        tail = (r["template_name"], r["region"], r["field_name"], r["row_key"])
+        truth = answers.get((r["source"], *tail)) or answers.get((r["work_date"], *tail)) or ""
+        out.append(dict(r) | {"truth": truth})
+    return out
+
+
+def digits_metrics(cells: list[dict]) -> dict:
+    """값 있는 칸의 정확도(기계 값), 자동 적재된 칸 중 틀린 것, 잉크로는 값 있음인데 정답이 빈 칸인 칸의 처리."""
+    values = [c for c in cells if c["truth"]]
+    auto = [c for c in cells if c["review_status"] == "auto" and c["backend"] == "digits"]
+    wrong = [c for c in auto if (c["value_raw"] if c["has_value_raw"] else "") != c["truth"]]
+    inked_empty = [c for c in cells if not c["truth"] and c["backend"] == "digits"]
+    return {"values": len(values), "value_correct": sum(c["value_raw"] == c["truth"] for c in values),
+            "auto": len(auto), "auto_wrong": len(wrong),
+            "inked_empty": len(inked_empty),
+            "inked_empty_auto": sum(c["has_value_raw"] == 0 and c["review_status"] == "auto" for c in inked_empty)}

@@ -28,7 +28,9 @@ def register(name: str, factory: Callable[..., Recognizer]) -> None:
 
 def _ensure_plugins() -> None:
     """저장소 안의 선택 백엔드를 등록한다 (무거운 의존성은 각 모듈 안에서만 import 한다)."""
-    from . import digits  # noqa: F401 — register("digits", …)
+    from .digits import make as make_digits
+
+    REGISTRY.setdefault("digits", make_digits)
 
 
 def get_recognizer(name: str, **kwargs) -> Recognizer:

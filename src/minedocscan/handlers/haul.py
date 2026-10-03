@@ -18,7 +18,17 @@ from ..imaging.blobs import assign_blobs
 from ..review.store import page_meta
 from ..store.db import upsert
 from ..validate.crosscheck import crosscheck_haul
-from .base import FormHandler, PageContext, apply_reviews, field_id, field_row, recognize
+from .base import (
+    FormHandler,
+    PageContext,
+    apply_reviews,
+    auto_threshold,
+    field_id,
+    field_row,
+    number_status,
+    recognize,
+    trips_max,
+)
 
 MIN_BLOB_AREA = 40      # 셀에 배정된 잉크 면적(px)이 이 이상이면 값이 적힌 것으로 본다
 
@@ -49,17 +59,22 @@ class HaulHandler(FormHandler):
         recs = dict(zip([id(o) for o in filled], recognize(ctx, filled), strict=True))
 
         rows, haul_cells = [], []
+        max_trips = trips_max(ctx.site)
         for o in ctx.obs:
             c = o.cell
             if c.kind == "handwritten_number":
                 r = recs.get(id(o))
-                trips, conf, status, raw = None, None, "auto", ""
+                trips, conf, status, raw, has = None, None, "auto", "", False
                 if r is not None:
                     raw, conf = r.text, r.confidence
                     trips = _as_trips(r.text)
-                    ok = trips is not None and r.confidence >= ctx.settings.auto_accept_conf
-                    status = "auto" if ok else "pending"
-                rows.append(field_row(ctx, o, has_value=r is not None, value_raw=raw,
+                    if r.answer is not None:                     # 숫자 인식기: 4.4 의 표 (빈 칸 자동 적재, 범위, 거절)
+                        has, status = number_status(r, ctx.settings, max_trips)
+                    else:                                        # 예전 규칙 (null·oracle): 숫자로 읽혔고 신뢰도가 높으면
+                        has = True
+                        ok = trips is not None and r.confidence >= auto_threshold(r, ctx.settings)
+                        status = "auto" if ok else "pending"
+                rows.append(field_row(ctx, o, has_value=has, value_raw=raw,
                                       value_final=None if trips is None else str(trips), confidence=conf,
                                       candidates=r.candidates if r else None,
                                       backend=r.backend if r else "ink", review_status=status))

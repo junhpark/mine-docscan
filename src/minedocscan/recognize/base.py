@@ -37,6 +37,11 @@ class Recognition:
     confidence: float                # 0~1. 보정되지 않은 값이면 백엔드 문서에 그렇게 적는다
     candidates: list[str] = field(default_factory=list)
     backend: str = ""
+    # 답의 종류를 말하는 백엔드(숫자 인식기 — tasks/0003 4.3): "value" | "empty" | "reject".
+    # None 이면 예전 규칙이다 (null·oracle): text 가 비면 "못 읽었다"는 뜻일 뿐 빈 칸이라는 판단이 아니다.
+    answer: str | None = None
+    # 이 백엔드의 자동 적재 기준 (모델 카드·설정에서 백엔드가 정한다). None 이면 [pipeline] auto_accept_conf
+    threshold: float | None = None
 
 
 class Recognizer(Protocol):

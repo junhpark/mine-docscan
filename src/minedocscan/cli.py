@@ -184,8 +184,18 @@ def cmd_info(a) -> int:
     }
     lines = [f"minedocscan {__version__}"] + [f"  {k}: {v}" for k, v in data["settings"].items()]
     lines.append("백엔드: " + ", ".join(f"{k}={v}" for k, v in data["backends"].items()))
-    if s.site and Path(s.site).is_dir():
-        site = _need_site(s)
+    site = _need_site(s) if s.site and Path(s.site).is_dir() else None
+    data["recognizer"] = _describe_recognizer(s, site)
+    rec = data["recognizer"]
+    if "error" in rec:
+        lines.append(f"인식기: 준비할 수 없습니다 — {rec['error']}")
+    else:
+        for kind, d in rec["by_kind"].items():
+            m = (f" — 모델 {d['model']} ({d['path']}), 규격 {d['spec']}, 자동 적재 기준 "
+                 f"{d['auto_accept_conf'] if d['auto_accept_conf'] is not None else '없음'} ({d['auto_accept_source']}), "
+                 f"학습 셀 {d['train_cells']} + 합성 {d['synthetic_cells']}") if "model" in d else ""
+            lines.append(f"인식기 [{kind}]: {d['backend']}{m}")
+    if site is not None:
         tpls = [{"name": t.name, "title": t.title, "handler": t.handler, "regions": len(t.regions),
                  "cells": len(t.cells()) + len(t.fields), "status": "cells" if t.has_cells else "classify_only",
                  "family": t.family, "valid_from": t.valid_from, "valid_to": t.valid_to}
@@ -200,6 +210,25 @@ def cmd_info(a) -> int:
         lines.append("사이트 팩: 지정되지 않았거나 폴더가 없습니다")
     _emit(a, data, "\n".join(lines))
     return 0
+
+
+def _describe_recognizer(s: Settings, site) -> dict:
+    """info: 칸 종류마다 어느 백엔드가 받는지, 숫자 모델이면 이름·규격·자동 적재 기준·학습 셀 수."""
+    from .recognize import KINDS, build_recognizer
+
+    try:
+        rec = build_recognizer(s, site)
+    except (KeyError, ValueError, FileNotFoundError) as e:
+        return {"error": str(e)}
+
+    def one(b) -> dict:
+        d = {"backend": b.name}
+        if callable(getattr(b, "describe", None)):
+            d |= b.describe()
+        return d
+
+    backend_for = getattr(rec, "backend_for", lambda _k: rec)
+    return {"by_kind": {k: one(backend_for(k)) for k in KINDS}}
 
 
 def cmd_run(a) -> int:

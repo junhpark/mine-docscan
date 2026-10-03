@@ -4,12 +4,13 @@ from collections import Counter
 import numpy as np
 import pytest
 
+from conftest import answers_of, day_pdf
 from minedocscan.config import Settings
 from minedocscan.evaluate.fields import evaluate_fields
 from minedocscan.imaging.cropspec import CropSpec
 from minedocscan.pipeline import Pipeline
 from minedocscan.recognize import OracleRecognizer, load_answers_json
-from minedocscan.tools.synth import LOW_ROW_H, T_LOG, T_MATRIX, generate
+from minedocscan.tools.synth import LOW_ROW_H, T_LOG, T_MATRIX
 from minedocscan.tools.synth_cells import CellParams, make_cell, make_cells
 
 
@@ -53,13 +54,15 @@ def test_cell_size_and_spec_are_parameters(spec, cell):
     assert {c.image.shape for c in make_cells(12, seed=5, params=p)} == {(h, w)}
 
 
-def test_low_cell_forms_pass_with_the_oracle(tmp_path):
-    """낮은 칸·거친 숫자·X 표 양식: 인식기가 아니라 파이프라인을 확인하는 것 — oracle 로 CER 0."""
-    synth = generate(tmp_path / "data", days=1, seed=0, low_cells=True)
-    answers = load_answers_json(synth.answers_path)
-    settings = Settings(site=synth.site, archive_root=synth.scans, work_root=tmp_path / "work", reviews=tmp_path / "r.jsonl")
+def test_low_cell_forms_pass_with_the_oracle(low_synth, tmp_path):
+    """낮은 칸·거친 숫자·X 표 양식(첫째 날): 인식기가 아니라 파이프라인을 확인하는 것 — oracle 로 CER 0."""
+    synth = low_synth
+    pdf = day_pdf(synth, 0)
+    answers = answers_of(load_answers_json(synth.answers_path), [pdf], synth)
+    settings = Settings(site=synth.site, archive_root=synth.scans, work_root=tmp_path / "work", reviews=tmp_path / "r.jsonl",
+                        save_aligned=False)
     pipe = Pipeline(settings, recognizer=OracleRecognizer(answers))
-    pipe.run([synth.scans])
+    pipe.run([pdf])
     res = evaluate_fields(pipe.con, answers)
     assert res["cer"] == 0.0 and res["field_accuracy"] == 1.0 and res["answers_not_in_db"] == 0
     assert set(res["by_field_kind"]) >= {f"{T_LOG}/handwritten_number", f"{T_MATRIX}/handwritten_number"}

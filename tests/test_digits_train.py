@@ -123,3 +123,26 @@ def test_train_command_refuses_test_lines(crops, tmp_path):
         pytest.skip("이 씨앗의 3일 중 test 날짜가 없다")
     with pytest.raises(SystemExit, match="test"):
         main(["recognizer", "train", "--crops", str(crops["root"] / "crops-all"), "--name", "x", "--out", str(tmp_path / "x")])
+
+
+def test_regenerated_fixture_model_meets_stage5(tmp_path):
+    """시험용 모델을 README 의 명령으로 다시 만들어도 단계 5 의 문턱을 넘는다 (바이트가 같을 필요는 없다)."""
+    from pathlib import Path
+
+    from conftest import digits_metrics, digits_settings, number_cells
+    from minedocscan.pipeline import Pipeline
+    from minedocscan.tools.synth import generate
+
+    args = ["--name", "digits-fixture", "--synthetic-geometry", "112x22,92x21", "--target-auto-error", "0.005"]
+    readme = (Path(__file__).parent / "fixtures" / "README.md").read_text(encoding="utf-8")
+    assert " ".join(args) in readme.replace("\\\n    ", "")                 # README 의 명령과 같은 인자
+    out = tmp_path / "digits-fixture"
+    assert main(["recognizer", "train", *args, "--out", str(out)]) == 0
+    synth = generate(tmp_path / "data", days=3, seed=0, low_cells=True)
+    pipe = Pipeline(digits_settings(synth, tmp_path / "work", model_dir=out, reviews=tmp_path / "r.jsonl"))
+    pipe.run([synth.scans])
+    m = digits_metrics(number_cells(pipe.con, load_answers_json(synth.answers_path)))
+    print("다시 만든 시험용 모델, 합성 3일치:", json.dumps(m))
+    assert m["value_correct"] / m["values"] >= 0.95
+    assert m["auto"] > 100 and m["auto_wrong"] / m["auto"] <= 0.01
+    assert m["inked_empty_auto"] > 0
