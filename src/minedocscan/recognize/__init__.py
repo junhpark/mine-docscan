@@ -33,6 +33,12 @@ def _ensure_plugins() -> None:
     REGISTRY.setdefault("digits", make_digits)
 
 
+def available() -> list[str]:
+    """등록된 백엔드 이름 (저장소 안의 선택 백엔드 포함)."""
+    _ensure_plugins()
+    return sorted(REGISTRY)
+
+
 def get_recognizer(name: str, **kwargs) -> Recognizer:
     _ensure_plugins()
     if name not in REGISTRY:
@@ -101,4 +107,4 @@ def build_recognizer(settings, site=None) -> Recognizer:
 
 
 __all__ = ["CellContext", "Recognition", "Recognizer", "NullRecognizer", "OracleRecognizer", "ByKindRecognizer",
-           "REGISTRY", "KINDS", "register", "get_recognizer", "build_recognizer", "load_answers_json", "spec_for"]
+           "REGISTRY", "KINDS", "register", "available", "get_recognizer", "build_recognizer", "load_answers_json", "spec_for"]

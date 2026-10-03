@@ -93,6 +93,7 @@ def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split
                 "field_id": rv.field_id, "file": rel.as_posix(), "text": rv.value if rv.verdict == "value" else "",
                 "verdict": rv.verdict, "template": r["template_name"], "region": r["region"], "field_name": r["field_name"],
                 "row_key": r["row_key"], "kind": r["kind"], "work_date": d, "split": sp, "spec": spec.to_dict(),
+                "inked": (r["backend"] or "") != "ink",               # 잉크 판정이 값 있음 → 인식기에 가는 칸
                 "resolution": src, "out_scale": out_scale, "pad": pd, "bbox": [r["x0"], r["y0"], r["x1"], r["y1"]],
                 "reviewer": rv.reviewer, "reviewed_at": rv.reviewed_at}, ensure_ascii=False) + "\n")
             written += 1

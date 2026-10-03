@@ -69,7 +69,8 @@ class HaulHandler(FormHandler):
                     raw, conf = r.text, r.confidence
                     trips = _as_trips(r.text)
                     if r.answer is not None:                     # 숫자 인식기: 4.4 의 표 (빈 칸 자동 적재, 범위, 거절)
-                        has, status = number_status(r, ctx.settings, max_trips)
+                        # 범위([haul] trips_max)는 운반 횟수 칸만 — 같은 쪽의 다른 숫자 칸(곁표)에는 대지 않는다
+                        has, status = number_status(r, ctx.settings, max_trips if c.region == haul_region else None)
                     else:                                        # 예전 규칙 (null·oracle): 숫자로 읽혔고 신뢰도가 높으면
                         has = True
                         ok = trips is not None and r.confidence >= auto_threshold(r, ctx.settings)

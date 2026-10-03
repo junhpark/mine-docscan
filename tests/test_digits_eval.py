@@ -1,6 +1,7 @@
 """평가와 임계값 (tasks/0003 단계 6) — 크롭 단위 평가(recognizer eval), eval 의 자동 적재 오류율, report 의 백엔드별 수,
 회귀 검사의 새 항목. torch 없이, 시험용 모델로. 수치는 합성 셀에 대한 것이다."""
 import json
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
@@ -56,18 +57,31 @@ def test_crop_level_eval_equals_pipeline(exported):
 def test_recognizer_eval_command(exported, tmp_path, capsys):
     crops = exported["root"] / "crops"
     errs = tmp_path / "errs"
-    for split in ("val", "train"):
-        assert main(["recognizer", "eval", "--crops", str(crops), "--model", str(FIXTURE_MODEL), "--split", split,
-                     "--errors", str(errs), "--json"]) == 0
-        out = json.loads(capsys.readouterr().out)
-        assert "predictions" not in out and out["split"] == split          # 칸마다의 값은 내놓지 않는다
-        assert {"accuracy", "by_value", "confusions", "calibration", "thresholds", "at_threshold", "illegible"} <= set(out)
-        assert sum(b["n"] for b in out["calibration"]) == out["cells"] == sum(v["n"] for v in out["by_value"])
-    val, train = (evaluate(crops, FIXTURE_MODEL, split=s) for s in ("val", "train"))
-    assert val["cells"] + train["cells"] == len([1 for x in (crops / "train" / "labels.jsonl").read_text().splitlines()])
-    assert not ({p["field_id"] for p in val["predictions"]} & {p["field_id"] for p in train["predictions"]})
+    model = [str(FIXTURE_MODEL)]
+    # 이 3일 중에는 시험용 모델의 규칙(소금값 synthetic:val, 20 %)으로 뽑힌 검증 날짜가 없다 → 빈 수치 대신 안내하고 멈춘다
+    with pytest.raises(SystemExit, match="val 날짜의 숫자 칸이 없습니다"):
+        main(["recognizer", "eval", "--crops", str(crops), "--model", *model, "--split", "val", "--errors", str(errs)])
+    assert main(["recognizer", "eval", "--crops", str(crops), "--model", *model, "--split", "train", "--errors", str(errs),
+                 "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "predictions" not in out and out["split"] == "train"              # 칸마다의 값은 내놓지 않는다
+    assert {"accuracy", "by_value", "confusions", "calibration", "thresholds", "at_threshold", "illegible"} <= set(out)
+    assert sum(b["n"] for b in out["calibration"]) == out["cells"] == sum(v["n"] for v in out["by_value"])
+    n_train_lines = len((crops / "train" / "labels.jsonl").read_text().splitlines())
+    assert out["cells"] == n_train_lines
     if out["errors"]:
         assert Path(out["errors_image"]).is_file() and Path(out["errors_image"]).parent == errs
+    else:
+        assert out["errors_image"] is None and not errs.exists()            # 틀린 칸이 없으면 그림을 쓰지 않는다
+    # 검증 날짜가 있는 규칙이면: val 과 train 은 날짜로 갈리고 겹치지 않는다 (학습 때와 같은 규칙 — 카드의 val_rule)
+    fx = tmp_path / "fx"
+    shutil.copytree(FIXTURE_MODEL, fx)
+    card = json.loads((fx / "card.json").read_text(encoding="utf-8"))
+    card["data"]["val_rule"]["share"] = 0.38                 # 2030-01-07 (0.351) 은 검증, 01-08 (0.405) 은 학습
+    (fx / "card.json").write_text(json.dumps(card), encoding="utf-8")
+    val, train = (evaluate(crops, fx, split=s) for s in ("val", "train"))
+    assert val["cells"] and train["cells"] and val["cells"] + train["cells"] == n_train_lines
+    assert not ({p["field_id"] for p in val["predictions"]} & {p["field_id"] for p in train["predictions"]})
     # test 는 test 로 내보낸 줄만
     has_test = (crops / "test" / "labels.jsonl").exists()
     if has_test:
@@ -84,6 +98,14 @@ def test_recognizer_eval_command(exported, tmp_path, capsys):
                                                                          "file": str(crops / x["file"])}) for x in lines))
     with pytest.raises(EvalError, match="규격"):
         evaluate(other, FIXTURE_MODEL, split="train")
+    # 잉크가 없던 칸(인식기에 가지 않는 칸)은 평가에서 뺀다 — 내보낸 라벨의 inked
+    assert all(x["inked"] for x in lines)                                  # 이 폴더는 인식기가 읽은 칸만 내보낸 것
+    noink = tmp_path / "noink"
+    (noink / "train").mkdir(parents=True)
+    (noink / "train" / "labels.jsonl").write_text("\n".join(json.dumps(x | {"file": str(crops / x["file"]), "inked": i % 2 == 0})
+                                                            for i, x in enumerate(lines)))
+    r = evaluate(noink, FIXTURE_MODEL, split="train")
+    assert r["cells"] == (len(lines) + 1) // 2 and r["skipped"]["no_ink"] == len(lines) // 2
 
 
 def test_eval_reports_auto_accept_error_by_hand():
@@ -112,6 +134,8 @@ def test_eval_reports_auto_accept_error_by_hand():
     # 검수해서 review_status 가 바뀌어도 기계의 판단(status_raw)으로 센다
     con.execute("UPDATE doc_field SET review_status = 'reviewed'")
     assert evaluate_fields(con, answers, target="raw")["auto_error"] == ae
+    assert res["auto_rate"] == round(5 / 6, 4)                              # 자동 적재율도 기계의 상태(status_raw)로
+    assert evaluate_fields(con, answers, target="raw")["auto_rate"] == res["auto_rate"]
 
 
 def test_eval_and_report_on_the_digits_run(digits_low3, capsys, tmp_path):

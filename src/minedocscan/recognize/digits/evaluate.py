@@ -49,7 +49,15 @@ def select(crops_dir: str | Path, card: dict, split: str | None) -> tuple[list[d
     if split in ("val", "train"):
         rule = card["data"]["val_rule"]
         tr, va = data.split_val(crops.samples, rule["salt"], float(rule["share"]))
-        return (va if split == "val" else tr), crops
+        chosen = va if split == "val" else tr
+        if not chosen:
+            n_dates = len({s.work_date for s in crops.samples if s.work_date})
+            raise EvalError(
+                f"이 폴더에는 {split} 날짜의 숫자 칸이 없습니다 (train 으로 내보낸 날짜 {n_dates}일 중 검증 날짜 {len({s.work_date for s in va})}일 "
+                f"— 모델 카드의 규칙: 소금값 {rule['salt']!r}, 비율 {rule['share']}). 이 모델은 학습 때 "
+                f"{card['validation']['source']} 셀로 검증했다. " + ("--split train 으로 학습 셀의 성적을 보거나, 날짜가 늘면 다시 학습하세요"
+                                                                 if split == "val" else "--split val 을 보세요"))
+        return chosen, crops
     return crops.samples, crops
 
 
@@ -60,6 +68,10 @@ def evaluate(crops_dir: str | Path, model_dir: str | Path, split: str | None = "
         raise EvalError(f"{errors} 은 git 작업 트리 안입니다. 틀린 칸 모아 보기에는 현장의 글씨가 들어 있으므로 저장소 밖에 쓰세요")
     rec = DigitsRecognizer(model_dir, threshold=threshold, threshold_source="config")
     samples, crops = select(crops_dir, rec.card, split)
+    n_no_ink = sum(not s.inked for s in samples)
+    samples = [s for s in samples if s.inked]               # 파이프라인이 인식기에 보내는 칸만 (잉크가 없던 빈 칸은 뺀다)
+    if not samples:
+        raise EvalError(f"평가할 칸이 없습니다 (잉크가 없던 칸 {n_no_ink}개만 있다)")
     if crops.spec is not None and crops.spec != rec.spec:
         raise EvalError(f"크롭의 규격({crops.spec.describe()})이 모델의 규격({rec.spec.describe()})과 다릅니다 — "
                         "모델과 같은 규격으로 내보낸 폴더를 주세요 (tasks/0003 4.1)")
@@ -83,12 +95,12 @@ def evaluate(crops_dir: str | Path, model_dir: str | Path, split: str | None = "
         "calibration": calibration(pc, truths), "thresholds": table, "at_threshold": at,
         "illegible": {"n": sum(y == REJECT for y in truths),
                       "auto": sum(y == REJECT and c >= t and calib.eligible(a, trips_max) for (a, c), y in zip(pc, truths, strict=True))},
-        "skipped": crops.skipped,
+        "skipped": crops.skipped | ({"no_ink": n_no_ink} if n_no_ink else {}),
         "errors": sum(a != y for (a, _c), y in zip(pc, truths, strict=True)), "errors_image": None,
         "predictions": [{"field_id": s.field_id, "text": a, "confidence": c} for s, (a, c, _k) in zip(samples, preds, strict=True)],
     }
-    if errors is not None:
-        wrong = [(im, y, a, c) for im, (a, c), y in zip(imgs, pc, truths, strict=True) if a != y]
+    wrong = [(im, y, a, c) for im, (a, c), y in zip(imgs, pc, truths, strict=True) if a != y]
+    if errors is not None and wrong:                          # 틀린 칸이 없으면 그림을 쓰지 않는다
         out["errors_image"] = str(error_sheet(wrong, Path(errors) / f"{out['model']}-{out['split']}-errors.png"))
     return out
 

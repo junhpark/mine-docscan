@@ -38,6 +38,7 @@ class Sample:
     work_date: str | None
     bbox: tuple[int, int, int, int] | None
     field_id: str = ""
+    inked: bool = True              # 잉크 판정이 "값 있음"이던 칸 (파이프라인이 인식기에 보내는 칸). 예전 라벨에는 없다 → True
 
     def image(self) -> np.ndarray:
         return imread_gray(self.path)
@@ -119,7 +120,7 @@ def read_crops(root: str | Path, *, allow_test: bool = False, only_split: str | 
                 continue
             bbox = tuple(line["bbox"]) if line.get("bbox") else None
             samples.append(Sample(_resolve(root, lf, line["file"]), text, line.get("verdict", "value"),
-                                  line.get("work_date"), bbox, line.get("field_id", "")))
+                                  line.get("work_date"), bbox, line.get("field_id", ""), bool(line.get("inked", True))))
     if len(specs) > 1:
         raise CropsError(f"크롭 규격이 한 가지가 아닙니다 ({len(specs)}가지: "
                          f"{', '.join(sorted(s.describe() for s in specs))}). 규격마다 따로 내보내고 따로 학습하세요")

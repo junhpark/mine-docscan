@@ -1,9 +1,9 @@
 {
  "name": "digits-fixture",
- "created_at": "2026-10-03T12:55:20Z",
+ "created_at": "2026-10-03T14:10:56Z",
  "code_version": {
   "minedocscan": "0.2.0",
-  "git": "99dffa2"
+  "git": "1bbd889"
  },
  "spec": {
   "res": "source",
@@ -89,7 +89,7 @@
      21
     ]
    ],
-   "val_cells": 1000
+   "val_cells": 950
   },
   "val_rule": {
    "salt": "synthetic:val",
@@ -99,13 +99,14 @@
  },
  "validation": {
   "source": "synthetic",
-  "cells": 1000,
+  "cells": 950,
+  "excluded_no_ink": 0,
   "best_step": 2000,
   "score": {
    "all": {
-    "n": 1000,
-    "correct": 989,
-    "accuracy": 0.989
+    "n": 950,
+    "correct": 939,
+    "accuracy": 0.9884
    },
    "value": {
     "n": 550,
@@ -113,9 +114,9 @@
     "accuracy": 0.9818
    },
    "empty": {
-    "n": 450,
-    "correct": 449,
-    "accuracy": 0.9978
+    "n": 400,
+    "correct": 399,
+    "accuracy": 0.9975
    },
    "illegible": {
     "n": 0,
@@ -123,17 +124,17 @@
     "accuracy": null
    }
   },
-  "train_seconds": 97.0,
-  "total_seconds": 118.2,
+  "train_seconds": 92.9,
+  "total_seconds": 114.4,
   "export_check": {
    "max_abs_diff": 1.430511474609375e-05,
    "same_answers": true,
-   "cells": 1000
+   "cells": 950
   },
   "calibration": {
-   "cells": 1000,
-   "nll_at_1": 0.04381,
-   "nll": 0.04367
+   "cells": 950,
+   "nll_at_1": 0.04609,
+   "nll": 0.04592
   }
  },
  "temperature": 1.05,
@@ -141,190 +142,191 @@
   "target": 0.005,
   "threshold": 0.8,
   "met": true,
+  "reason": null,
   "trips_max": null,
   "basis": "검증 셀 (synthetic)",
   "rule": "오류율(자동 적재된 칸 중 정답과 다른 비율)이 목표 이하인 가장 낮은 임계값 (tasks/0003 4.6)",
   "table": [
    {
     "threshold": 0.5,
-    "auto": 995,
+    "auto": 945,
     "auto_value": 547,
-    "auto_empty": 448,
-    "auto_rate": 0.995,
+    "auto_empty": 398,
+    "auto_rate": 0.9947,
     "errors": 8,
-    "error_rate": 0.008,
+    "error_rate": 0.0085,
     "error_ci95": [
-     0.0041,
-     0.0158
+     0.0043,
+     0.0166
     ]
    },
    {
     "threshold": 0.6,
-    "auto": 993,
+    "auto": 943,
     "auto_value": 545,
-    "auto_empty": 448,
-    "auto_rate": 0.993,
+    "auto_empty": 398,
+    "auto_rate": 0.9926,
     "errors": 7,
-    "error_rate": 0.007,
+    "error_rate": 0.0074,
     "error_ci95": [
-     0.0034,
-     0.0145
+     0.0036,
+     0.0152
     ]
    },
    {
     "threshold": 0.7,
-    "auto": 988,
+    "auto": 938,
     "auto_value": 540,
-    "auto_empty": 448,
-    "auto_rate": 0.988,
+    "auto_empty": 398,
+    "auto_rate": 0.9874,
     "errors": 6,
-    "error_rate": 0.0061,
+    "error_rate": 0.0064,
     "error_ci95": [
-     0.0028,
-     0.0132
+     0.0029,
+     0.0139
     ]
    },
    {
     "threshold": 0.8,
-    "auto": 982,
+    "auto": 932,
     "auto_value": 534,
-    "auto_empty": 448,
-    "auto_rate": 0.982,
+    "auto_empty": 398,
+    "auto_rate": 0.9811,
     "errors": 4,
-    "error_rate": 0.0041,
+    "error_rate": 0.0043,
     "error_ci95": [
-     0.0016,
-     0.0104
+     0.0017,
+     0.011
     ]
    },
    {
     "threshold": 0.85,
-    "auto": 977,
+    "auto": 927,
     "auto_value": 530,
-    "auto_empty": 447,
-    "auto_rate": 0.977,
+    "auto_empty": 397,
+    "auto_rate": 0.9758,
     "errors": 4,
-    "error_rate": 0.0041,
+    "error_rate": 0.0043,
     "error_ci95": [
-     0.0016,
-     0.0105
+     0.0017,
+     0.011
     ]
    },
    {
     "threshold": 0.9,
-    "auto": 973,
+    "auto": 923,
     "auto_value": 526,
-    "auto_empty": 447,
-    "auto_rate": 0.973,
+    "auto_empty": 397,
+    "auto_rate": 0.9716,
     "errors": 3,
-    "error_rate": 0.0031,
+    "error_rate": 0.0033,
     "error_ci95": [
-     0.001,
-     0.009
+     0.0011,
+     0.0095
     ]
    },
    {
     "threshold": 0.93,
-    "auto": 967,
+    "auto": 917,
     "auto_value": 521,
-    "auto_empty": 446,
-    "auto_rate": 0.967,
+    "auto_empty": 396,
+    "auto_rate": 0.9653,
     "errors": 3,
-    "error_rate": 0.0031,
+    "error_rate": 0.0033,
     "error_ci95": [
      0.0011,
-     0.0091
+     0.0096
     ]
    },
    {
     "threshold": 0.95,
-    "auto": 957,
+    "auto": 907,
     "auto_value": 511,
-    "auto_empty": 446,
-    "auto_rate": 0.957,
+    "auto_empty": 396,
+    "auto_rate": 0.9547,
     "errors": 2,
-    "error_rate": 0.0021,
+    "error_rate": 0.0022,
     "error_ci95": [
      0.0006,
-     0.0076
+     0.008
     ]
    },
    {
     "threshold": 0.97,
-    "auto": 939,
+    "auto": 889,
     "auto_value": 498,
-    "auto_empty": 441,
-    "auto_rate": 0.939,
+    "auto_empty": 391,
+    "auto_rate": 0.9358,
     "errors": 1,
     "error_rate": 0.0011,
     "error_ci95": [
      0.0002,
-     0.006
+     0.0063
     ]
    },
    {
     "threshold": 0.98,
-    "auto": 928,
+    "auto": 878,
     "auto_value": 490,
-    "auto_empty": 438,
-    "auto_rate": 0.928,
+    "auto_empty": 388,
+    "auto_rate": 0.9242,
     "errors": 1,
     "error_rate": 0.0011,
     "error_ci95": [
      0.0002,
-     0.0061
+     0.0064
     ]
    },
    {
     "threshold": 0.99,
-    "auto": 912,
+    "auto": 862,
     "auto_value": 476,
-    "auto_empty": 436,
-    "auto_rate": 0.912,
+    "auto_empty": 386,
+    "auto_rate": 0.9074,
     "errors": 1,
-    "error_rate": 0.0011,
+    "error_rate": 0.0012,
     "error_ci95": [
      0.0002,
-     0.0062
+     0.0065
     ]
    },
    {
     "threshold": 0.995,
-    "auto": 879,
+    "auto": 829,
     "auto_value": 446,
-    "auto_empty": 433,
-    "auto_rate": 0.879,
+    "auto_empty": 383,
+    "auto_rate": 0.8726,
     "errors": 0,
     "error_rate": 0.0,
     "error_ci95": [
      0.0,
-     0.0044
+     0.0046
     ]
    },
    {
     "threshold": 0.998,
-    "auto": 810,
+    "auto": 761,
     "auto_value": 395,
-    "auto_empty": 415,
-    "auto_rate": 0.81,
+    "auto_empty": 366,
+    "auto_rate": 0.8011,
     "errors": 0,
     "error_rate": 0.0,
     "error_ci95": [
      0.0,
-     0.0047
+     0.005
     ]
    },
    {
     "threshold": 0.999,
-    "auto": 588,
+    "auto": 548,
     "auto_value": 274,
-    "auto_empty": 314,
-    "auto_rate": 0.588,
+    "auto_empty": 274,
+    "auto_rate": 0.5768,
     "errors": 0,
     "error_rate": 0.0,
     "error_ci95": [
      0.0,
-     0.0065
+     0.007
     ]
    }
   ]

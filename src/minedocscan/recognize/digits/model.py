@@ -176,13 +176,14 @@ def models_dir(site_root: str | Path) -> Path:
 def resolve_model(ref: str, site_root: str | Path | None) -> Path:
     """모델 이름(사이트 팩의 models/<이름>) 또는 폴더 경로 → 모델 폴더. 없으면 무엇이 없는지 말한다."""
     p = Path(ref).expanduser()
-    looks_like_path = any(sep in ref for sep in ("/", "\\")) or ref.startswith(".")
-    if looks_like_path or p.is_dir():
+    looks_like_path = any(sep in ref for sep in ("/", "\\")) or ref.startswith((".", "~")) or p.is_absolute()
+    if looks_like_path:
         d = p
-    elif site_root is not None:
+    elif site_root is not None:                              # 이름은 사이트 팩의 models/<이름> (현재 폴더의 같은 이름보다 먼저)
         d = models_dir(site_root) / ref
     else:
-        raise FileNotFoundError(f"숫자 모델 '{ref}' 을 찾을 사이트 팩이 없습니다 (MINEDOCSCAN_SITE 또는 [paths] site)")
+        raise FileNotFoundError(f"숫자 모델 '{ref}' 을 찾을 사이트 팩이 없습니다 (MINEDOCSCAN_SITE 또는 [paths] site). "
+                                "폴더를 직접 주려면 경로로 (예: ./models/<이름>)")
     missing = [n for n in ("model.onnx", "card.json") if not (d / n).is_file()]
     if missing:
         have = ""

@@ -57,7 +57,7 @@ def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final
         g = groups.setdefault(f"{template}/{r[7]}", {"pairs": [], "statuses": [], "machine": []})
         truth = answers.get(key, "")
         g["pairs"].append((r[8] or "", truth))
-        g["statuses"].append(r[9])
+        g["statuses"].append(r[10] or r[9])                     # 자동 적재율은 기계가 정한 상태(status_raw)로 — 검수와 무관
         machine = (r[13] or "") if r[12] else ""                 # 기계가 값 없음으로 정했으면 빈 칸
         g["machine"].append((r[10], r[11], machine, truth))
 

@@ -47,7 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("run", parents=[common], help="스캔 파일/폴더를 처리해 DB 에 적재")
     p.add_argument("paths", nargs="*", help="파일 또는 폴더. 없으면 archive_root 전체. 상대경로는 archive_root 기준으로도 찾는다")
-    p.add_argument("--recognizer", help="인식 백엔드 (기본: 설정값)")
+    p.add_argument("--recognizer", help="기본 인식 백엔드 ([recognize] backend 대신). [recognize.by_kind] 에 적힌 종류는 그쪽 "
+                                        "백엔드가 읽는다 — 전부를 덮는 것은 --answers(oracle)뿐")
     p.add_argument("--corrector", help="교정 백엔드 (기본: 설정값)")
     p.add_argument("--template", help="양식 분류를 건너뛰고 이 템플릿으로 처리")
     p.add_argument("--answers", help="oracle 백엔드용 정답 JSON")
@@ -177,7 +178,7 @@ def _need_site(s: Settings):
 def cmd_info(a) -> int:
     from .correct import REGISTRY as CORRECTORS
     from .handlers import REGISTRY as HANDLERS
-    from .recognize import REGISTRY as RECOGNIZERS
+    from .recognize import available as recognizers_available
 
     s = _settings(a)
     data = {
@@ -186,7 +187,7 @@ def cmd_info(a) -> int:
                      "archive_root": str(s.archive_root) if s.archive_root else None,
                      "work_root": str(s.work_root), "db_url": s.resolved_db_url, "dpi": s.dpi,
                      "recognizer": s.recognizer, "corrector": s.corrector, "auto_accept_conf": s.auto_accept_conf},
-        "backends": {"recognizers": sorted(RECOGNIZERS), "correctors": sorted(CORRECTORS), "handlers": sorted(HANDLERS)},
+        "backends": {"recognizers": recognizers_available(), "correctors": sorted(CORRECTORS), "handlers": sorted(HANDLERS)},
         "site": None,
     }
     lines = [f"minedocscan {__version__}"] + [f"  {k}: {v}" for k, v in data["settings"].items()]
@@ -248,8 +249,6 @@ def cmd_run(a) -> int:
     paths = [_resolve(p, s) for p in a.paths] or ([s.archive_root] if s.archive_root else [])
     if not paths:
         raise SystemExit("처리할 경로가 없습니다: PATH 를 주거나 archive_root 를 지정하세요")
-    if a.fresh and s.resolved_db_url.startswith("sqlite:///"):
-        Path(s.resolved_db_url[len("sqlite:///"):]).unlink(missing_ok=True)
     if a.answers or a.inspection_csv:
         answers = load_answers_json(a.answers) if a.answers else {}
         if a.inspection_csv:
@@ -264,6 +263,8 @@ def cmd_run(a) -> int:
             recognizer = build_recognizer(s, site)
         except (KeyError, ValueError, FileNotFoundError) as e:
             raise SystemExit(f"인식 백엔드를 준비할 수 없습니다: {e}") from e
+    if a.fresh and s.resolved_db_url.startswith("sqlite:///"):   # 인식기(모델)를 준비한 뒤에 지운다 — 모델이 없으면 DB 는 그대로
+        Path(s.resolved_db_url[len("sqlite:///"):]).unlink(missing_ok=True)
     pipe = Pipeline(s, site=site, recognizer=recognizer)
     files = pipe.expand(paths)
     if not files:
@@ -388,11 +389,11 @@ def cmd_regress(a) -> int:
         lines += [f"  {k}: 기준 {e} → 지금 {v}" for k, e, v in res["diffs"]]
     elif res["had_baseline"]:
         lines.append("기준과 같습니다.")
+    else:
+        lines.append("기준이 아직 없습니다.")
     if res["new_keys"]:
         lines.append(f"기준에 없던 새 항목 {len(res['new_keys'])}개 (어긋남으로 치지 않는다 — --update 로 기준에 넣는다): "
                      + ", ".join(res["new_keys"][:12]) + (" …" if len(res["new_keys"]) > 12 else ""))
-    else:
-        lines.append("기준이 아직 없습니다.")
     if res["updated"]:
         lines.append(f"기준을 저장했습니다: {res['baseline']}")
     _emit(a, {k: v for k, v in res.items() if k != "report"} | {"report": res["report"]}, "\n".join(lines))
@@ -560,7 +561,7 @@ def cmd_recognizer(a) -> int:
             raise SystemExit(str(e)) from e
         v = card["validation"]
         aa = card["auto_accept"]
-        thr = aa["threshold"] if aa["met"] else "없음 (목표를 만족하는 임계값이 없다 — 자동 적재하지 않는다)"
+        thr = aa["threshold"] if aa["met"] else f"없음 ({aa.get('reason') or '목표를 만족하는 임계값이 없다'} — 자동 적재하지 않는다)"
         _emit(a, {"model": str(out), "card": card},
               f"모델을 만들었습니다: {out}\n"
               f"  검증({v['source']}) {v['cells']}셀: 값 있는 칸 {v['score']['value']['accuracy']}, "
@@ -582,7 +583,7 @@ def _recognizer_eval(a, s: Settings) -> int:
     except FileNotFoundError as e:
         raise SystemExit(str(e)) from e
     opts = (s.recognizer_options or {}).get("digits", {})
-    thr = opts.get("auto_accept_conf", site.option("recognize.digits", "auto_accept_conf") if site else None)
+    thr = opts.get("auto_accept_conf")                       # 설정이 카드의 기준보다 먼저 (4.6)
     errors = None if a.errors is None else (Path(a.errors) if a.errors else Path(s.work_root) / "recognizer-errors")
     trips_max = site.option("haul", "trips_max") if site else None
     try:

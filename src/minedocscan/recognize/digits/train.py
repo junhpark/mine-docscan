@@ -128,19 +128,20 @@ def describe_net(channels) -> str:
 
 
 # ── 합성 셀 ────────────────────────────────────────────────────────────────
-def _gen_chunk(job) -> list[tuple[np.ndarray, str]]:
+def _gen_chunk(job) -> list[tuple[np.ndarray, str, str]]:
     seed, params, items = job
     cv2.setNumThreads(1)
     out = []
     for i, kind, nb in items:
         c = make_cell(np.random.default_rng([seed, i]), params, kind, nb)
-        out.append((resize_input(c.image), c.text))
+        out.append((resize_input(c.image), c.text, c.kind))
     return out
 
 
 def synth_pool(n: int, seed: int, geometry, spec: CropSpec, workers: int | None = None,
-               chunk: int = 250) -> tuple[list[np.ndarray], list[str]]:
-    """합성 셀 n 개를 칸 크기마다 고르게 나눠 만든다 (모델 입력 크기로 줄인 회색조). 같은 인자면 같은 셀."""
+               chunk: int = 250) -> tuple[list[np.ndarray], list[str], list[str]]:
+    """합성 셀 n 개를 칸 크기마다 고르게 나눠 만든다 (모델 입력 크기로 줄인 회색조). 같은 인자면 같은 셀.
+    돌려주는 값: (그림, 정답, 종류 — tools/synth_cells.KINDS)."""
     geometry = list(geometry)
     jobs = []
     for g, (w, h) in enumerate(geometry):
@@ -155,14 +156,12 @@ def synth_pool(n: int, seed: int, geometry, spec: CropSpec, workers: int | None 
     if workers == 1:
         parts = [_gen_chunk(j) for j in jobs]
     else:
-        # torch 를 불러오기 전이면 fork (빠르고, 부른 쪽 스크립트를 다시 실행하지 않는다). torch 를 쓴 뒤에 fork 하면
-        # 자식이 torch 의 스레드 잠금에서 멈춘다 — 그때는 spawn. train() 은 torch 를 합성 셀을 다 만든 뒤에 불러온다
-        fork_ok = "torch" not in sys.modules and sys.platform != "darwin"
-        method = "fork" if fork_ok and "fork" in multiprocessing.get_all_start_methods() else "spawn"
-        with ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context(method)) as ex:
+        # 언제나 spawn: fork 는 부모가 이미 띄운 스레드(torch·OpenCV 의 스레드 풀)의 잠금을 물려받아 자식이 멈출 수 있다
+        # (torch 를 쓴 뒤 fork 해서 실제로 멈췄다). Windows 는 spawn 뿐이라 어디서나 같게 돈다. 부른 쪽 스크립트에는 __main__ 가드가 필요하다
+        with ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn")) as ex:
             parts = list(ex.map(_gen_chunk, jobs))
     flat = [x for p in parts for x in p]
-    return [x[0] for x in flat], [x[1] for x in flat]
+    return [x[0] for x in flat], [x[1] for x in flat], [x[2] for x in flat]
 
 
 # ── 변형 ──────────────────────────────────────────────────────────────────
@@ -246,35 +245,45 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
     crops = None
     real_tr: list[data.Sample] = []
     real_va: list[data.Sample] = []
+    real_va_all: list[data.Sample] = []
     salt = data.val_salt(split_salt)
     if crops_dir is not None:
         try:
             crops = data.read_crops(crops_dir)
         except data.CropsError as e:
             raise TrainError(str(e)) from e
-        real_tr, real_va = data.split_val(crops.samples, salt, args.val_share)
+        real_tr, real_va_all = data.split_val(crops.samples, salt, args.val_share)
         tr_dates = {s.work_date for s in real_tr if s.work_date}
-        va_dates = {s.work_date for s in real_va}
+        va_dates = {s.work_date for s in real_va_all}
         assert not tr_dates & va_dates, "검증 날짜와 학습 날짜가 겹친다"
+        # 검증(온도·기준·성적)은 잉크 판정이 "값 있음"이던 칸만 — 파이프라인이 인식기에 보내는 칸이다. 잉크가 없던 빈 칸까지 넣으면
+        # 쉬운 빈 칸이 분모를 키워 자동 적재 오류율이 낮게 나오고 기준이 낮게 골라진다. 학습에는 다 쓴다
+        real_va = [s for s in real_va_all if s.inked]
     check_torch()                    # 데이터를 거절할 일이 있으면 그것부터 말한다 (torch 가 없는 컴퓨터에서도)
     spec = crops.spec if crops and crops.spec else DEFAULT_SPEC
     if crops is not None and crops.spec is None and crops.samples:
         raise TrainError("크롭 규격을 알 수 없습니다")
-    if real_tr:
+    if real_tr or real_va:                       # 합성 셀은 실제 칸 크기로 (실제 셀이 전부 검증 날짜에 있어도)
         geometry = _geometry_of(real_tr + real_va)
     else:
         geometry = [tuple(g) for g in (args.geometry or DEFAULT_GEOMETRY)]
     progress(f"실제 셀: 학습 {len(real_tr)} (날짜 {len({s.work_date for s in real_tr})}), 검증 {len(real_va)} "
              f"(날짜 {len({s.work_date for s in real_va})}) · 규격 {spec.describe()}")
+    if real_tr and not real_va:
+        progress(f"주의: 검증 날짜의 (잉크가 있던) 실제 셀이 없습니다 (train 날짜 {len({s.work_date for s in real_tr})}일 중 검증 "
+                 f"{len({s.work_date for s in real_va_all})}일). 합성 셀 {SYNTH_VAL}개로 온도와 참고 성적만 내고 자동 적재 기준은 정하지 않습니다 "
+                 "— 날짜가 늘면 다시 학습하거나 [recognize.digits] auto_accept_conf 로 정하세요")
+    if real_va and not real_tr:
+        progress(f"주의: 실제 셀 {len(real_va)}개가 전부 검증 날짜에 있습니다 — 학습에는 합성 셀만 씁니다")
 
     # 3. 합성 셀
     n_syn = args.synthetic_n(len(real_tr))
     t0 = time.time()
-    syn_x, syn_y = synth_pool(n_syn, args.seed, geometry, spec, args.workers) if n_syn else ([], [])
+    syn_x, syn_y, _kinds = synth_pool(n_syn, args.seed, geometry, spec, args.workers) if n_syn else ([], [], [])
     n_syn = len(syn_x)
     progress(f"합성 셀 {n_syn}개 ({', '.join(f'{w}x{h}' for w, h in geometry)}) — {time.time() - t0:.1f}s")
     if not real_tr and not n_syn:
-        raise TrainError("학습할 셀이 없습니다 (실제 셀 0, --synthetic 0)")
+        raise TrainError(f"학습할 셀이 없습니다 (학습 날짜의 실제 셀 0 — 검증 날짜의 셀 {len(real_va)}, --synthetic 0)")
     tr_ink = _ink([resize_input(s.image()) for s in real_tr])
     tr_y = [s.text for s in real_tr]
     syn_ink = _ink(syn_x)
@@ -284,12 +293,17 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
         va_y = [s.text for s in real_va]
         val_source = "real"
     else:
-        va_small, va_y = synth_pool(SYNTH_VAL, args.seed + 7_777, geometry, spec, args.workers)
+        va_small, va_y, va_kinds = synth_pool(SYNTH_VAL, args.seed + 7_777, geometry, spec, args.workers)
+        # 잉크가 전혀 없는 칸(blank)은 파이프라인이 인식기에 보내지 않는다 — 검증에서 뺀다 (실제 셀의 inked 와 같은 이유)
+        keep = [k != "blank" for k in va_kinds]
+        va_small = [x for x, ok in zip(va_small, keep, strict=True) if ok]
+        va_y = [y for y, ok in zip(va_y, keep, strict=True) if ok]
         val_source = "synthetic"
     va_x = np.stack([normalize(x) for x in va_small]) if va_small else np.zeros((0, 3, INPUT_H, INPUT_W), np.float32)
 
     # 학습 (torch 는 합성 셀을 다 만든 뒤에 불러온다 — 위의 프로세스 풀이 fork 한다)
     torch = require_torch()
+    _check_export(torch, args.channels)                        # 몇 분 학습한 뒤가 아니라 지금 실패한다
     torch.manual_seed(args.seed)
     torch.set_num_threads(max(1, os.cpu_count() or 1))
     gen = torch.Generator().manual_seed(args.seed)
@@ -361,6 +375,10 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
         pc = [(a, c) for a, c, _cand in preds]
         table = calib.threshold_table(pc, va_y, trips_max)
         chosen = calib.choose_threshold(table, args.target_auto_error)
+        reason = None if chosen else "검증 셀에서 목표를 만족하는 임계값이 없다"
+        if real_tr and not real_va:
+            # 현장 글씨로 학습했는데 현장 글씨의 검증 날짜가 없다: 합성 셀의 수치로 현장의 기준을 정하지 않는다 (4.6)
+            chosen, reason = None, "실제 검증 날짜의 셀이 없어 기준을 정하지 않았다 (합성 셀의 수치는 참고만)"
         val_score = calib.score(pc, va_y)
 
         card = {
@@ -382,20 +400,22 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
             "data": {
                 "crops": None if crops is None else {"lines": crops.lines, "skipped": crops.skipped,
                                                      "splits": sorted(crops.splits)},
-                "train": data.summarize(real_tr), "val": data.summarize(real_va),
+                "train": data.summarize(real_tr), "val": data.summarize(real_va_all),
                 "synthetic": {"cells": n_syn, "geometry": [list(g) for g in geometry],
                               "val_cells": 0 if real_va else len(va_y)},
                 "val_rule": {"salt": salt, "share": args.val_share,
                              "rule": "sha256(salt:날짜) 앞 32비트 / 2^32 < share 이면 검증 (evaluate/split.py)"},
             },
-            "validation": {"source": val_source, "cells": len(va_y), "best_step": best["step"],
+            "validation": {"source": val_source, "cells": len(va_y), "excluded_no_ink": len(real_va_all) - len(real_va),
+                           "best_step": best["step"],
                            "score": val_score, "train_seconds": round(train_seconds, 1),
                            "total_seconds": None,
                            "export_check": {"max_abs_diff": diff, "same_answers": bool(same), "cells": len(va_y)},
                            "calibration": tinfo},
             "temperature": temp,
             "auto_accept": {"target": args.target_auto_error, "threshold": None if chosen is None else chosen["threshold"],
-                            "met": chosen is not None, "trips_max": trips_max, "basis": f"검증 셀 ({val_source})",
+                            "met": chosen is not None, "reason": reason, "trips_max": trips_max,
+                            "basis": f"검증 셀 ({val_source})",
                             "rule": "오류율(자동 적재된 칸 중 정답과 다른 비율)이 목표 이하인 가장 낮은 임계값 (tasks/0003 4.6)",
                             "table": table},
             "libraries": libraries(torch),
@@ -413,7 +433,7 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     progress(f"모델: {out_dir} · 검증 {val_source} {len(va_y)}셀 · 온도 {temp:g} · 자동 적재 기준 "
-             f"{'없음 (목표를 만족하는 임계값 없음)' if chosen is None else chosen['threshold']} · "
+             f"{f'없음 ({reason})' if chosen is None else chosen['threshold']} · "
              f"{time.time() - t_start:.0f}s")
     return card
 
@@ -427,22 +447,38 @@ def _geometry_of(samples: list[data.Sample], k: int = 6) -> list[tuple[int, int]
 
 
 def export_onnx(torch, net, path: Path) -> str:
-    """배치 1 고정. 가능하면 예전(TorchScript) 내보내기로 opset 13 — 오래된 OpenCV 도 읽는다. 그것이 없어진 torch 에서는
-    새 내보내기(opset 18). 어느 쪽이었는지 돌려준다."""
+    """배치 1 고정. 예전(TorchScript) 내보내기로 opset 13 — 오래된 OpenCV 도 읽는다. `dynamo` 인자가 없는 옛 torch(2.4 이하)는
+    그것이 기본이고, 예전 내보내기가 없어진 torch 에서는 새 내보내기(opset 18). 어느 쪽이었는지 돌려준다."""
+    import inspect
     import warnings
 
+    params = inspect.signature(torch.onnx.export).parameters
     x = torch.zeros(1, N_INPUT_CHANNELS, INPUT_H, INPUT_W)
+    common = {"opset_version": 13, "input_names": ["x"], "output_names": ["logits"]}
     try:
         with warnings.catch_warnings(), redirect_stdout(io.StringIO()):
             warnings.simplefilter("ignore")
-            torch.onnx.export(net, (x,), str(path), opset_version=13, input_names=["x"], output_names=["logits"],
-                              dynamo=False)
+            torch.onnx.export(net, (x,), str(path), **common, **({"dynamo": False} if "dynamo" in params else {}))
         return "torchscript, opset 13"
     except (TypeError, RuntimeError, AttributeError, ImportError):
+        if "dynamo" not in params:
+            raise
+        extra = {"external_data": False} if "external_data" in params else {}
         with redirect_stdout(io.StringIO()):
-            torch.onnx.export(net, (x,), str(path), opset_version=18, input_names=["x"], output_names=["logits"],
-                              dynamo=True, external_data=False)
+            torch.onnx.export(net, (x,), str(path), **(common | {"opset_version": 18}), dynamo=True, **extra)
         return "dynamo, opset 18"
+
+
+def _check_export(torch, channels) -> None:
+    """학습하지 않은 망으로 ONNX 내보내기를 한 번 해 본다 — 이 torch 로 내보낼 수 없으면 학습 전에 멈춘다."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="minedocscan-export-") as tmp:
+        try:
+            export_onnx(torch, build_net(torch, channels).eval(), Path(tmp) / "probe.onnx")
+        except Exception as e:                              # noqa: BLE001 — 어떤 실패든 같은 안내로
+            raise TrainError(f"이 torch({torch.__version__})로는 ONNX 를 내보낼 수 없습니다: {type(e).__name__}: {e} "
+                             "— torch·onnx·onnxscript 판을 확인하세요 (pip install -e \".[train]\")") from e
 
 
 def code_version() -> dict:

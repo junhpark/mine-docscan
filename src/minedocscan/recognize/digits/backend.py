@@ -45,7 +45,7 @@ class DigitsRecognizer:
 
     @classmethod
     def from_settings(cls, settings=None, site=None) -> DigitsRecognizer:
-        """모델: 설정 [recognize.digits] model > site.toml 의 같은 항목. 기준: 설정 auto_accept_conf > site.toml >
+        """모델: 설정 [recognize.digits] model > site.toml 의 같은 항목 (4.5). 기준: 설정 [recognize.digits] auto_accept_conf >
         모델 카드 > [pipeline] auto_accept_conf (4.6)."""
         opts = dict((getattr(settings, "recognizer_options", None) or {}).get("digits", {}) or {})
 
@@ -58,11 +58,9 @@ class DigitsRecognizer:
                              '[recognize.digits] model = "<이름>" — 사이트 팩의 모델은 `minedocscan recognizer list`')
         site_root = site.root if site is not None else getattr(settings, "site", None)
         model_dir = resolve_model(str(ref), site_root)
-        thr, src = opts.get("auto_accept_conf"), "config"
-        if thr is None:
-            thr, src = site_opt("auto_accept_conf"), "site"
+        thr = opts.get("auto_accept_conf")
         fallback = float(getattr(settings, "auto_accept_conf", 0.90))
-        return cls(model_dir, None if thr is None else _conf(thr), src, fallback)
+        return cls(model_dir, None if thr is None else _conf(thr), "config", fallback)
 
     def crop_spec_for(self, kind: str) -> CropSpec | None:
         return self.spec if kind in KINDS else None
@@ -75,7 +73,7 @@ class DigitsRecognizer:
                 continue
             answers = read_answers(self.net.logits(preprocess(crop)), self.temperature)
             text, p = answers[0]
-            out.append(Recognition(text, round(float(p), 6), [a for a, _p in answers], self.name,
+            out.append(Recognition(text, float(p), [a for a, _p in answers], self.name,   # 반올림하지 않는다 (기준과 그대로 비교)
                                    answer=answer_kind(text), threshold=self.threshold))
         return out
 

@@ -42,7 +42,7 @@ def test_opencv_reads_the_exported_model_like_torch(tmp_path):
     net.eval()
     exporter = export_onnx(torch, net, tmp_path / "model.onnx")
     assert "opset" in exporter
-    small, _texts = synth_pool(64, 5, DEFAULT_GEOMETRY, DEFAULT_SPEC, workers=1)
+    small, _texts, _kinds = synth_pool(64, 5, DEFAULT_GEOMETRY, DEFAULT_SPEC, workers=1)
     xs = np.stack([normalize(x) for x in small])
     cv_out = OnnxNet(tmp_path / "model.onnx").logits_many(xs)
     with torch.no_grad():
@@ -54,7 +54,7 @@ def test_opencv_reads_the_exported_model_like_torch(tmp_path):
 
 def test_synthetic_only_model_meets_the_thresholds(tmp_path):
     """합성 셀만으로 CPU 에서 2분 안에 학습한 모델이, 따로 뽑은 합성 셀 2,000개에서 값 있는 칸 ≥ 0.97, 빈 칸 ≥ 0.97."""
-    held_x, held_y = synth_pool(2000, 424_242, DEFAULT_GEOMETRY, DEFAULT_SPEC)        # 학습에 쓰지 않은 씨앗
+    held_x, held_y, _kinds = synth_pool(2000, 424_242, DEFAULT_GEOMETRY, DEFAULT_SPEC)   # 학습에 쓰지 않은 씨앗
     t0 = time.time()
     card = train(None, tmp_path / "m", TrainArgs(name="m", seed=0))
     elapsed = time.time() - t0
@@ -106,6 +106,10 @@ def test_train_from_crops_writes_a_card_without_images_or_reviewers(crops, tmp_p
     assert CropSpec.from_dict(card["spec"]) == CropSpec("source", 1.5, None)         # export-crops 의 기본 규격
     dt = card["data"]
     assert dt["train"]["cells"] + dt["val"]["cells"] == crops["train"]["written"]
+    # 검증(온도·기준·성적)은 잉크가 있던 칸만 — 잉크가 없던 빈 칸은 학습에만 쓴다
+    if card["validation"]["source"] == "real":
+        assert card["validation"]["cells"] + card["validation"]["excluded_no_ink"] == dt["val"]["cells"]
+        assert card["validation"]["excluded_no_ink"] > 0
     dates = {json.loads(x)["work_date"] for x in (crops["root"] / "crops-train" / "train" / "labels.jsonl").read_text().splitlines()}
     assert dt["train"]["dates"] + dt["val"]["dates"] == len(dates) and dt["synthetic"]["cells"] == 400
     assert card["validation"]["source"] == ("real" if dt["val"]["cells"] else "synthetic")
@@ -117,6 +121,28 @@ def test_train_from_crops_writes_a_card_without_images_or_reviewers(crops, tmp_p
     # 같은 이름이면 멈춘다
     with pytest.raises(TrainError, match="덮어쓰지"):
         train(crops["root"] / "crops-train", d, TrainArgs(name="real", steps=10, synthetic=50))
+
+
+def test_no_real_validation_means_no_auto_threshold(crops, tmp_path, monkeypatch):
+    """현장 셀로 학습했는데 검증 날짜의 실제 셀이 없으면 합성 셀로 기준을 정하지 않는다 (자동 적재 없음, 이유를 적는다)."""
+    card = train(crops["root"] / "crops-train", tmp_path / "noval", TrainArgs(name="noval", steps=20, synthetic=100,
+                                                                             val_share=0.0, eval_every=20))
+    aa = card["auto_accept"]
+    assert card["validation"]["source"] == "synthetic" and aa["met"] is False and aa["threshold"] is None
+    assert "실제 검증" in aa["reason"]
+    from minedocscan.recognize.digits.backend import DigitsRecognizer
+
+    assert DigitsRecognizer(tmp_path / "noval").threshold == float("inf")       # 백엔드는 자동 적재하지 않는다
+    # 내보내기를 못 하는 torch 면 학습 전에 멈춘다
+    import minedocscan.recognize.digits.train as tr
+
+    def broken(*a, **k):
+        raise RuntimeError("no exporter")
+
+    monkeypatch.setattr(tr, "export_onnx", broken)
+    with pytest.raises(TrainError, match="ONNX"):
+        train(None, tmp_path / "x", TrainArgs(name="x", steps=5, synthetic=20))
+    assert not (tmp_path / "x").exists()
 
 
 def test_train_command_refuses_test_lines(crops, tmp_path):

@@ -122,12 +122,26 @@ def test_threshold_priority_and_missing_model(tmp_path, low_synth):
     shutil.copytree(FIXTURE_MODEL, site / "models" / "fx")
     s3 = replace(s, site=site, recognizer_options={"digits": {"model": "fx"}})
     assert build_recognizer(s3).backend_for("handwritten_number").model_dir == site / "models" / "fx"
+    # 이름은 현재 폴더에 같은 이름의 폴더가 있어도 사이트 팩의 것이다
+    import os
+
+    cwd = os.getcwd()
+    try:
+        (tmp_path / "cwd" / "fx").mkdir(parents=True)
+        os.chdir(tmp_path / "cwd")
+        assert build_recognizer(s3).backend_for("handwritten_number").model_dir == site / "models" / "fx"
+    finally:
+        os.chdir(cwd)
     # 모델이 없으면 시작할 때 무엇이 없는지 말하고 멈춘다 (null 로 물러나지 않는다)
     cfg = tmp_path / "minedocscan.toml"
     cfg.write_text('[recognize.by_kind]\nhandwritten_number = "digits"\n[recognize.digits]\nmodel = "nope"\n', encoding="utf-8")
     common = ["--config", str(cfg), "--site", str(site), "--archive-root", str(low_synth.scans)]
+    db = tmp_path / "w2" / "minedocscan.db"
+    db.parent.mkdir()
+    db.write_bytes(b"")                                                    # 있던 DB 는 모델이 없으면 지우지 않는다 (--fresh 라도)
     with pytest.raises(SystemExit, match=r"model\.onnx.*nope|nope.*model\.onnx"):
-        main(["run", *common, "--work-root", str(tmp_path / "w2")])
+        main(["run", "--fresh", *common, "--work-root", str(tmp_path / "w2")])
+    assert db.exists()
     cfg.write_text('[recognize.by_kind]\nhandwritten_number = "digits"\n', encoding="utf-8")
     with pytest.raises(SystemExit, match=r"\[recognize\.digits\] model"):
         main(["run", *common, "--work-root", str(tmp_path / "w3")])
@@ -150,6 +164,7 @@ def test_info_shows_backend_and_model(low_synth, tmp_path, capsys):
     assert d["backend"] == "digits" and d["model"] == "digits-fixture" and d["spec"].startswith("source")
     assert d["synthetic_cells"] > 0 and d["train_cells"] == 0
     assert info["recognizer"]["by_kind"]["handwritten_text"]["backend"] == "null"
+    assert "digits" in info["backends"]["recognizers"]
 
 
 def test_invariant_holds_with_digits_and_range_is_checked(low_synth, tmp_path):
@@ -168,6 +183,12 @@ def test_invariant_holds_with_digits_and_range_is_checked(low_synth, tmp_path):
     cells = number_cells(con, load_answers_json(low_synth.answers_path))
     over = [c for c in cells if c["backend"] == "digits" and c["value_raw"].isdigit() and int(c["value_raw"]) > 4]
     assert over and all(c["review_status"] == "pending" for c in over)
+    # 범위는 운반 횟수 칸만: 같은 쪽 곁표의 숫자 칸은 4 보다 커도 신뢰도가 높으면 자동 적재된다
+    side = con.execute("SELECT value_raw, review_status, confidence FROM doc_field WHERE kind = 'handwritten_number' "
+                       "AND backend = 'digits' AND region NOT IN ('haul', 'matrix')").fetchall()
+    t = build_recognizer(settings).backend_for("handwritten_number").threshold
+    sure_big = [r for r in side if r[0].isdigit() and int(r[0]) > 4 and r[2] >= t]
+    assert all(r[1] == "auto" for r in sure_big)
     # 아무 검수나: 값·빈 칸·읽을 수 없음을 섞어서, 자동 적재된 빈 칸을 값으로 바꿨다가 읽을 수 없음으로
     rng = np.random.default_rng(0)
     picks = [cells[i] for i in rng.choice(len(cells), size=min(24, len(cells)), replace=False)]
