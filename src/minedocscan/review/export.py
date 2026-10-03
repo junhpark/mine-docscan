@@ -7,7 +7,8 @@
 
 크롭은 파이프라인이 인식기에 넘기는 것과 같은 구현으로 뜬다(imaging/cropspec.py) — 같은 셀이면 화소까지 같다.
 
-illegible 은 뺀다. empty 는 빈 칸의 예로 넣는다. test 와 train 을 섞지 않는다 (날짜 분할, ADR 0009).
+illegible 은 기본으로 뺀다 (--include-illegible 이면 넣는다: 숫자 인식기의 "거절"로 학습한다 — labels.jsonl 의 verdict 로 구분).
+empty 는 빈 칸의 예로 넣는다. test 와 train 을 섞지 않는다 (날짜 분할, ADR 0009).
 크롭과 라벨에는 현장의 글씨가 들어 있다. 대상이 git 작업 트리 안이면 거절한다 (--allow-in-repo 로만).
 """
 from __future__ import annotations
@@ -50,7 +51,8 @@ def inside_git_tree(path: str | Path) -> bool:
 
 
 def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split: str = "all", kind: str | None = None,
-                 res: str = "auto", out_scale: float = 1.5, pad: int | None = None, allow_in_repo: bool = False) -> dict:
+                 res: str = "auto", out_scale: float = 1.5, pad: int | None = None, allow_in_repo: bool = False,
+                 include_illegible: bool = False) -> dict:
     """pad: 셀 둘레 여유(템플릿 px). None 이면 화면과 같이 행 높이의 절반(최소 8) — 칸 선을 넘은 획이 잘리지 않게.
     돌려주는 값: {"written": n, "by_split": {split: n}, "by_source": {source|aligned: n}, "skipped_illegible": n}."""
     out = Path(out)
@@ -68,7 +70,7 @@ def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split
     used: set[str] = set()
     try:
         for rv, sp, d in sorted(effective_with_split(con, site), key=lambda t: (t[1], t[2] or "", t[0].field_id)):
-            if rv.verdict == "illegible":
+            if rv.verdict == "illegible" and not include_illegible:
                 skipped += 1
                 continue
             if split != "all" and sp != split:

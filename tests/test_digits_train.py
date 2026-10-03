@@ -1,0 +1,125 @@
+"""숫자 인식기 학습 (tasks/0003 단계 4) — torch 가 있어야 돈다: `pytest -m train`.
+
+기본 `pytest` 에서는 빠진다 (pyproject 의 addopts). 수치는 합성 셀에 대한 문턱이다 — 손글씨 인식률이 아니다.
+"""
+import json
+import os
+import time
+
+import numpy as np
+import pytest
+
+from minedocscan.cli import main
+from minedocscan.imaging.cropspec import CropSpec
+from minedocscan.recognize import load_answers_json
+from minedocscan.recognize.digits import calib
+from minedocscan.recognize.digits.model import CARD_KEYS, OnnxNet, normalize, read_answers
+from minedocscan.recognize.digits.train import (
+    DEFAULT_GEOMETRY,
+    DEFAULT_SPEC,
+    TrainArgs,
+    TrainError,
+    build_net,
+    export_onnx,
+    synth_pool,
+    train,
+)
+
+pytestmark = pytest.mark.train
+torch = pytest.importorskip("torch")
+pytest.importorskip("onnx")
+
+
+def test_opencv_reads_the_exported_model_like_torch(tmp_path):
+    """같은 입력에 대해 torch 출력과 OpenCV(cv2.dnn) 출력의 차이가 1e-3 미만이고 읽은 답이 전부 같다."""
+    torch.manual_seed(0)
+    net = build_net(torch)
+    with torch.no_grad():                                   # 배치 정규화 통계를 흔들어 둔다 (기본값이면 너무 쉽다)
+        for m in net.modules():
+            if isinstance(m, torch.nn.BatchNorm2d):
+                m.running_mean.uniform_(-0.5, 0.5)
+                m.running_var.uniform_(0.5, 2.0)
+    net.eval()
+    exporter = export_onnx(torch, net, tmp_path / "model.onnx")
+    assert "opset" in exporter
+    small, _texts = synth_pool(64, 5, DEFAULT_GEOMETRY, DEFAULT_SPEC, workers=1)
+    xs = np.stack([normalize(x) for x in small])
+    cv_out = OnnxNet(tmp_path / "model.onnx").logits_many(xs)
+    with torch.no_grad():
+        th_out = net(torch.from_numpy(xs)).squeeze(2).numpy()
+    assert cv_out.shape == th_out.shape
+    assert float(np.abs(cv_out - th_out).max()) < 1e-3
+    assert [read_answers(a)[0][0] for a in cv_out] == [read_answers(b)[0][0] for b in th_out]
+
+
+def test_synthetic_only_model_meets_the_thresholds(tmp_path):
+    """합성 셀만으로 CPU 에서 2분 안에 학습한 모델이, 따로 뽑은 합성 셀 2,000개에서 값 있는 칸 ≥ 0.97, 빈 칸 ≥ 0.97."""
+    held_x, held_y = synth_pool(2000, 424_242, DEFAULT_GEOMETRY, DEFAULT_SPEC)        # 학습에 쓰지 않은 씨앗
+    t0 = time.time()
+    card = train(None, tmp_path / "m", TrainArgs(name="m", seed=0))
+    elapsed = time.time() - t0
+    v = card["validation"]
+    print(f"학습 {v['train_seconds']}s, 전체 {elapsed:.0f}s, CPU {os.cpu_count()}개, 파라미터 {card['architecture']['params']}, "
+          f"ONNX {card['architecture']['onnx_bytes']} B")
+    if (os.cpu_count() or 1) >= 4:                         # 2코어 CI 에서는 시간을 재지 않는다 (같은 일이 두 배 걸린다)
+        assert v["train_seconds"] < 120
+    assert v["export_check"]["max_abs_diff"] < 1e-3 and v["export_check"]["same_answers"]
+    net = OnnxNet(tmp_path / "m" / "model.onnx")
+    preds = calib.predict(list(net.logits_many(np.stack([normalize(x) for x in held_x]))), card["temperature"])
+    s = calib.score([(a, c) for a, c, _ in preds], held_y)
+    print("합성 셀 2,000개:", json.dumps(s))
+    assert s["value"]["n"] > 900 and s["empty"]["n"] > 700
+    assert s["value"]["accuracy"] >= 0.97 and s["empty"]["accuracy"] >= 0.97
+    assert (tmp_path / "m" / "model.onnx").stat().st_size < 1_000_000
+
+
+@pytest.fixture(scope="module")
+def crops(tmp_path_factory):
+    """낮은 칸 합성 양식 3일치를 정답대로 검수하고 숫자 칸을 train / test 로 내보낸 폴더."""
+    from conftest import review_everything
+    from minedocscan.config import Settings
+    from minedocscan.pipeline import Pipeline
+    from minedocscan.review.export import export_crops
+    from minedocscan.tools.synth import generate
+
+    root = tmp_path_factory.mktemp("digits_crops")
+    synth = generate(root / "data", days=3, seed=1, low_cells=True)
+    settings = Settings(site=synth.site, archive_root=synth.scans, work_root=root / "work", reviews=root / "r.jsonl")
+    pipe = Pipeline(settings)
+    pipe.run([synth.scans])
+    review_everything(pipe.con, pipe.site, settings, load_answers_json(synth.answers_path))
+    out_train = export_crops(pipe.con, pipe.site, settings, root / "crops-train", split="train", kind="handwritten_number")
+    out_all = export_crops(pipe.con, pipe.site, settings, root / "crops-all", kind="handwritten_number")
+    return {"root": root, "site": pipe.site, "train": out_train, "all": out_all, "settings": settings}
+
+
+def test_train_from_crops_writes_a_card_without_images_or_reviewers(crops, tmp_path):
+    assert crops["train"]["written"] > 0
+    site = crops["site"]
+    card = train(crops["root"] / "crops-train", tmp_path / "real", TrainArgs(name="real", steps=120, synthetic=400,
+                                                                            val_share=0.5, eval_every=60),
+                 split_salt=site.split_salt, trips_max=30)
+    d = tmp_path / "real"
+    assert {p.name for p in d.iterdir()} == {"model.onnx", "card.json", "train-log.jsonl"}
+    assert all(k in card for k in CARD_KEYS)
+    assert CropSpec.from_dict(card["spec"]) == CropSpec("source", 1.5, None)         # export-crops 의 기본 규격
+    dt = card["data"]
+    assert dt["train"]["cells"] + dt["val"]["cells"] == crops["train"]["written"]
+    dates = {json.loads(x)["work_date"] for x in (crops["root"] / "crops-train" / "train" / "labels.jsonl").read_text().splitlines()}
+    assert dt["train"]["dates"] + dt["val"]["dates"] == len(dates) and dt["synthetic"]["cells"] == 400
+    assert card["validation"]["source"] == ("real" if dt["val"]["cells"] else "synthetic")
+    text = (d / "card.json").read_text(encoding="utf-8") + (d / "train-log.jsonl").read_text(encoding="utf-8")
+    for forbidden in ("reviewer", '"jp"', "field_id", ":haul:", ":matrix:", "png", "base64"):
+        assert forbidden not in text, forbidden
+    log = [json.loads(x) for x in (d / "train-log.jsonl").read_text().splitlines()]
+    assert [r["step"] for r in log] == [60, 120] and set(log[0]) == {"step", "loss", "lr", "val_acc", "val_loss", "seconds"}
+    # 같은 이름이면 멈춘다
+    with pytest.raises(TrainError, match="덮어쓰지"):
+        train(crops["root"] / "crops-train", d, TrainArgs(name="real", steps=10, synthetic=50))
+
+
+def test_train_command_refuses_test_lines(crops, tmp_path):
+    if "test" not in crops["all"]["by_split"]:
+        pytest.skip("이 씨앗의 3일 중 test 날짜가 없다")
+    with pytest.raises(SystemExit, match="test"):
+        main(["recognizer", "train", "--crops", str(crops["root"] / "crops-all"), "--name", "x", "--out", str(tmp_path / "x")])

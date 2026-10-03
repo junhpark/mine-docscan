@@ -8,7 +8,8 @@
   regress    사이트 팩의 기준 수치와 비교하는 실데이터 회귀 검사
   template   새 양식의 템플릿 뼈대 만들기
   synth      개인정보 없는 합성 사이트 팩과 스캔 문서 만들기
-  review     검수: serve(로컬 화면), stats(진행 현황), export-answers(검수값 → 정답 파일)
+  review     검수: serve(로컬 화면), stats(진행 현황), export-answers(검수값 → 정답 파일), export-crops(학습용 크롭)
+  recognizer 숫자 인식기: train(학습, torch 필요), list(사이트 팩의 모델)
 
 경로는 --site / --archive-root / --work-root 또는 환경변수·설정 파일로 준다 (config.py).
 """
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -97,6 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("out", help="출력 폴더 (site/, scans/, truth.json, answers.json)")
     p.add_argument("--days", type=int, default=3)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--low-cells", action="store_true",
+                   help="운반 양식 두 종을 실제처럼 낮은 칸·거친 숫자·X 표로 (숫자 인식기 시험용)")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
@@ -123,6 +127,25 @@ def build_parser() -> argparse.ArgumentParser:
                    help="템플릿 좌표(200 dpi) 대비 배율, 0 초과 6 이하 (기본 1.5 = 300 dpi 원본 그대로)")
     r.add_argument("--pad", type=int, help="셀 둘레 여유(템플릿 px, 0 이상). 기본은 화면과 같이 행 높이의 절반(최소 8)")
     r.add_argument("--allow-in-repo", action="store_true", help="git 작업 트리 안에도 쓴다 (글씨가 들어 있다 — 커밋하지 말 것)")
+    r.add_argument("--include-illegible", action="store_true",
+                   help="'읽을 수 없음'(illegible)도 내보낸다 — 숫자 인식기가 '거절'로 학습한다 (labels.jsonl 의 verdict)")
+
+    p = sub.add_parser("recognizer", parents=[common], help="숫자 인식기: 학습·목록")
+    nsub = p.add_subparsers(dest="recognizer_command", required=True)
+    n = nsub.add_parser("train", parents=[common], help="크롭 + 합성 셀로 학습 → <site>/models/<이름>/ (torch 필요: .[train])")
+    n.add_argument("--crops", help="review export-crops 로 내보낸 폴더 (test 줄이 있으면 거절). 없으면 합성 셀만으로")
+    n.add_argument("--name", required=True, help="모델 이름 (영문·숫자·.-_). 같은 이름이 있으면 멈춘다")
+    n.add_argument("--synthetic", type=int, help="합성 셀 수 (기본: 실제 셀이 있으면 4000, 없으면 8000)")
+    n.add_argument("--seed", type=int, default=0)
+    n.add_argument("--val-share", type=float, default=0.2, help="검증으로 떼는 train 날짜의 비율 (기본 0.2)")
+    n.add_argument("--target-auto-error", type=float, default=0.01,
+                   help="자동 적재 오류율의 목표 (검증 날짜, 기본 0.01). 이 이하인 가장 낮은 임계값을 고른다")
+    n.add_argument("--steps", type=int, default=2500, help="학습 스텝 (배치 64, 기본 2500 — CPU 4코어에서 약 1분 반)")
+    n.add_argument("--synthetic-geometry", metavar="WxH[,WxH…]",
+                   help="합성 칸 크기(템플릿 px, doc_field bbox). 실제 셀이 없을 때만 쓴다 (있으면 실제 칸 크기). 기본 92x21")
+    n.add_argument("--out", help="모델 폴더를 직접 지정 (기본: <site>/models/<이름>)")
+    n.add_argument("--allow-in-repo", action="store_true", help="git 작업 트리 안에도 쓴다 (합성 셀만으로 만든 시험용 모델)")
+    nsub.add_parser("list", parents=[common], help="사이트 팩의 모델과 카드 요약")
     return ap
 
 
@@ -350,7 +373,7 @@ def cmd_template(a) -> int:
 def cmd_synth(a) -> int:
     from .tools.synth import generate
 
-    r = generate(a.out, days=a.days, seed=a.seed)
+    r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")
@@ -433,17 +456,79 @@ def cmd_review(a) -> int:
         s, site, con, _imported = _review_db(a)
         try:
             r = export_crops(con, site, s, a.out, split=a.split, kind=a.kind, res=a.res, out_scale=a.scale, pad=a.pad,
-                             allow_in_repo=a.allow_in_repo)
+                             allow_in_repo=a.allow_in_repo, include_illegible=a.include_illegible)
         except (ExportError, ValueError) as e:
             raise SystemExit(str(e)) from e
+        ill = "읽을 수 없음 포함" if a.include_illegible else f"읽을 수 없음 제외 {r['skipped_illegible']}개"
         _emit(a, r, f"크롭 {r['written']}개를 썼습니다: {r['out']} — 분할별 {r['by_split']}, 해상도별 {r['by_source']}, "
-                    f"읽을 수 없음 제외 {r['skipped_illegible']}개\n저장소에 넣지 마세요 — 현장의 글씨가 들어 있습니다.")
+                    f"{ill}\n저장소에 넣지 마세요 — 현장의 글씨가 들어 있습니다.")
         return 0
     raise SystemExit(f"알 수 없는 review 명령: {a.review_command}")
 
 
+_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _geometry(text: str | None) -> list[tuple[int, int]] | None:
+    if not text:
+        return None
+    out = []
+    for g in text.split(","):
+        try:
+            w, h = (int(v) for v in g.lower().split("x"))
+        except ValueError:
+            raise SystemExit(f"--synthetic-geometry 는 WxH[,WxH…] (예: 92x21,112x22): {text}") from None
+        if not (8 <= w <= 2000 and 8 <= h <= 1000):
+            raise SystemExit(f"--synthetic-geometry 의 칸 크기가 범위 밖입니다: {g}")
+        out.append((w, h))
+    return out
+
+
+def cmd_recognizer(a) -> int:
+    from .recognize.digits.model import list_models, models_dir
+
+    s = _settings(a)
+    if a.recognizer_command == "list":
+        site = _need_site(s)
+        models = list_models(site.root)
+        lines = [f"모델 ({models_dir(site.root)}): {len(models)}개"]
+        for m in models:
+            lines.append(f"  {m['name']:<20} {m['created_at'] or '-':<21} {m['spec']:<34} 기준 {m['threshold']}  "
+                         f"학습 {m['train_cells']}셀/{m['train_dates']}일 + 합성 {m['synthetic_cells']} · "
+                         f"검증({m['val_source']}) {m['val_cells']}셀 값 {m['val_value_acc']} 빈 칸 {m['val_empty_acc']}"
+                         + (f"  [{m['error']}]" if m.get("error") else ""))
+        _emit(a, {"models": models}, "\n".join(lines))
+        return 0
+    if a.recognizer_command == "train":
+        from .recognize.digits.train import TrainArgs, TrainError, train
+
+        if not _MODEL_NAME.match(a.name):
+            raise SystemExit(f"--name 은 영문·숫자·.-_ (64자 이하): {a.name}")
+        site = _need_site(s) if (s.site or not a.out) else None
+        out = Path(a.out) if a.out else models_dir(site.root) / a.name
+        args = TrainArgs(name=a.name, steps=a.steps, synthetic=a.synthetic, seed=a.seed, val_share=a.val_share,
+                         target_auto_error=a.target_auto_error, geometry=_geometry(a.synthetic_geometry))
+        trips_max = site.option("haul", "trips_max") if site else None
+        try:
+            card = train(a.crops, out, args, split_salt=site.split_salt if site else "synthetic",
+                         trips_max=None if trips_max is None else int(trips_max), allow_in_repo=a.allow_in_repo)
+        except TrainError as e:
+            raise SystemExit(str(e)) from e
+        v = card["validation"]
+        aa = card["auto_accept"]
+        thr = aa["threshold"] if aa["met"] else "없음 (목표를 만족하는 임계값이 없다 — 자동 적재하지 않는다)"
+        _emit(a, {"model": str(out), "card": card},
+              f"모델을 만들었습니다: {out}\n"
+              f"  검증({v['source']}) {v['cells']}셀: 값 있는 칸 {v['score']['value']['accuracy']}, "
+              f"빈 칸 {v['score']['empty']['accuracy']} · 온도 {card['temperature']} · 자동 적재 기준 {thr}\n"
+              f"  설정: [recognize.by_kind] handwritten_number = \"digits\",  [recognize.digits] model = \"{a.name}\"")
+        return 0
+    raise SystemExit(f"알 수 없는 recognizer 명령: {a.recognizer_command}")
+
+
 COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "pages": cmd_pages, "eval": cmd_eval,
-            "regress": cmd_regress, "template": cmd_template, "synth": cmd_synth, "review": cmd_review}
+            "regress": cmd_regress, "template": cmd_template, "synth": cmd_synth, "review": cmd_review,
+            "recognizer": cmd_recognizer}
 
 
 def main(argv: list[str] | None = None) -> int:

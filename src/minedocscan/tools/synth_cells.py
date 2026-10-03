@@ -11,7 +11,8 @@
   · X 표, 덧칠해 지운 숫자, 칸 위에 걸쳐 쓴 메모
   · 스캔 효과 (흐림, 잡음, 종이색, 연한 잉크, JPEG)
 정답은 숫자열(앞의 0 없음) 또는 빈 칸("")이다. 칸의 크기(템플릿 px)와 크롭 규격(CropSpec: 해상도·배율·여유)은
-인자로 받는다 — 실제 크롭의 규격에 맞춰 만들 수 있게. 같은 씨앗이면 같은 셀이 화소까지 같다.
+인자로 받는다 — 실제 크롭의 규격에 맞춰 만들 수 있게. 칸은 doc_field 의 bbox 와 같은 뜻이다: 괘선으로 둘러싼 칸에서
+안쪽 여백(inset, 템플릿 기본 4 px)을 뺀 상자. 괘선은 그 바깥 inset 자리에 그린다. 같은 씨앗이면 같은 셀이 화소까지 같다.
 
 글자는 OpenCV 내장 글꼴을 한 글자씩 비틀어 그린다 (글꼴 파일·외부 데이터에 의존하지 않는다). 그래서 이 셀로 잴 수 있는
 것은 학습·추론 경로가 맞는지이지 손글씨 인식률이 아니다 (CLAUDE.md).
@@ -35,8 +36,10 @@ NOTE_WORDS = ["stop", "rain", "repair", "closed", "blast", "x", "move", "check",
 class CellParams:
     """만들 셀의 모양과 구성. 비율은 전체 셀에 대한 몫이고 make_cells 가 정확히 그 개수만큼 만든다."""
 
-    cell_w: int = 100                      # 칸 폭 (템플릿 px, 200 dpi)
-    cell_h: int = 29                       # 칸 높이
+    cell_w: int = 92                       # 칸(doc_field bbox) 폭 (템플릿 px, 200 dpi) — 실제 운반 칸은 괘선 사이 약 100 px
+    cell_h: int = 21                       # 칸 높이 — 괘선 사이 28–30 px 에서 inset 을 뺀 것
+    inset: int = 4                         # 괘선과 bbox 사이 (forms/template.Template.cells 의 inset)
+    value_h: tuple[float, float] = (0.6, 1.45)    # 가운데 값의 글자 높이 / 괘선 사이 높이. 1 을 넘으면 괘선을 넘는다
     spec: CropSpec = field(default_factory=lambda: CropSpec("source", 1.5, None))
     source_dpi_ratio: float = 1.5          # 원본 해상도 / 템플릿 해상도 (300 / 200)
     p_value: float = 0.55                  # 가운데 칸에 값이 있는 몫
@@ -75,8 +78,13 @@ class SynthCell:
 
 def make_cells(n: int, seed: int = 0, params: CellParams | None = None) -> list[SynthCell]:
     """셀 n 개. 구성(값 있음·X 표·… ·이웃 글씨 있음)은 params 의 비율대로 정확한 개수로 섞는다.
-    셀 i 는 (seed, i) 로만 정해진다 — 같은 씨앗이면 같은 셀."""
+    셀 i 는 (seed, i) 로만 정해진다 — 같은 씨앗이면 같은 셀. 여러 프로세스로 나눠 만들 때는 plan_cells 와 make_cell."""
     params = params or CellParams()
+    return [make_cell(np.random.default_rng([seed, i]), params, k, nb) for i, (k, nb) in enumerate(plan_cells(n, seed, params))]
+
+
+def plan_cells(n: int, seed: int, params: CellParams) -> list[tuple[str, bool]]:
+    """셀 i 의 (종류, 이웃 글씨 여부). 셀 i 의 그림은 make_cell(default_rng([seed, i]), params, 종류, 여부)."""
     q = params.quotas(n)
     plan_rng = np.random.default_rng([seed, 1_000_003])
     kinds = [k for k in KINDS for _ in range(q[k])]
@@ -91,7 +99,7 @@ def make_cells(n: int, seed: int = 0, params: CellParams | None = None) -> list[
     if len(nb) < n_nb:                                       # blank 에도 이웃 글씨가 넘어올 수 있다
         blanks = [i for i, k in enumerate(kinds) if k == "blank"]
         nb |= set(blanks[: n_nb - len(nb)])
-    return [make_cell(np.random.default_rng([seed, i]), params, kinds[i], i in nb) for i in range(n)]
+    return [(kinds[i], i in nb) for i in range(n)]
 
 
 def random_value(rng: np.random.Generator, max_value: int = 99) -> str:
@@ -114,6 +122,8 @@ def make_cell(rng: np.random.Generator, params: CellParams, kind: str, neighbors
     sup = 2.0                                                              # 계단을 줄이려고 두 배로 그린 뒤 줄인다
     r = native * sup
     cw, ch = params.cell_w, params.cell_h
+    ins = params.inset
+    gh = ch + 2 * ins                                                      # 괘선 사이 높이 (글자 크기의 기준)
     pad = spec.pad_for((0, 0, cw, ch))
     # 캔버스 = 크롭 영역(가운데 칸 + 여유). 템플릿 좌표의 원점은 가운데 칸의 왼쪽 위. 밖으로 나가는 획은 잘린다
     ox, oy = -pad, -pad
@@ -132,46 +142,46 @@ def make_cell(rng: np.random.Generator, params: CellParams, kind: str, neighbors
     jit = lambda s: rng.uniform(-s, s)                                     # noqa: E731
     # 괘선: 정합 뒤에도 몇 px 어긋나고 기울어진다
     line_w = max(1, int(round(rng.uniform(0.8, 1.6) * r)))
-    for y in (0, ch):
+    for y in (-ins, ch + ins):
         cv2.line(ink, P(-pad - 5, y + jit(1.2)), P(cw + pad + 5, y + jit(1.2)), float(rng.uniform(0.75, 1.0)), line_w,
                  cv2.LINE_AA)
-    for x in (0, cw):
+    for x in (-ins, cw + ins):
         cv2.line(ink, P(x + jit(1.2), -pad - 5), P(x + jit(1.2), ch + pad + 5), float(rng.uniform(0.75, 1.0)), line_w,
                  cv2.LINE_AA)
     style = _style(rng)
 
-    # 이웃 칸의 숫자: 칸보다 크게 써서 괘선을 넘어 들어온다. 넘어오는 것은 꼬리 쪽이다 (가운데 칸 높이의 35 % 까지)
+    # 이웃 칸의 숫자: 칸보다 크게 써서 괘선을 넘어 들어온다. 넘어오는 것은 꼬리 쪽이다 (괘선 사이 높이의 35 % 까지)
     if neighbors:
         sides = ["up", "down", "left", "right"]
         rng.shuffle(sides)
         for side in sides[: int(rng.integers(1, 4))]:
             text = random_value(rng, params.max_value)
-            h = ch * rng.uniform(1.0, 1.5)
-            depth = ch * rng.uniform(0.05, 0.35)                           # 가운데 칸 안으로 들어오는 깊이
+            h = gh * rng.uniform(1.0, 1.5)
+            depth = gh * rng.uniform(0.05, 0.35)                           # 괘선에서 가운데 칸 안으로 들어오는 깊이
             if side == "up":
-                cx, cy = cw * 0.5 + jit(cw * 0.3), depth - h / 2
+                cx, cy = cw * 0.5 + jit(cw * 0.3), -ins + depth - h / 2
             elif side == "down":
-                cx, cy = cw * 0.5 + jit(cw * 0.3), ch - depth + h / 2
+                cx, cy = cw * 0.5 + jit(cw * 0.3), ch + ins - depth + h / 2
             elif side == "left":
-                cx, cy = -cw * 0.5 + rng.uniform(0.05, 0.3) * cw, ch * 0.5 + jit(ch * 0.3)
+                cx, cy = -cw * 0.5 + rng.uniform(0.05, 0.3) * cw, ch * 0.5 + jit(gh * 0.3)
             else:
-                cx, cy = cw * 1.5 - rng.uniform(0.05, 0.3) * cw, ch * 0.5 + jit(ch * 0.3)
+                cx, cy = cw * 1.5 - rng.uniform(0.05, 0.3) * cw, ch * 0.5 + jit(gh * 0.3)
             _draw_number(ink, text, X(cx), Y(cy), h * r, rng, _style(rng))
 
     text = ""
     if kind in ("value", "scribble"):
         num = random_value(rng, params.max_value)
-        h = ch * rng.uniform(0.75, 1.5)                                    # 칸보다 클 수 있다 → 괘선을 넘는다
-        cx, cy = cw * 0.5 + jit(cw * 0.18), ch * 0.5 + jit(ch * 0.2)
+        h = gh * rng.uniform(*params.value_h)                              # 칸보다 클 수 있다 → 괘선을 넘는다
+        cx, cy = cw * 0.5 + jit(cw * 0.18), ch * 0.5 + jit(gh * 0.12)
         _draw_number(ink, num, X(cx), Y(cy), h * r, rng, style)
         if kind == "value":
             text = num
         else:
             _scribble(ink, X(cx), Y(cy), h * r, rng, style)
     elif kind == "x":
-        s = ch * rng.uniform(0.6, 1.4)
-        a = s * rng.uniform(0.6, 1.3)
-        cx, cy = cw * 0.5 + jit(cw * 0.2), ch * 0.5 + jit(ch * 0.15)
+        s = gh * rng.uniform(0.6, 1.3)
+        a = s * rng.uniform(0.6, 1.4)
+        cx, cy = cw * 0.5 + jit(cw * 0.2), ch * 0.5 + jit(gh * 0.1)
         th = max(1, int(round(style["thick"] * r)))
         c = style["ink"]
         cv2.line(ink, P(cx - a / 2 + jit(2), cy - s / 2 + jit(2)), P(cx + a / 2 + jit(2), cy + s / 2 + jit(2)), c, th,
@@ -180,9 +190,9 @@ def make_cell(rng: np.random.Generator, params: CellParams, kind: str, neighbors
                  cv2.LINE_AA)
     elif kind == "note":
         words = " ".join(str(rng.choice(NOTE_WORDS)) for _ in range(int(rng.integers(1, 3))))
-        h = ch * rng.uniform(0.6, 1.1)
+        h = gh * rng.uniform(0.6, 1.1)
         x_start = rng.uniform(-0.6, 0.2) * cw
-        cy = rng.uniform(-0.15, 0.65) * ch                                 # 칸 위에 걸치거나 칸을 지나간다
+        cy = -ins + rng.uniform(-0.15, 0.65) * gh                          # 칸 위에 걸치거나 칸을 지나간다
         _draw_text_line(ink, words, X(x_start), Y(cy), h * r, rng, style)
     # spill: 가운데 칸에는 아무것도 쓰지 않는다 (이웃 글씨만). blank: 아무것도 없다
 
