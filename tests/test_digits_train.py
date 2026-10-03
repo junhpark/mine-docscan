@@ -61,7 +61,8 @@ def test_synthetic_only_model_meets_the_thresholds(tmp_path):
     v = card["validation"]
     print(f"학습 {v['train_seconds']}s, 전체 {elapsed:.0f}s, CPU {os.cpu_count()}개, 파라미터 {card['architecture']['params']}, "
           f"ONNX {card['architecture']['onnx_bytes']} B")
-    if (os.cpu_count() or 1) >= 4:                         # 2코어 CI 에서는 시간을 재지 않는다 (같은 일이 두 배 걸린다)
+    # "CPU 에서 2분 안에": CPU 4개 이상인 개발 환경에서만 잰다. CI(공유 러너)는 기계마다 속도가 달라 정확도만 본다
+    if (os.cpu_count() or 1) >= 4 and not os.environ.get("CI"):
         assert v["train_seconds"] < 120
     assert v["export_check"]["max_abs_diff"] < 1e-3 and v["export_check"]["same_answers"]
     net = OnnxNet(tmp_path / "m" / "model.onnx")
