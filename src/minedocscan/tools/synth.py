@@ -494,7 +494,7 @@ def _write_pdf(path: Path, pages: list[np.ndarray], dpi: int = DPI) -> None:
             raise ValueError("페이지를 인코딩할 수 없습니다")
         page.insert_image(page.rect, stream=buf.tobytes())
     path.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(str(path))
+    doc.save(str(path), no_new_id=True)      # 저장할 때 새 /ID 를 넣지 않는다: 같은 seed 면 바이트까지 같아야 문서 ID 가 같다
     doc.close()
 
 

@@ -9,8 +9,8 @@ HEADERS = {"T01": ("V-101", "ALPHA"), "T02": ("V-102", "BRAVO"), "T03": ("V-103"
 def _row(hid, role, page, slot, vehicle, operator, level, has, trips=None, material="ORE", shift=None):
     return {"haul_id": hid, "work_date": DAY, "source_form": role, "source_role": role, "page_id": page, "slot": slot,
             "vehicle_no": vehicle, "operator": operator, "material": material, "level": level, "shift": shift,
-            "has_value": has, "trips": trips, "trips_raw": trips, "confidence": None, "source_field_id": None,
-            "review_status": "auto"}
+            "has_value_raw": has, "has_value": has, "trips": trips, "trips_raw": trips, "confidence": None,
+            "source_field_id": None, "review_status": "auto"}
 
 
 def _db(matrix: dict, logs: dict):
@@ -103,3 +103,13 @@ def test_partial_counts_compare_presence_only():
     con.execute("UPDATE prod_haul SET trips=3 WHERE haul_id='l:p1:L0:night'")
     crosscheck_haul(con)
     assert con.execute("SELECT status FROM xcheck_haul WHERE slot='T01' AND level='L0'").fetchone()[0] == "mismatch"
+
+
+def test_machine_sum_follows_machine_presence():
+    """기계가 값을 놓친 셀(has_value_raw=0)을 사람이 value 로 검수해도, 기계 값 합은 기계가 본 대로 계산된다 — "모름"이 아니다."""
+    con = _db({("T01", "L0"): 4}, {"p1": ("V-101", "ALPHA", {"L0": [("day", 4)]})})
+    # 야간 칸: 기계는 빈 칸이라 했는데(has_value_raw 0, trips_raw NULL) 사람이 1 을 적었다 (has_value 1, trips 1)
+    con.execute("UPDATE prod_haul SET has_value=1, trips=1 WHERE haul_id='l:p1:L0:night'")
+    crosscheck_haul(con)
+    row = con.execute("SELECT status, log_trips, log_trips_raw FROM xcheck_haul WHERE slot='T01' AND level='L0'").fetchone()
+    assert tuple(row) == ("mismatch", 5, 4)            # 최종 5 ≠ 4 → 불일치. 기계 값 합은 4 (모름이 아니다)

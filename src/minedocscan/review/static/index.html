@@ -53,7 +53,7 @@
 (function () {
   'use strict';
   const qs = new URLSearchParams(location.search);
-  const state = { items: [], idx: 0, done: 0, total: 0, showMachine: false, entered: {}, templates: {}, busy: false };
+  const state = { items: [], idx: 0, done: 0, total: 0, showMachine: false, entered: {}, templates: {}, busy: false, renderedAt: 0 };
   const $ = (id) => document.getElementById(id);
 
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -123,6 +123,7 @@
       if (inp.classList.contains('num')) inp.addEventListener('input', () => { inp.value = inp.value.replace(/[^0-9?]/g, ''); });
     });
     if (inputs.length) { inputs[0].focus(); inputs[0].select(); }
+    state.renderedAt = performance.now();
     msg('');
   }
 
@@ -180,6 +181,9 @@
       ev.preventDefault();
       // 키를 누르고 있을 때의 반복, 한글 입력기의 조합 확정 Enter 는 저장이 아니다 — 보지 않은 셀이 빈 칸으로 저장된다
       if (ev.repeat || ev.isComposing || ev.keyCode === 229 || state.busy) return;
+      // 새 항목이 그려진 뒤 300 ms 안의 Enter 는 앞 항목을 향한 두 번째 Enter 다 (사람 속도 약 120 ms 간격).
+      // 받으면 보지도 않은 셀이 빈 칸으로 저장된다
+      if (performance.now() - state.renderedAt < 300) return;
       const inputs = Array.from($('view').querySelectorAll('input.val'));
       const i = inputs.indexOf(ev.target);
       if (i < inputs.length - 1) { inputs[i + 1].focus(); inputs[i + 1].select(); return; }   // 묶음: 다음 칸으로

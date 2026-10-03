@@ -16,7 +16,8 @@ from pathlib import Path
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 # 1: 처음 골격. 2: 검수(doc_review, has_value_raw, trips_raw, *_trips_raw) — docs/tasks/0001-review-tool.md
-SCHEMA_VERSION = 2
+# 3: 전체 묶음 운용(prod_haul.has_value_raw, 오류 격리, 호모그래피 …) — docs/tasks/0002-full-archive-and-evalset.md
+SCHEMA_VERSION = 3
 
 # 테이블별 기본 키 (upsert 의 충돌 대상)
 PRIMARY_KEYS: dict[str, tuple[str, ...]] = {

@@ -130,5 +130,6 @@ def _as_trips(text: str | None) -> int | None:
 def haul_values(frow: dict) -> dict:
     """최종 필드 행에서 prod_haul 의 값·상태. 행의 구성 필드가 하나뿐이므로 상태는 그 필드의 상태다."""
     has = int(bool(frow["has_value"]))
-    return {"has_value": has, "trips": _as_trips(frow["value_final"]), "trips_raw": _as_trips(frow["value_raw"]),
+    return {"has_value_raw": int(bool(frow["has_value_raw"])), "has_value": has,
+            "trips": _as_trips(frow["value_final"]), "trips_raw": _as_trips(frow["value_raw"]),
             "confidence": frow["confidence"], "review_status": frow["review_status"]}

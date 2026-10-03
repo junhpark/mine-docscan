@@ -154,7 +154,8 @@ def test_rejects_foreign_origin_and_non_json_and_bad_params(srv):
     # 같은 출처는 된다
     assert post({"Content-Type": "application/json", "Origin": base}, body) == 200
     # 잘못된 매개변수는 연결을 끊지 않고 400
-    for path in ("/crop?field_id=" + fid + "&kind=cell&scale=abc", "/api/queue?n=abc", "/api/queue?empty_share=x"):
+    for path in ("/crop?field_id=" + fid + "&kind=cell&scale=abc", "/crop?field_id=" + fid + "&kind=cell&scale=0",
+                 "/crop?field_id=" + fid + "&kind=cell&scale=40", "/api/queue?n=abc", "/api/queue?empty_share=x"):
         with pytest.raises(urllib.error.HTTPError) as e:
             _get(base + path)
         assert e.value.code == 400, path

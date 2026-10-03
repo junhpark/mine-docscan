@@ -76,7 +76,10 @@ class ReviewApp:
             if kind == "row":
                 return row_png(self.con, self.settings, fid)
             if kind == "cell":
-                return cell_png(self.con, self.settings, fid, scale=_int_param(params, "scale", 3))
+                scale = _int_param(params, "scale", 3)
+                if not 1 <= scale <= 6:
+                    raise ApiError(400, f"scale 은 1–6: {scale}")
+                return cell_png(self.con, self.settings, fid, scale=scale)
         except KeyError as e:
             raise ApiError(404, f"없는 필드: {fid}") from e
         except CropError as e:

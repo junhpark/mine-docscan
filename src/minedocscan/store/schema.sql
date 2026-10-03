@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS prod_haul (
   material        TEXT NOT NULL,
   level           TEXT NOT NULL,
   shift           TEXT,                      -- day | night | NULL
+  has_value_raw   INTEGER,                   -- 기계가 판단한 값 유무 (교차검증의 기계 값 합에서 "모름" 판단에 쓴다)
   has_value       INTEGER NOT NULL,          -- 최종 값 유무
   trips           INTEGER,                   -- 최종 횟수 (검수가 있으면 검수값, 없으면 기계가 읽은 값)
   trips_raw       INTEGER,                   -- 기계가 읽은 횟수 (인식기가 없으면 NULL). 검수해도 바뀌지 않는다
