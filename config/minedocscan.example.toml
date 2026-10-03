@@ -19,5 +19,8 @@ backend = "null"             # 등록된 인식 백엔드 이름 (minedocscan in
 [correct]
 backend = "none"
 
+[review]
+source_dpi = 300             # 검수 화면·크롭 내보내기에서 원본 PDF 를 렌더링하는 해상도 (스캔 원본과 같게)
+
 [database]
 # url = "sqlite:///C:/minedocscan-work/minedocscan.db"       # 기본: sqlite:///<work_root>/minedocscan.db

@@ -9,7 +9,8 @@ from minedocscan.config import Settings
 from minedocscan.forms.sitepack import SitePack
 from minedocscan.pipeline import Pipeline
 from minedocscan.recognize import OracleRecognizer, load_answers_json
-from minedocscan.tools.synth import generate
+from minedocscan.review.store import Review, export_answers, save
+from minedocscan.tools.synth import T_INSP, T_LOG, T_MATRIX, generate
 
 
 @pytest.fixture(scope="session")
@@ -52,3 +53,32 @@ def oracle_run(synth, tmp_path_factory) -> Pipeline:
     """정답을 돌려주는 인식기로 돌린 결과 — 인식기를 뺀 나머지가 맞으면 오류가 0 이어야 한다."""
     answers = load_answers_json(synth.answers_path)
     return run_pipeline(synth, tmp_path_factory.mktemp("work_oracle"), OracleRecognizer(answers))
+
+
+def review_everything(con, site, settings, answers) -> int:
+    """정답이 있는 세 표(점검내역, 일보 운반, 행렬 운반)의 수기 셀 전부를 정답대로 검수한다."""
+    rows = con.execute(
+        "SELECT f.field_id, d.source_name || '#' || p.page_no AS source, p.work_date, p.template_name, f.region, "
+        "f.field_name, f.row_key FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id "
+        "JOIN doc_document d ON p.document_id = d.document_id WHERE f.kind LIKE 'handwritten%' "
+        "AND ((p.template_name = ? AND f.region = 'main') OR (p.template_name = ? AND f.region = 'haul') "
+        "OR (p.template_name = ? AND f.region = 'matrix'))", (T_INSP, T_LOG, T_MATRIX)).fetchall()
+    for r in rows:
+        tail = (r["template_name"], r["region"], r["field_name"], r["row_key"])
+        text = answers.get((r["source"], *tail)) or answers.get((r["work_date"], *tail))
+        rv = Review(r["field_id"], "value", text, "jp") if text else Review(r["field_id"], "empty", reviewer="jp")
+        save(con, site, settings, rv)
+    return len(rows)
+
+
+@pytest.fixture(scope="session")
+def reviewed_day(tmp_path_factory):
+    """하루치를 null 로 돌리고 정답이 있는 표의 셀 전부를 정답대로 검수해 둔 상태 (+ answers 로 내보낸 파일)."""
+    root = tmp_path_factory.mktemp("reviewed_day")
+    synth, settings, pipe = run_day(root, seed=4)
+    answers = load_answers_json(synth.answers_path)
+    n = review_everything(pipe.con, pipe.site, settings, answers)
+    out = root / "exported.json"
+    assert export_answers(pipe.con, out) == n
+    return {"synth": synth, "settings": settings, "null": pipe, "answers": answers, "exported": out, "root": root,
+            "n_reviewed": n}

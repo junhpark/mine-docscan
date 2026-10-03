@@ -108,21 +108,43 @@ mine-docscan/                 ← MINEDOCSCAN_ARCHIVE_ROOT
   ```
 - **오라클 확인**: `minedocscan run --inspection-csv <폴더> <입력>` 뒤 `eval` → CER 0 이어야 한다.
 
+### 전체 묶음(약 150일치)을 돌리기
+
+```bash
+minedocscan run DB_scans --fresh                 # 처음 한 번. 진행 표시: [12/150] 파일 · 28쪽 · 지난 시간 · 남은 시간
+minedocscan run DB_scans --skip-existing         # 그 뒤로: 끝까지 처리된 파일은 건너뛰고 failed 만 다시 한다
+minedocscan report --by-month                    # 양식 × 월: 쪽 수, 정합 통과, 괘선 오차 — 어느 달에 양식이 바뀌었나
+minedocscan pages --status unknown_form --thumbs # 양식을 못 찾은 쪽 목록 + 1/4 미리보기 (WORK_ROOT/thumbs/, 저장소 밖)
+minedocscan pages --status error                 # 쪽 하나에서 예외가 난 것 (예외 종류와 메시지)
+```
+
+- 깨진 파일이 있어도 끝까지 간다. 그 문서는 `failed`, 요약에 목록이 나오고 종료 코드는 1 이다. 반쯤 쓰인 행은 남지 않는다.
+- **`--skip-existing` 을 쓰면 안 되는 때**: 템플릿(사이트 팩)이나 인식기·판정 규칙을 바꾼 뒤. 그때는 `--fresh` 로 처음부터 다시 돌린다.
+  건너뛰기는 파일 해시만 보고 결과가 유효한지는 모른다.
+- 다른 컴퓨터에서 같은 DB 를 쓰려면 `archive_root` 만 그 컴퓨터의 경로로 준다. 원본은 `source_rel`(archive_root 기준 상대경로)로 찾는다.
+
 ### 검수값으로 평가하기
 
 운반 횟수의 정답은 검수 도구로 만든다 (ADR 0007). 검수 기록은 사이트 팩의 `reviews/reviews.jsonl` 에 쌓이고
 (한 줄 = 한 건, 추가 전용), DB 를 지우고 다시 돌려도 파이프라인이 시작할 때 읽어 들여 그대로 붙는다.
 
 ```bash
+minedocscan review serve --queue page-fields --reviewer jp              # 일보의 차량번호·작성자 (수동 라벨 대신). 날짜순
 minedocscan review serve --queue haul-numbers --n 1500 --reviewer jp   # 표본 1,500셀(빈 칸 10 %), 브라우저 127.0.0.1:8765
 minedocscan review serve --queue mismatch --reviewer jp                 # 교차검증 불일치 칸: 두 문서의 셀을 같이 본다
 minedocscan review serve --queue pending --template <양식> --reviewer jp  # 운영용: 기계 값을 미리 채워 준다
 minedocscan review stats                                                # 판정·양식·날짜·검수자별 건수
-minedocscan review export-answers answers.json                          # value/empty 검수 → 정답 파일 (illegible 제외)
+minedocscan review export-answers answers-test.json --split test        # test 날짜의 value/empty 검수 → 정답 파일 (illegible 제외)
 minedocscan run DB_scans --fresh                                        # 새 인식기로 다시 돌린다. 검수값은 그대로 붙는다
-minedocscan eval --answers answers.json --target raw --only-listed      # 기계가 읽은 값(value_raw)을 검수값과 비교
+minedocscan eval --answers answers-test.json --target raw --only-listed --split test   # 기계가 읽은 값을 검수값과 비교
 minedocscan report                                                      # 횟수 일치율: 최종 값 기준 / 기계 값 기준
+minedocscan review export-crops ~/minedocscan-crops --split train       # 학습용 셀 이미지(원본 해상도) + labels.jsonl
 ```
+
+- **평가셋은 날짜로 나눈다** (ADR 0009). `site.toml` 의 `[eval] split_salt`, `test_share` 가 정하고, 검수가 늘어도 분할은 바뀌지 않는다.
+  `test` 는 학습·문구 사전·임계값 조정에 쓰지 않는다. `review stats` 가 분할별 셀 수와 날짜 수를 보여 준다.
+- 내보낸 크롭은 `OUT/<split>/<kind>/<field_id>.png` 와 `OUT/<split>/labels.jsonl` 이다. 기본은 원본 300 dpi 를 호모그래피로 다시 정합한
+  템플릿 좌표 1.5배 크기이고(`--res aligned` 면 200 dpi 정합 이미지), 라벨에 어느 해상도인지 적힌다. **저장소 밖에만** 둔다 — git 작업 트리 안이면 거절한다.
 
 - `--target raw` 를 써야 한다. `final` 은 검수값 자신이라 언제나 맞는다.
 - `--only-listed`: 표본만 검수했으므로 정답에 있는 셀만 평가한다. 없으면 그 표의 나머지 셀을 빈 칸 정답으로 친다.

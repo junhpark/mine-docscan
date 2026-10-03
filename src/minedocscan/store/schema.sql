@@ -20,10 +20,12 @@ CREATE TABLE IF NOT EXISTS meta_schema (
 CREATE TABLE IF NOT EXISTS doc_document (
   document_id     TEXT PRIMARY KEY,          -- 원본 파일 SHA-256 앞 16자리: 같은 스캔의 중복 접수를 막는다
   source_path     TEXT NOT NULL,
+  source_rel      TEXT,                      -- archive_root 기준 상대경로 (다른 컴퓨터에서도 원본을 찾기 위해). 밖이면 NULL
   source_name     TEXT NOT NULL,             -- 확장자를 뺀 파일명 (라벨·날짜 규칙의 키)
   work_date       TEXT,                      -- 파일명 규칙이나 라벨에서 얻은 문서 날짜
   n_pages         INTEGER,
-  status          TEXT NOT NULL,             -- received | processed | needs_review
+  status          TEXT NOT NULL,             -- received | processed | needs_review | failed (문서를 읽지 못함)
+  error           TEXT,                      -- failed 일 때 예외 종류와 메시지. 셀 값은 적지 않는다
   created_at      TEXT NOT NULL
 );
 
@@ -37,8 +39,11 @@ CREATE TABLE IF NOT EXISTS doc_page (
   align_grid_err  REAL,                      -- 괘선 재검출 오차(px)
   align_ok        INTEGER,                   -- 0/1, 정합을 시도하지 않았으면 NULL
   aligned_image   TEXT,                      -- 정합 이미지 경로 (work_root 기준 상대경로)
+  homography      TEXT,                      -- JSON 3×3: 렌더링한 쪽 픽셀 → 템플릿 픽셀. 원본 해상도 크롭이 쓴다 (imaging/hires.py)
+  render_dpi      INTEGER,                   -- 그 호모그래피를 구할 때 쪽을 렌더링한 해상도 (이미지 파일이면 원본 그대로)
   work_date       TEXT,
-  status          TEXT NOT NULL              -- unknown_form | classified_only | align_failed | loaded
+  status          TEXT NOT NULL,             -- unknown_form | classified_only | align_failed | loaded | error
+  error           TEXT                       -- error 일 때 예외 종류와 메시지. 그 쪽의 반쯤 쓰인 행은 남기지 않는다(SAVEPOINT)
 );
 
 CREATE TABLE IF NOT EXISTS doc_field (
@@ -147,6 +152,7 @@ CREATE TABLE IF NOT EXISTS prod_haul (
   material        TEXT NOT NULL,
   level           TEXT NOT NULL,
   shift           TEXT,                      -- day | night | NULL
+  has_value_raw   INTEGER,                   -- 기계가 판단한 값 유무 (교차검증의 기계 값 합에서 "모름" 판단에 쓴다)
   has_value       INTEGER NOT NULL,          -- 최종 값 유무
   trips           INTEGER,                   -- 최종 횟수 (검수가 있으면 검수값, 없으면 기계가 읽은 값)
   trips_raw       INTEGER,                   -- 기계가 읽은 횟수 (인식기가 없으면 NULL). 검수해도 바뀌지 않는다

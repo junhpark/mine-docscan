@@ -3,17 +3,20 @@
 형식은 docs/SITE_PACK.md 에 있다. 요약:
 
   name, title, reference_image, dpi, page_size
+  family, valid_from, valid_to                # 선택. 같은 양식의 개정판은 이름이 다른 템플릿이고, 날짜(양 끝 포함)로 가린다
   handler: generic | inspection | haul        # 추출값을 업무 테이블로 옮기는 방법
   handler_options: {...}
   regions:                                    # 한 페이지에 표가 여러 개일 수 있다
     - name, grid: {ys, xs}, header_rows
       columns: [{idx, name, kind, ...메타}]   # kind: printed | handwritten_text | handwritten_number | checkmark
       rows:    [{row, key, ...메타}]
-  fields: [{name, kind, bbox}]                # 표 밖의 자유 필드 (날짜, 작성자, 비고 …)
+  fields: [{name, kind, bbox, meta_key?}]     # 표 밖의 자유 필드 (날짜, 작성자, 비고 …)
+                                              # meta_key: 이 필드의 검수값이 쪽의 메타(vehicle_no, operator …)가 된다. date 는 안 된다
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -48,6 +51,15 @@ def row_key(row: dict) -> str:
     return k or f"#{row['row']}"
 
 
+def _iso_date(name: str, key: str, v) -> str | None:
+    if v is None or v == "":
+        return None
+    try:
+        return date.fromisoformat(str(v)).isoformat()         # YAML 이 date 로 읽어도, 문자열이어도
+    except ValueError as e:
+        raise TemplateError(f"{name}: {key} 는 YYYY-MM-DD 여야 합니다: {v!r}") from e
+
+
 class Template:
     def __init__(self, path: str | Path):
         path = Path(path)
@@ -62,11 +74,28 @@ class Template:
         self.handler_options: dict = spec.get("handler_options", {}) or {}
         self.regions: list[dict] = spec.get("regions", []) or []
         self.fields: list[dict] = spec.get("fields", []) or []
+        self.family: str | None = spec.get("family") or None
+        self.valid_from: str | None = _iso_date(self.name, "valid_from", spec.get("valid_from"))
+        self.valid_to: str | None = _iso_date(self.name, "valid_to", spec.get("valid_to"))
+        if self.valid_from and self.valid_to and self.valid_from > self.valid_to:
+            raise TemplateError(f"{self.name}: valid_from 이 valid_to 보다 늦습니다")
         self._ref: np.ndarray | None = None
         self._feats = None
         self._validate()
 
     def _validate(self) -> None:
+        names = set()
+        for f in self.fields:
+            if f["name"] in names:
+                raise TemplateError(f"{self.name}: 자유 필드 이름 '{f['name']}' 이 겹칩니다")
+            names.add(f["name"])
+            if f.get("kind") not in CELL_KINDS:
+                raise TemplateError(f"{self.name}/fields/{f['name']}: 알 수 없는 kind '{f.get('kind')}'")
+            mk = f.get("meta_key")
+            if mk is not None and (not isinstance(mk, str) or not mk):
+                raise TemplateError(f"{self.name}/fields/{f['name']}: meta_key 는 빈 문자열이 아니어야 합니다")
+            if mk == "date":
+                raise TemplateError(f"{self.name}/fields/{f['name']}: meta_key 'date' 는 받지 않습니다 — 날짜는 파일명 규칙과 라벨로 정한다")
         for reg in self.regions:
             ys, xs = reg["grid"]["ys"], reg["grid"]["xs"]
             if ys != sorted(ys) or xs != sorted(xs):
@@ -84,6 +113,12 @@ class Template:
                 if row_key(r) in keys:
                     raise TemplateError(f"{self.name}/{reg['name']}: 행 키 '{row_key(r)}' 가 겹칩니다")
                 keys.add(row_key(r))
+
+    def valid_on(self, day: str | None) -> bool:
+        """그날 쓰이는 판인가. 유효 기간이 없으면 언제나, 날짜를 모르면 언제나 후보다."""
+        if day is None:
+            return True
+        return (self.valid_from is None or self.valid_from <= day) and (self.valid_to is None or day <= self.valid_to)
 
     @property
     def has_cells(self) -> bool:
@@ -126,4 +161,9 @@ class Template:
         return out
 
     def field_cells(self) -> list[Cell]:
-        return [Cell("fields", -1, -1, f["name"], f["kind"], tuple(f["bbox"])) for f in self.fields]
+        return [Cell("fields", -1, -1, f["name"], f["kind"], tuple(f["bbox"]),
+                     col_meta={"meta_key": f["meta_key"]} if f.get("meta_key") else {}) for f in self.fields]
+
+    def meta_fields(self) -> dict[str, str]:
+        """검수값이 쪽의 메타가 되는 자유 필드: {필드 이름: meta_key}."""
+        return {f["name"]: f["meta_key"] for f in self.fields if f.get("meta_key")}

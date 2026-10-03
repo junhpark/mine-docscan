@@ -63,14 +63,17 @@ flowchart LR
 ### 상태
 
 ```
-doc_document.status : received → processed | needs_review
-doc_page.status     : unknown_form | classified_only | align_failed | loaded
+doc_document.status : received → processed | needs_review | failed
+doc_page.status     : unknown_form | classified_only | align_failed | loaded | error
 doc_field.review_status / 업무 행 review_status : auto | pending → reviewed
 ```
 
 - `unknown_form` — 어느 템플릿과도 맞지 않는다 (새 양식이거나 양식이 아닌 페이지).
 - `classified_only` — 양식은 알지만 셀 정의가 아직 없는 템플릿(스텁). 분류 통계에만 잡힌다.
 - `align_failed` — 정합 품질 미달. 값을 뽑지 않고 검수로 보낸다(잘못된 좌표에서 뽑은 값은 없는 것보다 나쁘다).
+- `failed` / `error` — 문서를 읽지 못했거나(문서, 롤백) 쪽 하나에서 예외가 났다(쪽, `SAVEPOINT` 로 그 쪽의 행만 되돌림). `error` 컬럼에 예외 종류와
+  메시지만 남는다. 한 문서의 실패가 전체를 멈추지 않고, 숨기지도 않는다: 요약에 목록이 나오고 종료 코드는 1 이다. `run --strict` 는 첫 오류에서 멈춘다.
+  `run --skip-existing` 은 끝까지 처리된 같은 해시의 문서만 건너뛰고 `failed` 는 다시 한다 — 템플릿이나 인식기를 바꾼 뒤에는 쓰지 않는다.
 - `reviewed` — 사람이 종이를 보고 값을 확정했다(`value`) 또는 빈 칸임을 확정했다(`empty`). 읽을 수 없다고 표시한 셀(`illegible`)은
   `pending` 으로 남고 대기열과 정답에서 빠진다. 업무 행은 구성 필드 중 하나라도 `pending` 이면 `pending`, 아니고 하나라도 `reviewed` 면
   `reviewed`, 아니면 `auto` 다. 검수 흐름은 §7.1.
@@ -101,6 +104,14 @@ DB             운영에서는 PostgreSQL (예정). 지금은 WORK_ROOT 의 SQLi
 
 열의 종류(`kind`): `printed`(템플릿 값 사용) · `handwritten_text` · `handwritten_number` · `checkmark` · `signature`.
 
+표 밖 자유 필드에 `meta_key`(`vehicle_no`, `operator` …)를 주면 그 필드의 검수값이 쪽의 메타가 된다 (날짜는 안 된다).
+쪽 메타의 우선순위는 **검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙** 이다 (`review/store.page_meta`).
+
+### 양식의 판
+
+같은 양식의 개정판은 이름이 다른 템플릿이고, `family`·`valid_from`·`valid_to` 로 묶는다. 쪽의 날짜를 알면 그날 유효한 템플릿만 분류 후보다.
+개정판끼리는 머리글 몇 글자만 달라 모양으로는 가릴 수 없다(분류 여유 ≈ 1). 같은 계열에서 기간이 겹치면 사이트 팩을 읽을 때 오류다 (ADR 0010).
+
 형식은 [SITE_PACK.md](SITE_PACK.md) 에 있다.
 
 ## 6. 데이터 모델
@@ -120,8 +131,8 @@ erDiagram
 
 | 층 | 테이블 | 내용 |
 |---|---|---|
-| 문서 | `doc_document` | 원본 파일. ID = SHA-256 앞 16자리 → 같은 스캔의 중복 접수 차단 |
-| | `doc_page` | 페이지별 양식, 분류 여유, 정합 품질, 정합 이미지 경로, 상태 |
+| 문서 | `doc_document` | 원본 파일. ID = SHA-256 앞 16자리 → 같은 스캔의 중복 접수 차단. `source_rel`(archive_root 기준)로 다른 컴퓨터에서도 원본을 찾는다. 상태·오류 |
+| | `doc_page` | 페이지별 양식, 분류 여유, 정합 품질, 정합 이미지 경로, 호모그래피(렌더링한 쪽 픽셀 → 템플릿 픽셀)와 렌더링 dpi, 상태, 오류 |
 | | `doc_field` | 셀 하나. 좌표(bbox), 잉크, 값 유무(기계 `has_value_raw` / 최종 `has_value`), 원문 `value_raw`, 최종값 `value_final`, 신뢰도, 후보, 값을 만든 주체, 검수 상태 |
 | | `doc_review` | 사람이 입력한 값 한 건. 원본은 사이트 팩의 `reviews/reviews.jsonl` 이고 이 테이블은 사본이다 (ADR 0008) |
 | | `meta_schema` | 스키마 버전. 버전이 다른 DB 파일은 열지 않는다 (`run --fresh` 로 다시 만든다) |
@@ -179,7 +190,11 @@ minedocscan review serve --queue haul-numbers --reviewer jp      # 127.0.0.1:876
 ```
 
 - 대기열(`review/queue.py`): `haul-numbers`(운반 숫자 표본, 기계 값 숨김), `mismatch`(교차검증 불일치 칸의 일보·행렬 셀 묶음, 기계 값 숨김),
-  `pending`(검수 대기 필드 전부, 기계 값을 미리 채움). 정답을 만드는 대기열에서 기계 값을 숨기는 이유는 보여 주면 그 값에 끌리기 때문이다.
+  `pending`(검수 대기 필드 전부, 기계 값을 미리 채움), `page-fields`(차량번호·작성자 같은 쪽 메타 — 항목 = 쪽 하나, 행렬 머리글과 지금까지의
+  값이 후보 목록으로 붙는다). 정답을 만드는 대기열에서 기계 값을 숨기는 이유는 보여 주면 그 값에 끌리기 때문이다.
+- 페이지 필드를 저장하면 그 쪽의 `prod_haul` 차량·작성자와 그 날짜의 교차검증·배차 관측이 바로 갱신된다 — 수동 라벨(`labels/pages.json`)을 대신한다.
+- 셀 이미지는 원본에 닿으면(아카이브가 연결된 컴퓨터) 쪽의 호모그래피로 원본을 300 dpi 로 렌더링해 그 셀만 정합한 것이고(`imaging/hires.py`),
+  아니면 200 dpi 정합 이미지다. 응답 머리글 `X-Crop-Source` 로 어느 쪽인지 알린다. 좌표계는 그대로 템플릿 좌표 하나다.
 - 파이프라인은 시작할 때 검수 파일을 읽어 들이고, 필드 행을 만든 뒤 유효한 검수를 덮고(`handlers/base.apply_reviews`), 그 최종 행에서 업무 행을 만든다.
   그래서 `run --fresh` 로 DB 를 지우고 다시 돌려도 입력한 값이 그대로 다시 붙고, 검수된 셀도 인식기를 돌리므로 새 인식기의 `value_raw` 를 검수값과 비교할 수 있다.
 - **불변식**: 저장 직후의 DB 는, 같은 검수 파일을 가지고 처음부터 다시 돌린 DB 와 같다 (`tests/test_review_store.py` 가 고정한다).
@@ -236,6 +251,10 @@ class Corrector(Protocol):
 | 교차검증 일치율 | 양쪽 다 횟수가 있는 칸 중 같은 비율, 기계 값 기준과 최종 값 기준 (정답 없이 인식기를 비교하는 수단) |
 
 `eval --target final|raw`: 최종값 또는 기계가 읽은 값을 비교한다. 검수값으로 만든 정답과 비교할 때는 `raw` 를 쓴다 (`final` 은 검수값 자신이라 언제나 맞는다).
+
+**평가셋 분할**: 날짜 단위로 `test` / `train` 을 나누고, 어느 날짜가 `test` 인지는 날짜와 사이트 팩의 소금값(`[eval] split_salt`, `test_share`)만으로 정한다
+(`evaluate/split.py`, ADR 0009). `review export-answers --split`, `eval --split`, `review export-crops --split` 이 둘을 섞지 않는다.
+`test` 는 학습·문구 사전·임계값 조정에 쓰지 않는다. 내보낸 크롭(`OUT/<split>/<kind>/<field_id>.png` + `labels.jsonl`)은 저장소 밖에 둔다.
 
 세 가지 시험이 있다.
 

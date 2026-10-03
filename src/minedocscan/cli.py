@@ -2,7 +2,8 @@
 
   info       설정·사이트 팩·등록된 백엔드 확인
   run        스캔 파일/폴더 → 분류 → 정합 → 추출 → 인식 → 검증 → 적재 → 교차검증
-  report     DB 현황 (양식별 페이지, 정합 품질, 검수 대기, 교차검증)
+  report     DB 현황 (양식별 페이지, 정합 품질, 검수 대기, 교차검증). --by-month 는 양식 × 월 진단
+  pages      쪽 목록 (상태·양식·분류 여유로 거름). --thumbs 는 원본 쪽의 미리보기 PNG
   eval       정답과 비교 (CER, 필드 정확도, 자동 적재율)
   regress    사이트 팩의 기준 수치와 비교하는 실데이터 회귀 검사
   template   새 양식의 템플릿 뼈대 만들기
@@ -16,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -49,8 +51,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--answers", help="oracle 백엔드용 정답 JSON")
     p.add_argument("--inspection-csv", metavar="DIR", help="oracle 백엔드용 점검표 정답 CSV 폴더")
     p.add_argument("--fresh", action="store_true", help="기존 SQLite 파일을 지우고 시작")
+    p.add_argument("--skip-existing", action="store_true",
+                   help="이미 끝까지 처리된 파일(같은 해시)은 건너뛴다. failed 는 다시 한다. "
+                        "템플릿이나 인식기를 바꾼 뒤에는 쓰지 않는다 — 그때는 --fresh")
+    p.add_argument("--strict", action="store_true", help="첫 오류에서 멈춘다 (디버깅용). 기본은 실패를 기록하고 계속")
 
-    sub.add_parser("report", parents=[common], help="DB 현황")
+    p = sub.add_parser("report", parents=[common], help="DB 현황")
+    p.add_argument("--by-month", action="store_true", help="양식 × 월: 쪽 수, 적재, 정합 실패, 괘선 오차, 분류 여유")
+
+    p = sub.add_parser("pages", parents=[common], help="쪽 목록")
+    p.add_argument("--status", help="unknown_form | classified_only | align_failed | loaded | error")
+    p.add_argument("--template", help="이 양식만")
+    p.add_argument("--low-margin", action="store_true", help="분류 여유가 classify_min_margin 아래인 쪽만")
+    p.add_argument("--thumbs", nargs="?", const="", metavar="DIR",
+                   help="목록의 쪽을 1/4 로 줄인 PNG 로 쓴다 (기본 WORK_ROOT/thumbs/<상태>/). 저장소 밖에만")
 
     p = sub.add_parser("eval", parents=[common], help="정답과 비교")
     g = p.add_mutually_exclusive_group(required=True)
@@ -61,6 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="final = 최종값(교정·검수 후), raw = 기계가 읽은 값. 검수값과 비교할 때는 raw")
     p.add_argument("--only-listed", action="store_true",
                    help="정답에 있는 셀만 평가 (표본 검수로 만든 정답). 기본은 정답이 있는 표의 셀 전부(없는 셀은 빈 칸)")
+    p.add_argument("--split", choices=["all", "test", "train"], default="all",
+                   help="날짜 분할 ([eval] split_salt). test 는 학습·사전·임계값 조정에 쓰지 않는다")
 
     p = sub.add_parser("regress", parents=[common], help="사이트 팩 기준 수치와 비교 (실데이터 회귀)")
     p.add_argument("--update", action="store_true", help="지금 결과를 새 기준으로 저장")
@@ -85,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
     r = rsub.add_parser("serve", parents=[common], help="로컬 검수 화면 (127.0.0.1)")
-    r.add_argument("--queue", default="haul-numbers", choices=["haul-numbers", "mismatch", "pending"])
+    r.add_argument("--queue", default="haul-numbers", choices=["haul-numbers", "mismatch", "pending", "page-fields"])
     r.add_argument("--n", type=int, default=1500, help="haul-numbers 표본 크기 (기본 1500)")
     r.add_argument("--seed", type=int, default=0, help="표본의 순서를 정하는 씨앗. 같은 값이면 같은 표본")
     r.add_argument("--empty-share", type=float, default=0.1, help="표본 중 빈 칸 비율 (기본 0.1)")
@@ -96,6 +112,16 @@ def build_parser() -> argparse.ArgumentParser:
     rsub.add_parser("stats", parents=[common], help="검수 진행 현황")
     r = rsub.add_parser("export-answers", parents=[common], help="유효한 검수(value, empty) → answers.json")
     r.add_argument("out", help="출력 파일 (eval --answers 로 읽는 형식)")
+    r.add_argument("--split", choices=["all", "test", "train"], default="all", help="날짜 분할")
+    r = rsub.add_parser("export-crops", parents=[common], help="검수한 셀의 이미지 + 라벨 (인식기 학습·평가용)")
+    r.add_argument("out", help="출력 폴더. git 작업 트리 안이면 거절한다")
+    r.add_argument("--split", choices=["all", "test", "train"], default="all")
+    r.add_argument("--kind", choices=["handwritten_number", "handwritten_text"], help="이 종류의 셀만")
+    r.add_argument("--res", choices=["auto", "source", "aligned"], default="auto",
+                   help="source = 원본 해상도(호모그래피로 다시 정합), aligned = 200 dpi 정합 이미지, auto = 원본이 닿으면 원본")
+    r.add_argument("--scale", type=float, default=1.5, help="템플릿 좌표(200 dpi) 대비 배율 (기본 1.5 = 300 dpi 원본 그대로)")
+    r.add_argument("--pad", type=int, help="셀 둘레 여유(템플릿 px). 기본은 화면과 같이 행 높이의 절반(최소 8)")
+    r.add_argument("--allow-in-repo", action="store_true", help="git 작업 트리 안에도 쓴다 (글씨가 들어 있다 — 커밋하지 말 것)")
     return ap
 
 
@@ -137,13 +163,15 @@ def cmd_info(a) -> int:
     if s.site and Path(s.site).is_dir():
         site = _need_site(s)
         tpls = [{"name": t.name, "title": t.title, "handler": t.handler, "regions": len(t.regions),
-                 "cells": len(t.cells()) + len(t.fields), "status": "cells" if t.has_cells else "classify_only"}
+                 "cells": len(t.cells()) + len(t.fields), "status": "cells" if t.has_cells else "classify_only",
+                 "family": t.family, "valid_from": t.valid_from, "valid_to": t.valid_to}
                 for t in site.templates.values()]
         data["site"] = {"name": site.name, "templates": tpls, "labels": len(site.labels)}
         lines.append(f"사이트 팩: {site.name} — 템플릿 {len(tpls)}종, 페이지 라벨 {len(site.labels)}개")
         for t in tpls:
+            valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}" if t["family"] else "")
             lines.append(f"  {t['name']:<24} handler={t['handler']:<11} 표 {t['regions']}개, 셀 {t['cells']}개"
-                         + ("" if t["status"] == "cells" else "  (분류 전용 — 셀 정의 없음)"))
+                         + ("" if t["status"] == "cells" else "  (분류 전용 — 셀 정의 없음)") + valid)
     else:
         lines.append("사이트 팩: 지정되지 않았거나 폴더가 없습니다")
     _emit(a, data, "\n".join(lines))
@@ -177,26 +205,65 @@ def cmd_run(a) -> int:
     files = pipe.expand(paths)
     if not files:
         raise SystemExit(f"처리할 파일이 없습니다: {[str(p) for p in paths]}")
+    t0 = time.monotonic()
     for i, f in enumerate(files, 1):
+        r = pipe.process_file(f, template=a.template, skip_existing=a.skip_existing, strict=a.strict)
         if not a.json:
-            print(f"[{i}/{len(files)}] {f.name}", file=sys.stderr)
-        pipe.process_file(f, template=a.template)
+            el = time.monotonic() - t0
+            eta = el / i * (len(files) - i)
+            what = ("건너뜀" if r.get("skipped") else f"실패: {r['error']}" if r["status"] == "failed" else f"{len(r['pages'])}쪽")
+            print(f"[{i}/{len(files)}] {f.name} · {what} · 지난 {_hms(el)} · 남은 약 {_hms(eta)}", file=sys.stderr)
     summary = pipe.finalize()
     rep = build_report(pipe.con)
-    text = (f"이번 실행: 문서 {summary['documents']}건, 페이지 {summary['pages']}장 (인식 백엔드: {recognizer.name})\n"
-            f"분류 여유가 낮은 페이지: {len(summary['low_margin'])}장\n"
+    text = (f"이번 실행: 문서 {summary['documents']}건, 페이지 {summary['pages']}장, 건너뜀 {summary['skipped']}건, "
+            f"실패 {len(summary['failed'])}건 (인식 백엔드: {recognizer.name})\n"
+            f"분류 여유가 낮은 페이지: {len(summary['low_margin'])}장, 오류 난 쪽: {len(summary['page_errors'])}장\n"
             f"── DB 현황 ({s.resolved_db_url}) ──\n" + format_report(rep, xcheck_by_date(pipe.con)))
+    if summary["failed"]:
+        text += "\n실패한 문서:\n" + "\n".join(f"  {d['source_name']}: {d['error']}" for d in summary["failed"])
+    if summary["page_errors"]:
+        text += "\n오류 난 쪽:\n" + "\n".join(f"  {d['page_id']}: {d['error']}" for d in summary["page_errors"])
     _emit(a, {"run": summary, "report": rep}, text)
-    return 0
+    return 1 if (summary["failed"] or summary["page_errors"]) else 0
+
+
+def _hms(sec: float) -> str:
+    sec = int(sec)
+    return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
 
 
 def cmd_report(a) -> int:
-    from .report import build_report, format_report, xcheck_by_date
+    from .report import build_report, by_month, format_by_month, format_report, xcheck_by_date
     from .store.db import open_db
 
-    con = open_db(_settings(a).resolved_db_url)
+    s = _settings(a)
+    con = open_db(s.resolved_db_url)
+    if a.by_month:
+        rows = by_month(con, s.classify_min_margin)
+        _emit(a, {"by_month": rows}, format_by_month(rows))
+        return 0
     rep, by_date = build_report(con), xcheck_by_date(con)
     _emit(a, {"report": rep, "xcheck_by_date": by_date}, format_report(rep, by_date))
+    return 0
+
+
+def cmd_pages(a) -> int:
+    from .report import format_pages, list_pages
+    from .store.db import open_db
+
+    s = _settings(a)
+    con = open_db(s.resolved_db_url)
+    rows = list_pages(con, status=a.status, template=a.template,
+                      low_margin=s.classify_min_margin if a.low_margin else None)
+    written = []
+    if a.thumbs is not None:
+        from .tools.thumbs import write_thumbs
+
+        written = write_thumbs(s, rows, a.thumbs or None)
+    text = format_pages(rows) + f"\n쪽 {len(rows)}개"
+    if a.thumbs is not None:
+        text += f", 미리보기 {len(written)}개 → {(a.thumbs or (s.work_root / 'thumbs'))}"
+    _emit(a, {"pages": rows, "thumbs": [str(p) for p in written]}, text)
     return 0
 
 
@@ -208,18 +275,22 @@ def cmd_eval(a) -> int:
 
     s = _settings(a)
     con = open_db(s.resolved_db_url)
-    kw = {"target": a.target, "only_listed": a.only_listed}
+    kw = {"target": a.target, "only_listed": a.only_listed, "split": a.split,
+          "site": _need_site(s) if (a.split != "all" or s.site) and s.site and Path(s.site).is_dir() else None}
+    if a.split != "all" and kw["site"] is None:
+        raise SystemExit("--split 에는 사이트 팩이 필요합니다: --site 또는 MINEDOCSCAN_SITE")
     if a.answers:
         data = {"fields": evaluate_fields(con, load_answers_json(a.answers), **kw)}
     else:
-        site = _need_site(s)
+        site = kw["site"] or _need_site(s)
         name = a.template or _only_inspection_template(site)
         answers = load_answers(a.inspection_csv, site.templates[name])
         data = {"fields": evaluate_fields(con, answers, **kw),
                 "insp_daily": evaluate_inspection(con, answers, site.templates[name])}
     data["presence"] = evaluate_presence(con)
     f, pr = data["fields"], data["presence"]
-    lines = [f"필드 {f['n']}개 ({a.target}): CER {f['cer']}, 필드 정확도 {f['field_accuracy']}, 자동 적재율 {f['auto_rate']}"
+    lines = [f"필드 {f['n']}개 ({a.target}, 분할 {a.split}): CER {f['cer']}, 필드 정확도 {f['field_accuracy']}, "
+             f"자동 적재율 {f['auto_rate']}"
              f" (DB 에 없는 정답 {f['answers_not_in_db']}개)",
              f"  정답에 값이 있는 셀 {f['n_value']}개 정확도 {f['accuracy_value']}, 빈 칸 {f['n_empty']}개 정확도 {f['accuracy_empty']}"]
     for k, v in f["by_field_kind"].items():
@@ -329,11 +400,13 @@ def cmd_review(a) -> int:
         from .review.store import stats
 
         s, site, con, imported = _review_db(a)
-        st = stats(con)
+        st = stats(con, site)
         kv = lambda d: ", ".join(f"{k} {v}" for k, v in d.items()) or "-"      # noqa: E731
         lines = [f"검수 파일: {imported['path']} — 기록 {st['records']}건 (깨진 줄 {imported['skipped']}개), 필드 {st['fields']}개",
                  "판정별: " + kv(st["by_verdict"]), "양식별: " + kv(st["by_template"]), "날짜별: " + kv(st["by_date"]),
                  "검수자별(기록): " + kv(st["by_reviewer"]),
+                 "분할별(value·empty): " + (", ".join(f"{k} {v['fields']}셀/{v['dates']}일" for k, v in st["by_split"].items()) or "-")
+                 + f"  (소금값 {site.split_salt}, test 비율 {site.test_share})",
                  f"템플릿 좌표가 달라진 기록 {st['bbox_changed']}개, 이 DB 에 없는 필드 {st['fields_not_in_db']}개"]
         _emit(a, {"reviews": imported, "stats": st}, "\n".join(lines))
         return 0
@@ -341,15 +414,29 @@ def cmd_review(a) -> int:
         from .review.store import export_answers
 
         s, site, con, _imported = _review_db(a)
-        n = export_answers(con, a.out)
-        _emit(a, {"out": a.out, "answers": n},
-              f"정답 {n}개를 썼습니다: {a.out}\n비교: minedocscan eval --answers {a.out} --target raw --only-listed")
+        n = export_answers(con, a.out, split=a.split, site=site)
+        sp = "" if a.split == "all" else f" --split {a.split}"
+        _emit(a, {"out": a.out, "answers": n, "split": a.split},
+              f"정답 {n}개를 썼습니다 (분할 {a.split}): {a.out}\n"
+              f"비교: minedocscan eval --answers {a.out} --target raw --only-listed{sp}")
+        return 0
+    if a.review_command == "export-crops":
+        from .review.export import ExportError, export_crops
+
+        s, site, con, _imported = _review_db(a)
+        try:
+            r = export_crops(con, site, s, a.out, split=a.split, kind=a.kind, res=a.res, out_scale=a.scale, pad=a.pad,
+                             allow_in_repo=a.allow_in_repo)
+        except ExportError as e:
+            raise SystemExit(str(e)) from e
+        _emit(a, r, f"크롭 {r['written']}개를 썼습니다: {r['out']} — 분할별 {r['by_split']}, 해상도별 {r['by_source']}, "
+                    f"읽을 수 없음 제외 {r['skipped_illegible']}개\n저장소에 넣지 마세요 — 현장의 글씨가 들어 있습니다.")
         return 0
     raise SystemExit(f"알 수 없는 review 명령: {a.review_command}")
 
 
-COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "eval": cmd_eval, "regress": cmd_regress,
-            "template": cmd_template, "synth": cmd_synth, "review": cmd_review}
+COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "pages": cmd_pages, "eval": cmd_eval,
+            "regress": cmd_regress, "template": cmd_template, "synth": cmd_synth, "review": cmd_review}
 
 
 def main(argv: list[str] | None = None) -> int:

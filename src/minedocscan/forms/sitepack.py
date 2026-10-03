@@ -1,7 +1,7 @@
 """사이트 팩: 한 현장의 양식 정의·마스터·라벨 묶음. 저장소 밖에 둔다 (docs/SITE_PACK.md).
 
   <site>/
-    site.toml                       현장 이름, 파일명 규칙, 장비 분류 매핑, 교차검증 옵션
+    site.toml                       현장 이름, 파일명 규칙, 장비 분류 매핑, 교차검증 옵션, 평가셋 분할([eval])
     templates/<form>/template.yaml  양식 정의
     templates/<form>/reference.png  기준 이미지 (빈 양식 또는 깨끗한 스캔 한 장)
     labels/pages.json               사람이 붙인 페이지 메타 (날짜·차량번호·작성자) — 인식기가 생기기 전의 대체물
@@ -16,7 +16,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from .template import Template
+from .template import Template, TemplateError
 
 
 class SitePack:
@@ -34,9 +34,29 @@ class SitePack:
         for p in sorted((self.root / "templates").glob("*/template.yaml")):
             t = Template(p)
             self.templates[t.name] = t
+        _check_families(self.templates)
         self._labels: dict | None = None
         pat = self.config.get("ingest", {}).get("date_from_filename")
         self._date_re = re.compile(pat) if pat else None
+
+    # ── 평가셋 분할 ────────────────────────────────────────────────────────
+    @property
+    def split_salt(self) -> str:
+        """[eval] split_salt. 없으면 사이트 이름. 바꾸면 평가셋이 바뀐다 (ADR 0009)."""
+        return str(self.option("eval", "split_salt", None) or self.name)
+
+    @property
+    def test_share(self) -> float:
+        return float(self.option("eval", "test_share", 0.2))
+
+    def split_of(self, work_date: str | None) -> str:
+        from ..evaluate.split import split_of
+
+        return split_of(work_date, self.split_salt, self.test_share)
+
+    def templates_for(self, day: str | None) -> list[Template]:
+        """그날 유효한 템플릿(분류 후보). 날짜를 모르면 전부."""
+        return [t for t in self.templates.values() if t.valid_on(day)]
 
     # ── 페이지 메타 ────────────────────────────────────────────────────────
     @property
@@ -77,3 +97,19 @@ class SitePack:
         for part in section.split("."):
             cur = cur.get(part, {})
         return cur.get(key, default)
+
+
+def _check_families(templates: dict[str, Template]) -> None:
+    """같은 family 안에서 유효 기간이 겹치면 오류다. 개정판끼리는 모양으로 가릴 수 없으므로 날짜가 틀림없이 갈라야 한다."""
+    by_family: dict[str, list[Template]] = {}
+    for t in templates.values():
+        if t.family:
+            by_family.setdefault(t.family, []).append(t)
+    for fam, ts in by_family.items():
+        for i, a in enumerate(ts):
+            for b in ts[i + 1:]:
+                a0, a1 = a.valid_from or "0000-00-00", a.valid_to or "9999-99-99"
+                b0, b1 = b.valid_from or "0000-00-00", b.valid_to or "9999-99-99"
+                if a0 <= b1 and b0 <= a1:
+                    raise TemplateError(f"계열 '{fam}' 의 {a.name} 과 {b.name} 의 유효 기간이 겹칩니다 "
+                                        f"({a0}~{a1}, {b0}~{b1}). 옛 판에 valid_to, 새 판에 valid_from 을 적으세요")

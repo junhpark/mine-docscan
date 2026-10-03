@@ -68,6 +68,8 @@ def _crosscheck_date(con: sqlite3.Connection, date: str, exclude: set[str]) -> d
                 break
 
     obs = []
+    # 자리를 못 정한 쪽은 slot 을 비운다 — 차량·작성자를 고쳐 자리가 풀리면 옛 자리가 남으면 안 된다 (새로 돌린 DB 와 같아야 한다)
+    con.execute("UPDATE prod_haul SET slot=NULL WHERE work_date=? AND source_role='log'", (date,))
     for pid, (slot, how) in page_slot.items():
         vehicle, operator = pages[pid]
         h_op, h_veh = slots[slot]
@@ -131,7 +133,7 @@ def _collect(items) -> tuple[dict, dict, dict]:
             unknown_final.add(key)
         if r["trips_raw"] is not None:
             raw[key] = raw.get(key, 0) + r["trips_raw"]
-        elif r["has_value"]:                 # prod_haul 에는 기계의 값 유무가 없다. 최종 값 유무로 대신한다
+        elif r["has_value_raw"]:             # 기계가 본 대로: 기계가 값이 있다고 했는데 읽지 못한 칸
             unknown_raw.add(key)
     for k in unknown_final:
         trips.pop(k, None)

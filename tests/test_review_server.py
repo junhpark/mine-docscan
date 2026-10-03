@@ -121,9 +121,17 @@ def test_missing_aligned_image_is_a_clear_error(srv, tmp_path):
     app = srv["app"]
     other = ReviewApp(app.con, app.site, replace(srv["settings"], work_root=tmp_path / "elsewhere"), "jp")
     fid = app.con.execute("SELECT field_id FROM doc_field LIMIT 1").fetchone()[0]
-    with pytest.raises(ApiError) as e:
-        other.crop_png({"field_id": fid, "kind": "cell"})
-    assert e.value.status == 409 and "정합 이미지" in str(e.value)
+    assert other.crop_png({"field_id": fid, "kind": "cell"})[1] == "source"       # 정합 이미지가 없어도 원본이 있으면 된다
+    pdf = next(srv["pipe"].settings.archive_root.glob("*.pdf"))
+    hidden = pdf.with_suffix(".hidden")
+    pdf.rename(hidden)
+    try:
+        with pytest.raises(ApiError) as e:
+            other.crop_png({"field_id": fid, "kind": "cell"})
+        assert e.value.status == 409 and "정합 이미지" in str(e.value)
+        assert app.crop_png({"field_id": fid, "kind": "cell"})[1] == "aligned"    # 원본이 없으면 정합 이미지로 물러난다
+    finally:
+        hidden.rename(pdf)
     with pytest.raises(ValueError):
         ReviewApp(app.con, app.site, srv["settings"], "")                 # 검수자 없이는 띄우지 않는다
     with pytest.raises(OSError, match="--port"):
@@ -154,7 +162,8 @@ def test_rejects_foreign_origin_and_non_json_and_bad_params(srv):
     # 같은 출처는 된다
     assert post({"Content-Type": "application/json", "Origin": base}, body) == 200
     # 잘못된 매개변수는 연결을 끊지 않고 400
-    for path in ("/crop?field_id=" + fid + "&kind=cell&scale=abc", "/api/queue?n=abc", "/api/queue?empty_share=x"):
+    for path in ("/crop?field_id=" + fid + "&kind=cell&scale=abc", "/crop?field_id=" + fid + "&kind=cell&scale=0",
+                 "/crop?field_id=" + fid + "&kind=cell&scale=40", "/api/queue?n=abc", "/api/queue?empty_share=x"):
         with pytest.raises(urllib.error.HTTPError) as e:
             _get(base + path)
         assert e.value.code == 400, path
@@ -168,4 +177,5 @@ def test_number_values_are_normalized(srv):
     assert status == 200 and out["value"] == "7"
     assert load(settings.reviews)[0][-1][1].value == "7"
     assert con.execute("SELECT value_final FROM doc_field WHERE field_id=?", (fid,)).fetchone()[0] == "7"
-    assert "isComposing" in _get(base + "/")[2].decode() and "ev.repeat" in _get(base + "/")[2].decode()
+    html = _get(base + "/")[2].decode()
+    assert "isComposing" in html and "ev.repeat" in html and "ev.altKey" in html      # 후보 선택은 Alt+숫자

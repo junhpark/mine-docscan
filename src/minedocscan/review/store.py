@@ -202,6 +202,38 @@ def review_from_field(con: sqlite3.Connection, field_id: str, verdict: str, valu
                            "confidence": r["confidence"]})
 
 
+# ── 쪽 메타 ────────────────────────────────────────────────────────────────
+def field_id_of(page_id: str, name: str) -> str:
+    """표 밖 자유 필드의 field_id (handlers/base.field_id 와 같은 규칙: region 'fields', row -1)."""
+    return f"{page_id}:fields:{name}:-1"
+
+
+def meta_from_reviews(con: sqlite3.Connection, page_id: str, template) -> dict:
+    """meta_key 가 있는 자유 필드의 유효한 검수 → {meta_key: 값}. empty 는 None (라벨 값을 지운다), illegible 은 무시."""
+    mf = template.meta_fields()
+    if not mf:
+        return {}
+    reviews = effective(con, field_ids=[field_id_of(page_id, name) for name in mf])
+    out: dict = {}
+    for name, key in mf.items():
+        rv = reviews.get(field_id_of(page_id, name))
+        if rv is None or rv.verdict == "illegible":
+            continue
+        out[key] = rv.value if rv.verdict == "value" else None
+    return out
+
+
+def page_meta(con: sqlite3.Connection, site, source_name: str, page_no: int, page_id: str, template) -> dict:
+    """쪽의 메타. 우선순위: 검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙 (tasks/0002 4.1). 날짜는 검수로 받지 않는다."""
+    meta = site.page_meta(source_name, page_no)
+    for k, v in meta_from_reviews(con, page_id, template).items():
+        if v is None:
+            meta.pop(k, None)
+        else:
+            meta[k] = v
+    return meta
+
+
 # ── 저장 ───────────────────────────────────────────────────────────────────
 def save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
     """검수 한 건을 저장한다: 파일 추가 → doc_review → doc_field → 핸들러의 on_review(업무 테이블·그 날짜의 교차검증)
@@ -239,8 +271,9 @@ def save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
 
 
 # ── 현황 ───────────────────────────────────────────────────────────────────
-def stats(con: sqlite3.Connection) -> dict:
-    """얼마나 했는지: 유효한 검수의 판정별·양식별·날짜별 건수, 검수자별 기록 수, bbox 가 달라진 기록 수."""
+def stats(con: sqlite3.Connection, site=None) -> dict:
+    """얼마나 했는지: 유효한 검수의 판정별·양식별·날짜별 건수, 검수자별 기록 수, bbox 가 달라진 기록 수,
+    (site 가 있으면) 분할별 건수와 날짜 수."""
     eff = effective(con)
     by_verdict: dict[str, int] = {}
     by_template: dict[str, int] = {}
@@ -259,18 +292,39 @@ def stats(con: sqlite3.Connection) -> dict:
         elif rv.bbox and list(rv.bbox) != [f["x0"], f["y0"], f["x1"], f["y1"]]:
             bbox_changed += 1
     by_reviewer = dict(con.execute("SELECT reviewer, COUNT(*) FROM doc_review GROUP BY 1 ORDER BY 1"))
+    by_split: dict[str, dict] = {}
+    if site is not None:
+        for rv, sp, d in effective_with_split(con, site):
+            if rv.verdict == "illegible":
+                continue
+            g = by_split.setdefault(sp, {"fields": 0, "dates": set()})
+            g["fields"] += 1
+            g["dates"].add(d)
+        by_split = {k: {"fields": v["fields"], "dates": len(v["dates"])} for k, v in sorted(by_split.items())}
     return {"records": con.execute("SELECT COUNT(*) FROM doc_review").fetchone()[0], "fields": len(eff),
             "by_verdict": dict(sorted(by_verdict.items())), "by_template": dict(sorted(by_template.items())),
             "by_date": dict(sorted(by_date.items())), "by_reviewer": by_reviewer,
-            "bbox_changed": bbox_changed, "fields_not_in_db": not_in_db}
+            "bbox_changed": bbox_changed, "fields_not_in_db": not_in_db, "by_split": by_split}
 
 
-def export_answers(con: sqlite3.Connection, out: str | Path) -> int:
-    """유효한 검수(value, empty) → answers.json (recognize.load_answers_json 형식). illegible 은 뺀다.
-    표본만 검수했다면 `eval --only-listed` 로 비교한다 — 정답에 없는 셀을 빈 칸으로 치면 안 되므로."""
-    items = []
+def effective_with_split(con: sqlite3.Connection, site) -> list[tuple[Review, str, str | None]]:
+    """유효한 검수마다 (검수, 분할, 날짜). 분할은 쪽의 날짜로 정한다 (evaluate/split.py). 쪽이 DB 에 없으면 unknown."""
+    dates = dict(con.execute("SELECT page_id, work_date FROM doc_page"))
+    out = []
     for rv in effective(con).values():
-        if rv.verdict == "illegible" or not rv.source:
+        d = dates.get(rv.page_id)
+        out.append((rv, site.split_of(d) if site is not None else "unknown", d))
+    return out
+
+
+def export_answers(con: sqlite3.Connection, out: str | Path, split: str = "all", site=None) -> int:
+    """유효한 검수(value, empty) → answers.json (recognize.load_answers_json 형식). illegible 은 뺀다.
+    split: all | test | train — 날짜 분할 (site 필요). 표본만 검수했다면 `eval --only-listed` 로 비교한다."""
+    if split != "all" and site is None:
+        raise ValueError("--split 에는 사이트 팩이 필요합니다")
+    items = []
+    for rv, sp, _d in effective_with_split(con, site):
+        if rv.verdict == "illegible" or not rv.source or (split != "all" and sp != split):
             continue
         items.append({"source": rv.source, "template": rv.template, "region": rv.region, "field_name": rv.field_name,
                       "row_key": rv.row_key, "text": rv.value if rv.verdict == "value" else ""})

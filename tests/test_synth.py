@@ -25,3 +25,14 @@ def test_expected_xcheck_counts_every_cell():
     n_count = sum(x["type"] == "different_count" for d in days for x in d["discrepancies"])
     assert has_only["mismatch"] == n_missing
     assert with_trips["mismatch"] == n_missing + n_count
+
+
+def test_same_seed_gives_identical_pdf_bytes(tmp_path):
+    """문서 ID 는 파일 해시다. 같은 seed 면 바이트까지 같아야 테스트의 문서 ID 가 실행마다 바뀌지 않는다."""
+    import hashlib
+
+    a = generate(tmp_path / "a", days=1, seed=5)
+    b = generate(tmp_path / "b", days=1, seed=5)
+    pa, pb = sorted(a.scans.glob("*.pdf")), sorted(b.scans.glob("*.pdf"))
+    assert [p.name for p in pa] == [p.name for p in pb]
+    assert [hashlib.sha256(p.read_bytes()).hexdigest() for p in pa] == [hashlib.sha256(p.read_bytes()).hexdigest() for p in pb]
