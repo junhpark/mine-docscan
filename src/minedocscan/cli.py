@@ -2,7 +2,8 @@
 
   info       설정·사이트 팩·등록된 백엔드 확인
   run        스캔 파일/폴더 → 분류 → 정합 → 추출 → 인식 → 검증 → 적재 → 교차검증
-  report     DB 현황 (양식별 페이지, 정합 품질, 검수 대기, 교차검증)
+  report     DB 현황 (양식별 페이지, 정합 품질, 검수 대기, 교차검증). --by-month 는 양식 × 월 진단
+  pages      쪽 목록 (상태·양식·분류 여유로 거름). --thumbs 는 원본 쪽의 미리보기 PNG
   eval       정답과 비교 (CER, 필드 정확도, 자동 적재율)
   regress    사이트 팩의 기준 수치와 비교하는 실데이터 회귀 검사
   template   새 양식의 템플릿 뼈대 만들기
@@ -16,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -49,8 +51,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--answers", help="oracle 백엔드용 정답 JSON")
     p.add_argument("--inspection-csv", metavar="DIR", help="oracle 백엔드용 점검표 정답 CSV 폴더")
     p.add_argument("--fresh", action="store_true", help="기존 SQLite 파일을 지우고 시작")
+    p.add_argument("--skip-existing", action="store_true",
+                   help="이미 끝까지 처리된 파일(같은 해시)은 건너뛴다. failed 는 다시 한다. "
+                        "템플릿이나 인식기를 바꾼 뒤에는 쓰지 않는다 — 그때는 --fresh")
+    p.add_argument("--strict", action="store_true", help="첫 오류에서 멈춘다 (디버깅용). 기본은 실패를 기록하고 계속")
 
-    sub.add_parser("report", parents=[common], help="DB 현황")
+    p = sub.add_parser("report", parents=[common], help="DB 현황")
+    p.add_argument("--by-month", action="store_true", help="양식 × 월: 쪽 수, 적재, 정합 실패, 괘선 오차, 분류 여유")
+
+    p = sub.add_parser("pages", parents=[common], help="쪽 목록")
+    p.add_argument("--status", help="unknown_form | classified_only | align_failed | loaded | error")
+    p.add_argument("--template", help="이 양식만")
+    p.add_argument("--low-margin", action="store_true", help="분류 여유가 classify_min_margin 아래인 쪽만")
+    p.add_argument("--thumbs", nargs="?", const="", metavar="DIR",
+                   help="목록의 쪽을 1/4 로 줄인 PNG 로 쓴다 (기본 WORK_ROOT/thumbs/<상태>/). 저장소 밖에만")
 
     p = sub.add_parser("eval", parents=[common], help="정답과 비교")
     g = p.add_mutually_exclusive_group(required=True)
@@ -177,26 +191,65 @@ def cmd_run(a) -> int:
     files = pipe.expand(paths)
     if not files:
         raise SystemExit(f"처리할 파일이 없습니다: {[str(p) for p in paths]}")
+    t0 = time.monotonic()
     for i, f in enumerate(files, 1):
+        r = pipe.process_file(f, template=a.template, skip_existing=a.skip_existing, strict=a.strict)
         if not a.json:
-            print(f"[{i}/{len(files)}] {f.name}", file=sys.stderr)
-        pipe.process_file(f, template=a.template)
+            el = time.monotonic() - t0
+            eta = el / i * (len(files) - i)
+            what = ("건너뜀" if r.get("skipped") else f"실패: {r['error']}" if r["status"] == "failed" else f"{len(r['pages'])}쪽")
+            print(f"[{i}/{len(files)}] {f.name} · {what} · 지난 {_hms(el)} · 남은 약 {_hms(eta)}", file=sys.stderr)
     summary = pipe.finalize()
     rep = build_report(pipe.con)
-    text = (f"이번 실행: 문서 {summary['documents']}건, 페이지 {summary['pages']}장 (인식 백엔드: {recognizer.name})\n"
-            f"분류 여유가 낮은 페이지: {len(summary['low_margin'])}장\n"
+    text = (f"이번 실행: 문서 {summary['documents']}건, 페이지 {summary['pages']}장, 건너뜀 {summary['skipped']}건, "
+            f"실패 {len(summary['failed'])}건 (인식 백엔드: {recognizer.name})\n"
+            f"분류 여유가 낮은 페이지: {len(summary['low_margin'])}장, 오류 난 쪽: {len(summary['page_errors'])}장\n"
             f"── DB 현황 ({s.resolved_db_url}) ──\n" + format_report(rep, xcheck_by_date(pipe.con)))
+    if summary["failed"]:
+        text += "\n실패한 문서:\n" + "\n".join(f"  {d['source_name']}: {d['error']}" for d in summary["failed"])
+    if summary["page_errors"]:
+        text += "\n오류 난 쪽:\n" + "\n".join(f"  {d['page_id']}: {d['error']}" for d in summary["page_errors"])
     _emit(a, {"run": summary, "report": rep}, text)
-    return 0
+    return 1 if (summary["failed"] or summary["page_errors"]) else 0
+
+
+def _hms(sec: float) -> str:
+    sec = int(sec)
+    return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
 
 
 def cmd_report(a) -> int:
-    from .report import build_report, format_report, xcheck_by_date
+    from .report import build_report, by_month, format_by_month, format_report, xcheck_by_date
     from .store.db import open_db
 
-    con = open_db(_settings(a).resolved_db_url)
+    s = _settings(a)
+    con = open_db(s.resolved_db_url)
+    if a.by_month:
+        rows = by_month(con, s.classify_min_margin)
+        _emit(a, {"by_month": rows}, format_by_month(rows))
+        return 0
     rep, by_date = build_report(con), xcheck_by_date(con)
     _emit(a, {"report": rep, "xcheck_by_date": by_date}, format_report(rep, by_date))
+    return 0
+
+
+def cmd_pages(a) -> int:
+    from .report import format_pages, list_pages
+    from .store.db import open_db
+
+    s = _settings(a)
+    con = open_db(s.resolved_db_url)
+    rows = list_pages(con, status=a.status, template=a.template,
+                      low_margin=s.classify_min_margin if a.low_margin else None)
+    written = []
+    if a.thumbs is not None:
+        from .tools.thumbs import write_thumbs
+
+        written = write_thumbs(s, rows, a.thumbs or None)
+    text = format_pages(rows) + f"\n쪽 {len(rows)}개"
+    if a.thumbs is not None:
+        text += f", 미리보기 {len(written)}개 → {(a.thumbs or (s.work_root / 'thumbs'))}"
+    _emit(a, {"pages": rows, "thumbs": [str(p) for p in written]}, text)
     return 0
 
 
@@ -348,8 +401,8 @@ def cmd_review(a) -> int:
     raise SystemExit(f"알 수 없는 review 명령: {a.review_command}")
 
 
-COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "eval": cmd_eval, "regress": cmd_regress,
-            "template": cmd_template, "synth": cmd_synth, "review": cmd_review}
+COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "pages": cmd_pages, "eval": cmd_eval,
+            "regress": cmd_regress, "template": cmd_template, "synth": cmd_synth, "review": cmd_review}
 
 
 def main(argv: list[str] | None = None) -> int:
