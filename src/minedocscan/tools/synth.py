@@ -64,6 +64,10 @@ SURFACE_ROW = ("SURFACE", "-")                                   # 일보에만 
 NOTE_ROW = UG_ROWS[-1]                                           # 메모를 쓰는 행 (값은 적지 않는다)
 # 행렬 양식에 인쇄된 머리글: 자리, 차량번호, 운전자
 SLOTS = [("T01", "V-101", "ALPHA"), ("T02", "V-102", "BRAVO"), ("T03", "V-103", "CHARLIE"), ("T04", "V-104", "DELTA")]
+# 개정판(선택): 둘째 날부터 T02 자리의 인쇄된 차량·운전자가 바뀐 판. 머리글 몇 글자만 달라 모양으로는 가릴 수 없다
+SLOTS_V2 = [("T01", "V-101", "ALPHA"), ("T02", "V-202", "GOLF"), ("T03", "V-103", "CHARLIE"), ("T04", "V-104", "DELTA")]
+T_MATRIX_V2 = "synth_haul_matrix_v2"
+MATRIX_FAMILY = "synth_haul_matrix"
 OK_PHRASES = ["ok", "greased", "filter cleaned", "washed", "checked"]
 FAULT_PHRASES = ["oil leak", "tire worn", "hose broken", "lamp broken", "brake noise", "battery low"]
 SIDE_LABELS = ["Fuel (L)", "Engine hours", "Odometer (km)", "Start time", "End time"]
@@ -247,7 +251,9 @@ def build_haul_log() -> tuple[np.ndarray, dict]:
     return img, spec
 
 
-def build_haul_matrix() -> tuple[np.ndarray, dict]:
+def build_haul_matrix(slots: list[tuple[str, str, str]] = SLOTS, name: str = T_MATRIX,
+                      valid: tuple[str | None, str | None] | None = None) -> tuple[np.ndarray, dict]:
+    """slots: 인쇄된 머리글 (자리, 차량, 운전자). valid=(valid_from, valid_to) 를 주면 개정판 계열의 한 판이 된다."""
     img = _canvas(LANDSCAPE)
     _label(img, "LOADER DAILY LOG  -  UNDERGROUND LOADING", 150, 170, 1.4, 3)
     _label(img, "Date:  20      .        .", 150, 265, 0.9)
@@ -258,7 +264,7 @@ def build_haul_matrix() -> tuple[np.ndarray, dict]:
     _cell_label(img, "Material", ys, xs, 0, 0)
     _cell_label(img, "Level", ys, xs, 0, 1)
     columns = [{"idx": 0, "name": "material", "kind": "printed"}, {"idx": 1, "name": "level", "kind": "printed"}]
-    for k, (slot, vehicle, operator) in enumerate(SLOTS):
+    for k, (slot, vehicle, operator) in enumerate(slots):
         _cell_label(img, f"{slot}  {vehicle}", ys, xs, 0, 2 + k, 0.65)
         _cell_label(img, operator, ys, xs, 1, 2 + k, 0.65)
         columns.append({"idx": 2 + k, "name": f"slot_{slot}", "kind": "handwritten_number", "slot": slot,
@@ -274,7 +280,7 @@ def build_haul_matrix() -> tuple[np.ndarray, dict]:
     _label(img, "Form SYN-LOAD-02 rev.1", rx, 1040, 0.7)
 
     spec = {
-        "name": T_MATRIX, "title": "Loader daily log, underground (synthetic)", "reference_image": "reference.png",
+        "name": name, "title": "Loader daily log, underground (synthetic)", "reference_image": "reference.png",
         "dpi": DPI, "page_size": list(LANDSCAPE), "handler": "haul",
         "handler_options": {"role": "matrix", "region": "matrix"},
         "regions": [{"name": "matrix", "grid": {"ys": ys, "xs": xs}, "header_rows": 2,
@@ -284,6 +290,9 @@ def build_haul_matrix() -> tuple[np.ndarray, dict]:
             {"name": "operator", "kind": "handwritten_text", "bbox": [1010, 220, 1400, 285]},
         ],
     }
+    if valid is not None:
+        spec["family"] = MATRIX_FAMILY
+        spec["valid_from"], spec["valid_to"] = valid
     return img, spec
 
 
@@ -311,13 +320,18 @@ exclude_materials = ["SURFACE"]
 """
 
 
-def write_site_pack(site_dir: str | Path) -> Path:
-    """합성 사이트 팩(site.toml + 템플릿 세 종)을 쓴다."""
+def write_site_pack(site_dir: str | Path, revision_from: str | None = None) -> Path:
+    """합성 사이트 팩(site.toml + 템플릿 세 종)을 쓴다. revision_from(날짜)을 주면 행렬 양식이 두 판이 된다:
+    그 전날까지 v1, 그날부터 v2 (같은 계열, 유효 기간으로 가린다)."""
     site = Path(site_dir)
     site.mkdir(parents=True, exist_ok=True)
     (site / "site.toml").write_text(SITE_TOML, encoding="utf-8")
-    for name, build in BUILDERS.items():
-        img, spec = build()
+    built = {name: build() for name, build in BUILDERS.items()}
+    if revision_from:
+        last_v1 = (date.fromisoformat(revision_from) - timedelta(days=1)).isoformat()
+        built[T_MATRIX] = build_haul_matrix(SLOTS, T_MATRIX, (None, last_v1))
+        built[T_MATRIX_V2] = build_haul_matrix(SLOTS_V2, T_MATRIX_V2, (revision_from, None))
+    for name, (img, spec) in built.items():
         d = site / "templates" / name
         d.mkdir(parents=True, exist_ok=True)
         imwrite(d / "reference.png", img)
@@ -328,8 +342,8 @@ def write_site_pack(site_dir: str | Path) -> Path:
 
 
 # ── 하루치 내용(정답) 만들기 ───────────────────────────────────────────────
-def _day_truth(d: int, day: str, rng) -> dict:
-    """d 번째 날의 정답. 날마다 다른 어려움을 넣는다 (d % 3)."""
+def _day_truth(d: int, day: str, rng, slots: list[tuple[str, str, str]] = SLOTS) -> dict:
+    """d 번째 날의 정답. 날마다 다른 어려움을 넣는다 (d % 3). slots 는 그날 유효한 행렬 판의 머리글."""
     scen = []
     # 점검표
     unused = d % 3 == 1
@@ -348,7 +362,7 @@ def _day_truth(d: int, day: str, rng) -> dict:
 
     # 그날의 실제 배차 (인쇄된 머리글과 다를 수 있다)
     trucks = []
-    for slot, vehicle, operator in SLOTS:
+    for slot, vehicle, operator in slots:
         t = {"slot": slot, "vehicle_no": vehicle, "operator": operator, "matched_by": "operator", "has_log": True}
         if d % 3 == 1 and slot == "T03":
             t["vehicle_no"] = "V-909"                      # 같은 운전자가 다른 차를 몬다
@@ -393,7 +407,8 @@ def _day_truth(d: int, day: str, rng) -> dict:
 
     return {"date": day, "scenarios": scen, "inspection": insp, "trucks": trucks, "haul_log": log,
             "haul_matrix": [{"slot": k[0], "material": k[1], "level": k[2], "trips": v} for k, v in sorted(matrix.items())],
-            "discrepancies": disc}
+            "discrepancies": disc,
+            "headers": {slot: [vehicle, operator] for slot, vehicle, operator in slots}}
 
 
 def expected_xcheck(days: list[dict], with_trips: bool) -> dict[str, int]:
@@ -509,23 +524,28 @@ class SynthResult:
 
 
 def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "2030-01-07",
-             strength: float = 1.0) -> SynthResult:
+             strength: float = 1.0, matrix_revision: bool = False) -> SynthResult:
     """out_dir 에 합성 사이트 팩(site/)과 스캔 문서(scans/), 정답(truth.json, answers.json)을 만든다.
 
     하루에 PDF 한 개: 점검표 1장 → 차량별 일보(일보를 낸 차량 수) → 행렬 1장.
-    같은 seed 는 같은 결과를 낸다.
+    같은 seed 는 같은 결과를 낸다. matrix_revision=True 면 둘째 날부터 행렬 양식이 개정판(v2)이다 — 기본 데이터는 그대로다.
     """
     root = Path(out_dir)
-    site = write_site_pack(root / "site")
+    d0 = date.fromisoformat(start)
+    revision_from = (d0 + timedelta(days=1)).isoformat() if matrix_revision else None
+    site = write_site_pack(root / "site", revision_from=revision_from)
     scans = root / "scans"
     rng = np.random.default_rng(seed)
     blanks = {name: build() for name, build in BUILDERS.items()}
-    d0 = date.fromisoformat(start)
+    if revision_from:
+        blanks[T_MATRIX_V2] = build_haul_matrix(SLOTS_V2, T_MATRIX_V2, (revision_from, None))
 
     day_truths, labels, answers, documents = [], {}, [], {}
     for d in range(days):
         day = (d0 + timedelta(days=d)).isoformat()
-        dt = _day_truth(d, day, rng)
+        v2 = bool(revision_from) and day >= revision_from
+        matrix_name, slots = (T_MATRIX_V2, SLOTS_V2) if v2 else (T_MATRIX, SLOTS)
+        dt = _day_truth(d, day, rng, slots)
         stem = f"scan_{day}"
         pages, page_info = [], []
 
@@ -550,9 +570,9 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
                     answers.append({"source": source, "template": T_LOG, "region": "haul",
                                     "field_name": f"trips_{r['shift']}", "row_key": f"{r['material']}|{r['level']}",
                                     "text": str(r["trips"])})
-        n = add(_fill_matrix(*blanks[T_MATRIX], dt, rng), T_MATRIX)
+        n = add(_fill_matrix(*blanks[matrix_name], dt, rng), matrix_name)
         for r in dt["haul_matrix"]:
-            answers.append({"source": f"{stem}#{n}", "template": T_MATRIX, "region": "matrix",
+            answers.append({"source": f"{stem}#{n}", "template": matrix_name, "region": "matrix",
                             "field_name": f"slot_{r['slot']}", "row_key": f"{r['material']}|{r['level']}",
                             "text": str(r["trips"])})
         _write_pdf(scans / f"{stem}.pdf", pages)
@@ -579,7 +599,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
             "xcheck_haul_with_trips": expected_xcheck(day_truths, with_trips=True),
             "assignments": {"n": sum(t["has_log"] for dt in day_truths for t in dt["trucks"]),
                             "header_mismatch": sum(
-                                t["has_log"] and (t["vehicle_no"], t["operator"]) != _header(t["slot"])
+                                t["has_log"] and [t["vehicle_no"], t["operator"]] != dt["headers"][t["slot"]]
                                 for dt in day_truths for t in dt["trucks"])},
         },
     }
@@ -587,10 +607,3 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     truth_path.write_text(json.dumps(truth, ensure_ascii=False, indent=1), encoding="utf-8")
     answers_path.write_text(json.dumps(answers, ensure_ascii=False, indent=1), encoding="utf-8")
     return SynthResult(root, site, scans, truth_path, answers_path, truth)
-
-
-def _header(slot: str) -> tuple[str, str]:
-    for s, vehicle, operator in SLOTS:
-        if s == slot:
-            return vehicle, operator
-    raise KeyError(slot)

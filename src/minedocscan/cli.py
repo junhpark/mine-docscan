@@ -151,13 +151,15 @@ def cmd_info(a) -> int:
     if s.site and Path(s.site).is_dir():
         site = _need_site(s)
         tpls = [{"name": t.name, "title": t.title, "handler": t.handler, "regions": len(t.regions),
-                 "cells": len(t.cells()) + len(t.fields), "status": "cells" if t.has_cells else "classify_only"}
+                 "cells": len(t.cells()) + len(t.fields), "status": "cells" if t.has_cells else "classify_only",
+                 "family": t.family, "valid_from": t.valid_from, "valid_to": t.valid_to}
                 for t in site.templates.values()]
         data["site"] = {"name": site.name, "templates": tpls, "labels": len(site.labels)}
         lines.append(f"사이트 팩: {site.name} — 템플릿 {len(tpls)}종, 페이지 라벨 {len(site.labels)}개")
         for t in tpls:
+            valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}" if t["family"] else "")
             lines.append(f"  {t['name']:<24} handler={t['handler']:<11} 표 {t['regions']}개, 셀 {t['cells']}개"
-                         + ("" if t["status"] == "cells" else "  (분류 전용 — 셀 정의 없음)"))
+                         + ("" if t["status"] == "cells" else "  (분류 전용 — 셀 정의 없음)") + valid)
     else:
         lines.append("사이트 팩: 지정되지 않았거나 폴더가 없습니다")
     _emit(a, data, "\n".join(lines))

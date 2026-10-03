@@ -16,7 +16,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from .template import Template
+from .template import Template, TemplateError
 
 
 class SitePack:
@@ -34,9 +34,14 @@ class SitePack:
         for p in sorted((self.root / "templates").glob("*/template.yaml")):
             t = Template(p)
             self.templates[t.name] = t
+        _check_families(self.templates)
         self._labels: dict | None = None
         pat = self.config.get("ingest", {}).get("date_from_filename")
         self._date_re = re.compile(pat) if pat else None
+
+    def templates_for(self, day: str | None) -> list[Template]:
+        """그날 유효한 템플릿(분류 후보). 날짜를 모르면 전부."""
+        return [t for t in self.templates.values() if t.valid_on(day)]
 
     # ── 페이지 메타 ────────────────────────────────────────────────────────
     @property
@@ -77,3 +82,19 @@ class SitePack:
         for part in section.split("."):
             cur = cur.get(part, {})
         return cur.get(key, default)
+
+
+def _check_families(templates: dict[str, Template]) -> None:
+    """같은 family 안에서 유효 기간이 겹치면 오류다. 개정판끼리는 모양으로 가릴 수 없으므로 날짜가 틀림없이 갈라야 한다."""
+    by_family: dict[str, list[Template]] = {}
+    for t in templates.values():
+        if t.family:
+            by_family.setdefault(t.family, []).append(t)
+    for fam, ts in by_family.items():
+        for i, a in enumerate(ts):
+            for b in ts[i + 1:]:
+                a0, a1 = a.valid_from or "0000-00-00", a.valid_to or "9999-99-99"
+                b0, b1 = b.valid_from or "0000-00-00", b.valid_to or "9999-99-99"
+                if a0 <= b1 and b0 <= a1:
+                    raise TemplateError(f"계열 '{fam}' 의 {a.name} 과 {b.name} 의 유효 기간이 겹칩니다 "
+                                        f"({a0}~{a1}, {b0}~{b1}). 옛 판에 valid_to, 새 판에 valid_from 을 적으세요")

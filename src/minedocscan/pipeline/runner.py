@@ -173,7 +173,8 @@ class Pipeline:
         if template:
             name, margin = template, None
         else:
-            cr = self.classifier.classify(gray)
+            cands = [t.name for t in self.site.templates_for(meta.get("date"))]     # 그날 유효한 판만 (tasks/0002 4.4)
+            cr = self.classifier.classify(gray, candidates=cands)
             name, margin = cr.template, cr.margin
             if name and margin < self.settings.classify_min_margin:
                 s["low_margin"].append({"page_id": page_id, "template": name, "margin": round(margin, 2)})

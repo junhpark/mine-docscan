@@ -3,6 +3,8 @@
 각 템플릿의 기준 이미지와 ORB 정합을 시도해 RANSAC 인라이어가 가장 많은 템플릿을 고른다.
 인쇄된 양식(제목·괘선·고정 문구)이 특징점의 대부분이라 수기 내용과 무관하게 동작한다.
 서식이 같은 양식(제목만 다른 경우)은 한 템플릿으로 두고 제목 필드로 구분한다.
+같은 양식의 개정판은 모양으로 가릴 수 없다(여유가 1 에 가깝다). 쪽의 날짜를 알면 그날 유효한 템플릿만 후보로 준다
+(candidates) — forms/sitepack.templates_for().
 """
 from __future__ import annotations
 
@@ -44,9 +46,10 @@ class FormClassifier:
         _, mask = cv2.findHomography(src, dst, cv2.RANSAC, 4.0)
         return int(mask.sum()) if mask is not None else 0
 
-    def classify(self, gray: np.ndarray, min_inliers: int = 60) -> ClassResult:
+    def classify(self, gray: np.ndarray, min_inliers: int = 60, candidates: list[str] | None = None) -> ClassResult:
         k1, d1 = self._feats(gray)
-        scores = {name: self._inliers(k1, d1, k2, d2) for name, (k2, d2) in self.refs.items()}
+        refs = self.refs if candidates is None else {n: self.refs[n] for n in candidates if n in self.refs}
+        scores = {name: self._inliers(k1, d1, k2, d2) for name, (k2, d2) in refs.items()}
         ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
         if not ranked:
             return ClassResult(None, {}, 0.0)
