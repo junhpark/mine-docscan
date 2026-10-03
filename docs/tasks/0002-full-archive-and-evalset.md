@@ -5,11 +5,13 @@
 
 ## 0. 이 문서를 쓰는 법
 
-> `CLAUDE.md` 와 `docs/tasks/0002-full-archive-and-evalset.md` 를 읽고 단계 1부터 진행해. 단계가 끝날 때마다 멈추고 결과를 보고해.
+> `CLAUDE.md` 와 `docs/tasks/0002-full-archive-and-evalset.md` 를 읽고 단계 1부터 6까지 이어서 진행해. 다 끝나면 PR 을 하나 열고 결과를 보고해.
 
-- PR 을 둘로 나눈다. **PR A = 단계 1–4** (브랜치 `feat/full-archive`), **PR B = 단계 5–6** (브랜치 `feat/evalset`).
-  단계 7 은 선택이고 따로 낸다. PR A 가 합쳐지면 사람이 실데이터 작업(8절)을 시작할 수 있다.
-- 단계마다 커밋하고, 단계마다 `pytest` 와 `ruff check .` 가 통과해야 다음으로 간다.
+- **PR 은 하나다.** 브랜치 `feat/full-archive-evalset` 에서 단계 1–6 을 한 번에 한다. 단계 7 은 선택이고 이 PR 에 넣지 않는다.
+- PR 이 크다. 그래서 **단계마다 커밋 하나**로 나누고(커밋 제목에 단계 번호), 단계마다 `pytest` 와 `ruff check .` 가 통과한 상태로 커밋한다.
+  검토는 커밋 단위로 한다. 한 커밋에 두 단계를 섞지 않는다. 문서는 마지막 커밋으로 따로.
+- 단계 사이에 멈추지 않는다. 다만 4절을 바꿔야 하거나 수용 기준을 충족할 수 없으면 거기서 멈추고 묻는다.
+- 스키마 버전은 이 PR 에서 한 번만 올린다 (2 → 3). 단계마다 올리지 않는다.
 - 4절 "이미 정한 것"을 바꿔야 할 이유가 생기면 구현하지 말고 먼저 묻는다.
 - 실데이터는 작업 환경에 없을 수 있다. 수용 기준은 전부 합성 데이터로 잡았다. 실데이터에서 볼 것은 8절에 사람의 일로 적었다.
 
@@ -190,7 +192,6 @@ minedocscan review export-crops ~/minedocscan-crops --split train   # 원본 해
 - 같은 계열에서 기간이 겹치면 `TemplateError`.
 - 판이 없는 사이트 팩(지금의 합성·실제 팩)은 결과가 전과 같다.
 
-여기까지 끝나면 PR A 를 연다.
 
 ### 단계 5 — 원본 해상도 크롭
 
@@ -227,7 +228,7 @@ minedocscan review export-crops ~/minedocscan-crops --split train   # 원본 해
 - 대상이 git 작업 트리 안이면 거절한다.
 - `eval --split test` 는 `test` 날짜의 셀만 센다.
 
-여기까지 끝나면 PR B 를 연다.
+여기까지 끝나면 PR 을 연다. PR 본문에는 단계별로 만든 것, 수용 기준 충족 여부, 브라우저에서 직접 확인한 것을 적는다.
 
 ### 단계 7 — (선택) 두 번째 입력
 
@@ -246,6 +247,8 @@ minedocscan review export-crops ~/minedocscan-crops --split train   # 원본 해
 - 전부 합성 데이터. 실제 문서의 이미지나 값을 테스트에 넣지 않는다.
 - 0001 의 불변식 테스트에 페이지 필드 검수를 더한다.
 - 전체 시험 시간이 지금의 1.5배를 넘지 않게 한다. 새로 파이프라인을 돌리는 테스트는 하루치로.
+- 한 PR 에 여섯 단계가 들어가므로, 마지막에 깨끗한 환경에서 한 번 더 확인한다: 새 가상환경에 `pip install .` → `pytest`,
+  그리고 `synth` → `run` → `review serve` → `export-crops` 를 명령줄로 처음부터 끝까지 한 번.
 - 깨진 파일, 흰 종이, 개정판 같은 "어려움"은 테스트 안에서 합성 데이터를 손봐서 만든다. 기본 합성 데이터의 기대 수치는 건드리지 않는다.
 
 ## 7. 지켜야 할 것
@@ -257,7 +260,7 @@ minedocscan review export-crops ~/minedocscan-crops --split train   # 원본 해
 
 ## 8. 사람이 할 일 (실데이터가 있는 컴퓨터에서)
 
-PR A 가 합쳐진 뒤, 순서대로.
+PR 이 합쳐진 뒤, 순서대로.
 
 1. 사이트 팩의 일보 템플릿에서 차량번호·작성자 필드에 `meta_key` 를 넣는다 (`docs/SITE_PACK.md` 의 조각 그대로).
 2. `minedocscan run DB_scans --fresh` — 처음 한 번. 걸린 시간과 `aligned/` 용량을 적어 둔다. 그 뒤로는 `--skip-existing`.
@@ -267,7 +270,7 @@ PR A 가 합쳐진 뒤, 순서대로.
    - 양식을 못 찾은 쪽이 어떤 양식인지 적어 둔다 → 다음 양식 작업(M1)의 우선순위가 된다.
 5. `review serve --queue page-fields` — 날짜순으로 나온다. 전부 할 필요는 없다. 한 날짜의 일보를 다 입력하면 그 날짜의 교차검증이 살아난다.
 6. `review serve --queue haul-numbers --n 1500` — 정답 만들기. 그다음 `--queue mismatch`.
-7. PR B 가 합쳐진 뒤: `review stats` 로 `test`/`train` 건수를 보고, `review export-crops` 로 내보낸다.
+7. 정답이 쌓이면 `review stats` 로 `test`/`train` 건수를 보고, `review export-crops` 로 내보낸다.
 
 **돌려줄 수치** (이름·차량번호 없이 수치만): 양식별·상태별 쪽 수, 월별 표, 양식을 못 찾은 쪽의 종류, 전체 처리 시간과 용량,
 한 시간에 입력한 셀 수, 화면에서 불편했던 점, 원본 해상도 크롭이 읽기에 나은지.
