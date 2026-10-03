@@ -162,6 +162,41 @@ def test_truncated_pdf_is_failed_not_silently_repaired(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["report"]["documents_by_status"] == {"needs_review": 1}
 
 
+def test_damaged_pdf_warn_policy(synth, tmp_path, capsys, monkeypatch):
+    """damaged_pdf = warn: 복구해서 연 PDF 를 처리하고 경고를 남긴다(종료 코드 0). 열 수 없는 파일은 그래도 failed."""
+    import pymupdf
+
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    pdf = scans / "one_page.pdf"
+    with pymupdf.open(str(next(synth.scans.glob("*.pdf")))) as src, pymupdf.open() as one:   # 합성 문서의 첫 쪽만
+        one.insert_pdf(src, from_page=0, to_page=0)
+        one.save(str(pdf), no_new_id=True)
+    pdf.write_bytes(pdf.read_bytes()[:-200])                         # 끝을 자른 PDF
+    monkeypatch.setenv("MINEDOCSCAN_DAMAGED_PDF", "warn")
+    common = ["--site", str(synth.site), "--archive-root", str(scans), "--work-root", str(tmp_path / "work"), "--json"]
+    capsys.readouterr()
+    code = main(["run", "--fresh"] + common)
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and len(out["report"]["documents_by_status"]) == 1
+    assert out["report"]["pages"] == 1 and out["report"]["documents"] == 1
+    assert len(out["run"]["warnings"]) == 1 and "복구" in out["run"]["warnings"][0]["warning"]
+    assert out["report"]["warnings"] == {"n": 1, "documents": [pdf.stem]}
+    assert main(["report"] + common[:-1]) == 0 and "경고 1건" in capsys.readouterr().out
+    # 쓰레기 바이트와 0바이트 파일은 warn 에서도 failed
+    first = out["report"]["documents_by_status"]
+    (scans / "garbage.pdf").write_bytes(b"%PDF-1.4 broken " + b"\x00" * 500)
+    (scans / "empty.pdf").write_bytes(b"")
+    code = main(["run", "--skip-existing"] + common)
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1 and sorted(d["source_name"] for d in out["run"]["failed"]) == ["empty", "garbage"]
+    assert out["report"]["documents_by_status"] == {"failed": 2} | first
+    # 잘못된 방침 값은 시작할 때 멈춘다
+    monkeypatch.setenv("MINEDOCSCAN_DAMAGED_PDF", "ignore")
+    with pytest.raises(ValueError, match="damaged_pdf"):
+        main(["run"] + common)
+
+
 def test_by_month_prints_zero_not_dash():
     from minedocscan.report import format_by_month
 

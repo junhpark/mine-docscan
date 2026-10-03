@@ -19,6 +19,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]
+# 숫자 인식기 학습 (recognizer train). 추론·파이프라인에는 필요 없다 — 추론은 OpenCV 의 cv2.dnn 이 ONNX 를 읽는다.
+# onnxscript 는 torch 의 새 ONNX 내보내기(dynamo)가 쓴다 — 예전 내보내기가 없어진 torch 에서의 대비
+train = ["torch>=2.2", "onnx>=1.15", "onnxscript>=0.1"]
 
 [project.scripts]
 minedocscan = "minedocscan.cli:main"
@@ -28,9 +31,11 @@ packages = ["src/minedocscan"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# 기본 실행에서 학습 테스트(train)는 뺀다 — torch 가 있어도. 돌리려면 `pytest -m train`
+addopts = "-q -m 'not train'"
 markers = [
   "realdata: 실제 현장 데이터가 필요한 회귀 테스트 (MINEDOCSCAN_SITE, MINEDOCSCAN_ARCHIVE_ROOT 가 없으면 건너뜀)",
+  "train: 숫자 인식기를 학습하는 테스트 (torch 필요, 몇 분 걸린다). `pytest -m train` 으로만 돈다",
 ]
 
 [tool.ruff]

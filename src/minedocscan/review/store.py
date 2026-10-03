@@ -12,7 +12,7 @@
   empty      빈 칸이다              → value_final = '',   has_value = 0, review_status = reviewed
   illegible  읽을 수 없다           → 값은 그대로, review_status = pending (대기열과 정답에서 빠진다)
 
-기계가 낸 값(value_raw, confidence, backend, has_value_raw)은 검수해도 바뀌지 않는다.
+기계가 낸 값(value_raw, confidence, backend, has_value_raw, status_raw)은 검수해도 바뀌지 않는다.
 """
 from __future__ import annotations
 
@@ -173,7 +173,7 @@ def effective(con: sqlite3.Connection, page_id: str | None = None, field_ids: li
 
 
 def apply_verdict(row: dict, review: Review) -> dict:
-    """doc_field 행에 검수를 적용한 새 행. 기계 값(value_raw, confidence, backend, has_value_raw)은 그대로 둔다."""
+    """doc_field 행에 검수를 적용한 새 행. 기계 값(value_raw, confidence, backend, has_value_raw, status_raw)은 그대로 둔다."""
     out = dict(row)
     if review.verdict == "value":
         out.update(value_final=review.value, has_value=1, review_status="reviewed")

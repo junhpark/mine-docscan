@@ -35,8 +35,9 @@ from ..forms.sitepack import SitePack
 from ..handlers import PageContext, get_handler
 from ..imaging.align import align_to_template
 from ..imaging.cells import observe_cells
-from ..imaging.io import SUPPORTED_EXT, imwrite, load_pages
-from ..recognize import Recognizer, get_recognizer
+from ..imaging.cropspec import PageImages
+from ..imaging.io import IMAGE_EXT, SUPPORTED_EXT, imwrite, load_pages
+from ..recognize import Recognizer, build_recognizer
 from ..review.store import import_into
 from ..review.store import page_meta as _page_meta
 from ..store.db import open_db, upsert
@@ -52,13 +53,13 @@ class Pipeline:
                 raise ValueError("사이트 팩 경로가 없습니다. 설정의 [paths] site 또는 MINEDOCSCAN_SITE 를 지정하세요.")
             site = SitePack(settings.site)
         self.site = site
-        self.recognizer = recognizer or get_recognizer(settings.recognizer)
+        self.recognizer = recognizer or build_recognizer(settings, site)
         self.corrector = corrector or get_corrector(settings.corrector)
         self.con = con or open_db(settings.resolved_db_url)
         self.classifier = FormClassifier(list(site.templates.values()))
         self._handlers: dict[str, object] = {}
         self.summary: dict = {"documents": 0, "pages": 0, "by_form": {}, "by_status": {}, "low_margin": [],
-                              "handlers": {}, "skipped": 0, "failed": [], "page_errors": []}
+                              "handlers": {}, "skipped": 0, "failed": [], "page_errors": [], "warnings": []}
         self.summary["reviews"] = (import_into(self.con, settings.reviews_path(self.site.root)) if load_reviews
                                    else {"path": None, "imported": 0, "skipped": 0})
 
@@ -99,12 +100,16 @@ class Pipeline:
                 self.summary["skipped"] += 1
                 return {"document_id": document_id, "status": row[0], "skipped": True, "pages": []}
         snapshot = copy.deepcopy(self.summary)            # 문서가 실패하면 그 문서의 집계도 되돌린다
+        warnings: list[str] = []
         try:
             upsert(self.con, "doc_document", self._document_row(document_id, path, source_name, "received", None))
             pages = []
-            for page_no, gray in load_pages(path, self.settings.dpi):
-                pages.append(self.process_page(document_id, source_name, page_no, gray, template, strict=strict))
-            self.con.execute("UPDATE doc_document SET n_pages=? WHERE document_id=?", (len(pages), document_id))
+            for page_no, gray in load_pages(path, self.settings.dpi, self.settings.damaged_pdf, warnings):
+                pages.append(self.process_page(document_id, source_name, page_no, gray, template, strict=strict,
+                                               source_path=path))
+            warning = "; ".join(warnings) or None
+            self.con.execute("UPDATE doc_document SET n_pages=?, warning=? WHERE document_id=?",
+                             (len(pages), warning, document_id))
             update_document_status(self.con, document_id)
             self.con.commit()
         except Exception as e:                            # noqa: BLE001 — 한 문서의 실패가 전체를 멈추지 않는다
@@ -118,7 +123,9 @@ class Pipeline:
                          (str(path), document_id))
         self.con.commit()
         self.summary["documents"] += 1
-        return {"document_id": document_id, "status": "ok", "pages": pages}
+        if warning:                                       # 경고만으로는 종료 코드가 1 이 되지 않는다
+            self.summary["warnings"].append({"document_id": document_id, "source_name": source_name, "warning": warning})
+        return {"document_id": document_id, "status": "ok", "pages": pages, "warning": warning}
 
     def _document_row(self, document_id: str, path: Path, source_name: str, status: str, error: str | None) -> dict:
         rel = None
@@ -129,7 +136,7 @@ class Pipeline:
                 rel = None
         return {"document_id": document_id, "source_path": str(path), "source_rel": rel, "source_name": source_name,
                 "work_date": self.site.page_meta(source_name, 0).get("date"), "n_pages": None, "status": status,
-                "error": error, "created_at": datetime.now(UTC).isoformat(timespec="seconds")}
+                "error": error, "warning": None, "created_at": datetime.now(UTC).isoformat(timespec="seconds")}
 
     def _fail_document(self, document_id: str, path: Path, source_name: str, e: BaseException) -> dict:
         err = _error_text(e)
@@ -140,7 +147,7 @@ class Pipeline:
 
     # ── 페이지 하나 ────────────────────────────────────────────────────────
     def process_page(self, document_id: str, source_name: str, page_no: int, gray: np.ndarray,
-                     template: str | None = None, strict: bool = False) -> dict:
+                     template: str | None = None, strict: bool = False, source_path: Path | None = None) -> dict:
         """쪽 하나. 예외가 나면 그 쪽의 행만 되돌리고(SAVEPOINT) status=error 로 남긴다. strict 면 그대로 올린다."""
         if not self.con.in_transaction:
             self.con.execute("BEGIN")                     # SAVEPOINT 가 바깥 트랜잭션 안에 있어야 RELEASE 가 커밋이 되지 않는다
@@ -153,7 +160,7 @@ class Pipeline:
                 "aligned_image": None, "homography": None, "render_dpi": None,
                 "work_date": meta.get("date"), "status": "unknown_form", "error": None}
         try:
-            out = self._process_page(page, source_name, gray, template)
+            out = self._process_page(page, source_name, gray, template, source_path)
             self.con.execute("RELEASE SAVEPOINT page")
             return out
         except Exception as e:                            # noqa: BLE001
@@ -167,7 +174,8 @@ class Pipeline:
             page.update(status="error", error=err)        # 어디까지 갔는지(양식·정합)는 남긴다
             return self._close_page(page)
 
-    def _process_page(self, page: dict, source_name: str, gray: np.ndarray, template: str | None = None) -> dict:
+    def _process_page(self, page: dict, source_name: str, gray: np.ndarray, template: str | None = None,
+                      source_path: Path | None = None) -> dict:
         s = self.summary
         page_id, document_id, page_no = page["page_id"], page["document_id"], page["page_no"]
         meta = self.site.page_meta(source_name, page_no)
@@ -206,8 +214,14 @@ class Pipeline:
         upsert(self.con, "doc_page", page)      # doc_field 가 참조하므로 먼저 적는다
         meta = _page_meta(self.con, self.site, source_name, page_no, page_id, tpl)   # 검수값 > 라벨 > 파일명
         handler = self._handler(tpl.handler)
+        # 원본 쪽은 인식기가 원본 해상도 규격을 원할 때만, 쪽마다 한 번 렌더링한다 (PageImages)
+        is_image = source_path is not None and Path(source_path).suffix.lower() in IMAGE_EXT
+        images = PageImages(aligned=ar.warped, source=source_path, page_no=page_no, homography=ar.homography,
+                            render_dpi=self.settings.dpi, source_dpi=self.settings.source_dpi,
+                            damaged=self.settings.damaged_pdf, source_image=gray if is_image else None)
         ctx = PageContext(self.con, self.settings, self.site, tpl, document_id, page_id, page_no, source_name,
-                          meta, ar.warped, observe_cells(ar.warped, tpl), self.recognizer, self.corrector)
+                          meta, ar.warped, observe_cells(ar.warped, tpl), self.recognizer, self.corrector,
+                          images=images)
         result = handler.load(ctx)
         page["status"] = "loaded"
         hs = s["handlers"].setdefault(tpl.handler, {})

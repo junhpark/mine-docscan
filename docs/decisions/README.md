@@ -15,3 +15,5 @@
 | [0008](0008-review-records.md) | 검수 기록은 추가 전용 파일이 원본, 기계 값과 최종 값은 따로, 정답은 눈가림 옮겨 적기 | 채택 |
 | [0009](0009-evalset-by-date.md) | 평가셋은 날짜로 나누고 한 번 정하면 바꾸지 않는다 | 채택 |
 | [0010](0010-template-versions-by-date.md) | 양식의 판은 템플릿을 따로 두고 날짜로 가린다 | 채택 |
+| [0011](0011-recognizer-input-and-runtime.md) | 인식기 입력 규격은 하나, 학습은 torch·추론은 ONNX + OpenCV, 모델은 사이트 팩에 | 채택 |
+| [0012](0012-empty-reject-and-auto-accept.md) | 숫자 인식기의 답은 셋(숫자열·빈 칸·거절), 자동 적재 기준은 검증 날짜에서 | 채택 |

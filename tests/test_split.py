@@ -110,3 +110,15 @@ def test_cli_split_commands(reviewed_day, tmp_path, capsys, monkeypatch):
     assert "저장소에 넣지 마세요" in capsys.readouterr().out and (tmp_path / "c" / sp / "labels.jsonl").exists()
     with pytest.raises(SystemExit, match="git"):
         main(["review", "export-crops", str(REPO / "out" / "crops2")] + common)
+    # 범위를 벗어난 --scale·--pad 는 아무것도 쓰지 않고 실패한다
+    for bad in (["--scale", "0"], ["--scale", "-1"], ["--scale", "7"], ["--pad", "-1"]):
+        target = tmp_path / ("bad" + "_".join(bad))
+        with pytest.raises(SystemExit):
+            main(["review", "export-crops", str(target)] + bad + common)
+        assert not list(target.rglob("*.png")) if target.exists() else True
+    # 파일 이름에 Windows 가 받지 않는 글자가 없다. 줄 수 = PNG 수
+    labels = [json.loads(x) for x in (tmp_path / "c" / sp / "labels.jsonl").read_text(encoding="utf-8").splitlines()]
+    pngs = list((tmp_path / "c" / sp).rglob("*.png"))
+    assert len(labels) == len(pngs) > 0
+    assert all(not set('<>:"\\|?*') & set(p.name) for p in pngs)
+    assert {lab["file"].split("/")[-1] for lab in labels} == {p.name for p in pngs}

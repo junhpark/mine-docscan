@@ -8,6 +8,7 @@
   MINEDOCSCAN_SITE          사이트 팩 폴더 (템플릿·마스터·라벨)
   MINEDOCSCAN_DB_URL        DB 주소 (기본: sqlite:///<work_root>/minedocscan.db)
   MINEDOCSCAN_REVIEWS       검수 기록 파일 (기본: <site>/reviews/reviews.jsonl — 사이트 팩 안, 추가 전용)
+  MINEDOCSCAN_DAMAGED_PDF   손상 PDF(라이브러리가 복구해서 연 파일)의 처리: fail(기본) | warn
 """
 from __future__ import annotations
 
@@ -25,12 +26,15 @@ class Settings:
     db_url: str | None = None
     reviews: Path | None = None          # 검수 기록(jsonl). None 이면 사이트 팩의 reviews/reviews.jsonl
     dpi: int = 200                       # 템플릿 좌표계의 해상도. 템플릿을 만든 해상도와 같아야 한다
-    recognizer: str = "null"             # recognize.REGISTRY 의 이름
+    recognizer: str = "null"             # recognize.REGISTRY 의 이름 — 기본 백엔드
+    recognizer_by_kind: dict = field(default_factory=dict)   # [recognize.by_kind] 칸 종류 → 백엔드 이름
+    recognizer_options: dict = field(default_factory=dict)   # [recognize.<백엔드>] 표 — 예: {"digits": {"model": "digits-v1"}}
     corrector: str = "none"              # correct.REGISTRY 의 이름
     auto_accept_conf: float = 0.90       # 이 신뢰도 이상이면 검수 없이 적재
     classify_min_margin: float = 1.5     # 양식 분류 1위/2위 비율이 이보다 낮으면 검수 표시
     save_aligned: bool = True
     source_dpi: int = 300                # 원본 해상도 크롭을 뜰 때 PDF 를 렌더링하는 해상도 (스캔 원본이 300 dpi)
+    damaged_pdf: str = "fail"            # 라이브러리가 복구해서 연 PDF: fail(문서 실패) | warn(처리하고 경고를 남김)
     extra: dict = field(default_factory=dict)
 
     @property
@@ -71,11 +75,14 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         reviews=_p(paths.get("reviews")),
         dpi=int(pipe.get("dpi", 200)),
         recognizer=raw.get("recognize", {}).get("backend", "null"),
+        recognizer_by_kind=dict(raw.get("recognize", {}).get("by_kind", {}) or {}),
+        recognizer_options={k: dict(v) for k, v in raw.get("recognize", {}).items() if isinstance(v, dict) and k != "by_kind"},
         corrector=raw.get("correct", {}).get("backend", "none"),
         auto_accept_conf=float(pipe.get("auto_accept_conf", 0.90)),
         classify_min_margin=float(pipe.get("classify_min_margin", 1.5)),
         save_aligned=bool(pipe.get("save_aligned", True)),
         source_dpi=int(raw.get("review", {}).get("source_dpi", 300)),
+        damaged_pdf=str(pipe.get("damaged_pdf", "fail")),
         extra=raw,
     )
     env = os.environ
@@ -89,9 +96,13 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         s.db_url = env["MINEDOCSCAN_DB_URL"]
     if env.get("MINEDOCSCAN_REVIEWS"):
         s.reviews = Path(env["MINEDOCSCAN_REVIEWS"])
+    if env.get("MINEDOCSCAN_DAMAGED_PDF"):
+        s.damaged_pdf = env["MINEDOCSCAN_DAMAGED_PDF"]
     for k, v in overrides.items():
         if v is not None:
             setattr(s, k, Path(v) if k in ("archive_root", "work_root", "site", "reviews") else v)
+    if s.damaged_pdf not in ("fail", "warn"):
+        raise ValueError(f"[pipeline] damaged_pdf (또는 MINEDOCSCAN_DAMAGED_PDF) 는 fail | warn: {s.damaged_pdf!r}")
     return s
 
 

@@ -8,7 +8,8 @@
   regress    사이트 팩의 기준 수치와 비교하는 실데이터 회귀 검사
   template   새 양식의 템플릿 뼈대 만들기
   synth      개인정보 없는 합성 사이트 팩과 스캔 문서 만들기
-  review     검수: serve(로컬 화면), stats(진행 현황), export-answers(검수값 → 정답 파일)
+  review     검수: serve(로컬 화면), stats(진행 현황), export-answers(검수값 → 정답 파일), export-crops(학습용 크롭)
+  recognizer 숫자 인식기: train(학습, torch 필요), list(사이트 팩의 모델), eval(크롭에서 바로 평가)
 
 경로는 --site / --archive-root / --work-root 또는 환경변수·설정 파일로 준다 (config.py).
 """
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -45,7 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("run", parents=[common], help="스캔 파일/폴더를 처리해 DB 에 적재")
     p.add_argument("paths", nargs="*", help="파일 또는 폴더. 없으면 archive_root 전체. 상대경로는 archive_root 기준으로도 찾는다")
-    p.add_argument("--recognizer", help="인식 백엔드 (기본: 설정값)")
+    p.add_argument("--recognizer", help="기본 인식 백엔드 ([recognize] backend 대신). [recognize.by_kind] 에 적힌 종류는 그쪽 "
+                                        "백엔드가 읽는다 — 전부를 덮는 것은 --answers(oracle)뿐")
     p.add_argument("--corrector", help="교정 백엔드 (기본: 설정값)")
     p.add_argument("--template", help="양식 분류를 건너뛰고 이 템플릿으로 처리")
     p.add_argument("--answers", help="oracle 백엔드용 정답 JSON")
@@ -97,6 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("out", help="출력 폴더 (site/, scans/, truth.json, answers.json)")
     p.add_argument("--days", type=int, default=3)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--low-cells", action="store_true",
+                   help="운반 양식 두 종을 실제처럼 낮은 칸·거친 숫자·X 표로 (숫자 인식기 시험용)")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
@@ -119,9 +124,38 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--kind", choices=["handwritten_number", "handwritten_text"], help="이 종류의 셀만")
     r.add_argument("--res", choices=["auto", "source", "aligned"], default="auto",
                    help="source = 원본 해상도(호모그래피로 다시 정합), aligned = 200 dpi 정합 이미지, auto = 원본이 닿으면 원본")
-    r.add_argument("--scale", type=float, default=1.5, help="템플릿 좌표(200 dpi) 대비 배율 (기본 1.5 = 300 dpi 원본 그대로)")
-    r.add_argument("--pad", type=int, help="셀 둘레 여유(템플릿 px). 기본은 화면과 같이 행 높이의 절반(최소 8)")
+    r.add_argument("--scale", type=float, default=1.5,
+                   help="템플릿 좌표(200 dpi) 대비 배율, 0 초과 6 이하 (기본 1.5 = 300 dpi 원본 그대로)")
+    r.add_argument("--pad", type=int, help="셀 둘레 여유(템플릿 px, 0 이상). 기본은 화면과 같이 행 높이의 절반(최소 8)")
     r.add_argument("--allow-in-repo", action="store_true", help="git 작업 트리 안에도 쓴다 (글씨가 들어 있다 — 커밋하지 말 것)")
+    r.add_argument("--include-illegible", action="store_true",
+                   help="'읽을 수 없음'(illegible)도 내보낸다 — 숫자 인식기가 '거절'로 학습한다 (labels.jsonl 의 verdict)")
+
+    p = sub.add_parser("recognizer", parents=[common], help="숫자 인식기: 학습·목록")
+    nsub = p.add_subparsers(dest="recognizer_command", required=True)
+    n = nsub.add_parser("train", parents=[common], help="크롭 + 합성 셀로 학습 → <site>/models/<이름>/ (torch 필요: .[train])")
+    n.add_argument("--crops", help="review export-crops 로 내보낸 폴더 (test 줄이 있으면 거절). 없으면 합성 셀만으로")
+    n.add_argument("--name", required=True, help="모델 이름 (영문·숫자·.-_). 같은 이름이 있으면 멈춘다")
+    n.add_argument("--synthetic", type=int, help="합성 셀 수 (기본: 실제 셀이 있으면 4000, 없으면 8000)")
+    n.add_argument("--seed", type=int, default=0)
+    n.add_argument("--val-share", type=float, default=0.2, help="검증으로 떼는 train 날짜의 비율 (기본 0.2)")
+    n.add_argument("--target-auto-error", type=float, default=0.01,
+                   help="자동 적재 오류율의 목표 (검증 날짜, 기본 0.01). 이 이하인 가장 낮은 임계값을 고른다")
+    n.add_argument("--min-val-auto", type=int, default=100,
+                   help="기준을 정하려면 그 임계값에서 자동 적재된 검증 칸이 이만큼은 있어야 한다 (기본 100). 모자라면 자동 적재 없음")
+    n.add_argument("--steps", type=int, default=2500, help="학습 스텝 (배치 64, 기본 2500 — CPU 4코어에서 약 1분 반)")
+    n.add_argument("--synthetic-geometry", metavar="WxH[,WxH…]",
+                   help="합성 칸 크기(템플릿 px, doc_field bbox). 실제 셀이 없을 때만 쓴다 (있으면 실제 칸 크기). 기본 92x21")
+    n.add_argument("--out", help="모델 폴더를 직접 지정 (기본: <site>/models/<이름>)")
+    n.add_argument("--allow-in-repo", action="store_true", help="git 작업 트리 안에도 쓴다 (합성 셀만으로 만든 시험용 모델)")
+    nsub.add_parser("list", parents=[common], help="사이트 팩의 모델과 카드 요약")
+    n = nsub.add_parser("eval", parents=[common], help="크롭 폴더에서 바로 평가 (파이프라인을 돌리지 않는다)")
+    n.add_argument("--crops", required=True, help="review export-crops 로 내보낸 폴더")
+    n.add_argument("--model", required=True, help="모델 이름(<site>/models/<이름>) 또는 폴더 경로")
+    n.add_argument("--split", choices=["val", "test", "train"], default="val",
+                   help="val = 카드의 검증 규칙이 고르는 train 날짜 (기본), train = 그 나머지, test = test 로 내보낸 폴더 — 마지막에 한 번")
+    n.add_argument("--errors", nargs="?", const="", metavar="DIR",
+                   help="틀린 칸을 한 장에 모은 그림 (기본 WORK_ROOT/recognizer-errors). git 작업 트리 안이면 거절")
     return ap
 
 
@@ -146,7 +180,7 @@ def _need_site(s: Settings):
 def cmd_info(a) -> int:
     from .correct import REGISTRY as CORRECTORS
     from .handlers import REGISTRY as HANDLERS
-    from .recognize import REGISTRY as RECOGNIZERS
+    from .recognize import available as recognizers_available
 
     s = _settings(a)
     data = {
@@ -155,13 +189,25 @@ def cmd_info(a) -> int:
                      "archive_root": str(s.archive_root) if s.archive_root else None,
                      "work_root": str(s.work_root), "db_url": s.resolved_db_url, "dpi": s.dpi,
                      "recognizer": s.recognizer, "corrector": s.corrector, "auto_accept_conf": s.auto_accept_conf},
-        "backends": {"recognizers": sorted(RECOGNIZERS), "correctors": sorted(CORRECTORS), "handlers": sorted(HANDLERS)},
+        "backends": {"recognizers": recognizers_available(), "correctors": sorted(CORRECTORS), "handlers": sorted(HANDLERS)},
         "site": None,
     }
     lines = [f"minedocscan {__version__}"] + [f"  {k}: {v}" for k, v in data["settings"].items()]
     lines.append("백엔드: " + ", ".join(f"{k}={v}" for k, v in data["backends"].items()))
-    if s.site and Path(s.site).is_dir():
-        site = _need_site(s)
+    site = _need_site(s) if s.site and Path(s.site).is_dir() else None
+    data["recognizer"] = _describe_recognizer(s, site)
+    rec = data["recognizer"]
+    if "error" in rec:
+        lines.append(f"인식기: 준비할 수 없습니다 — {rec['error']}")
+    else:
+        for kind, d in rec["by_kind"].items():
+            m = (f" — 모델 {d['model']} ({d['path']}), 규격 {d['spec']}, 자동 적재 기준 "
+                 f"{d['auto_accept_conf'] if d['auto_accept_conf'] is not None else '없음'} ({d['auto_accept_source']}"
+                 + (f", 검증 오류율 95 % 상한 {d['auto_accept_upper95']:.1%}" if d.get("auto_accept_upper95") is not None else "")
+                 + "), "
+                 f"학습 셀 {d['train_cells']} + 합성 {d['synthetic_cells']}") if "model" in d else ""
+            lines.append(f"인식기 [{kind}]: {d['backend']}{m}")
+    if site is not None:
         tpls = [{"name": t.name, "title": t.title, "handler": t.handler, "regions": len(t.regions),
                  "cells": len(t.cells()) + len(t.fields), "status": "cells" if t.has_cells else "classify_only",
                  "family": t.family, "valid_from": t.valid_from, "valid_to": t.valid_to}
@@ -178,9 +224,28 @@ def cmd_info(a) -> int:
     return 0
 
 
+def _describe_recognizer(s: Settings, site) -> dict:
+    """info: 칸 종류마다 어느 백엔드가 받는지, 숫자 모델이면 이름·규격·자동 적재 기준·학습 셀 수."""
+    from .recognize import KINDS, build_recognizer
+
+    try:
+        rec = build_recognizer(s, site)
+    except (KeyError, ValueError, FileNotFoundError) as e:
+        return {"error": str(e)}
+
+    def one(b) -> dict:
+        d = {"backend": b.name}
+        if callable(getattr(b, "describe", None)):
+            d |= b.describe()
+        return d
+
+    backend_for = getattr(rec, "backend_for", lambda _k: rec)
+    return {"by_kind": {k: one(backend_for(k)) for k in KINDS}}
+
+
 def cmd_run(a) -> int:
     from .pipeline import Pipeline
-    from .recognize import OracleRecognizer, get_recognizer, load_answers_json
+    from .recognize import OracleRecognizer, build_recognizer, load_answers_json
     from .report import build_report, format_report, xcheck_by_date
 
     s = _settings(a, recognizer=a.recognizer, corrector=a.corrector)
@@ -188,8 +253,6 @@ def cmd_run(a) -> int:
     paths = [_resolve(p, s) for p in a.paths] or ([s.archive_root] if s.archive_root else [])
     if not paths:
         raise SystemExit("처리할 경로가 없습니다: PATH 를 주거나 archive_root 를 지정하세요")
-    if a.fresh and s.resolved_db_url.startswith("sqlite:///"):
-        Path(s.resolved_db_url[len("sqlite:///"):]).unlink(missing_ok=True)
     if a.answers or a.inspection_csv:
         answers = load_answers_json(a.answers) if a.answers else {}
         if a.inspection_csv:
@@ -200,7 +263,12 @@ def cmd_run(a) -> int:
     elif s.recognizer == "oracle":
         raise SystemExit("oracle 백엔드는 --answers 또는 --inspection-csv 가 필요합니다")
     else:
-        recognizer = get_recognizer(s.recognizer)
+        try:
+            recognizer = build_recognizer(s, site)
+        except (KeyError, ValueError, FileNotFoundError) as e:
+            raise SystemExit(f"인식 백엔드를 준비할 수 없습니다: {e}") from e
+    if a.fresh and s.resolved_db_url.startswith("sqlite:///"):   # 인식기(모델)를 준비한 뒤에 지운다 — 모델이 없으면 DB 는 그대로
+        Path(s.resolved_db_url[len("sqlite:///"):]).unlink(missing_ok=True)
     pipe = Pipeline(s, site=site, recognizer=recognizer)
     files = pipe.expand(paths)
     if not files:
@@ -211,7 +279,8 @@ def cmd_run(a) -> int:
         if not a.json:
             el = time.monotonic() - t0
             eta = el / i * (len(files) - i)
-            what = ("건너뜀" if r.get("skipped") else f"실패: {r['error']}" if r["status"] == "failed" else f"{len(r['pages'])}쪽")
+            what = ("건너뜀" if r.get("skipped") else f"실패: {r['error']}" if r["status"] == "failed" else f"{len(r['pages'])}쪽"
+                    + (f" · 경고: {r['warning']}" if r.get("warning") else ""))
             print(f"[{i}/{len(files)}] {f.name} · {what} · 지난 {_hms(el)} · 남은 약 {_hms(eta)}", file=sys.stderr)
     summary = pipe.finalize()
     rep = build_report(pipe.con)
@@ -223,6 +292,8 @@ def cmd_run(a) -> int:
         text += "\n실패한 문서:\n" + "\n".join(f"  {d['source_name']}: {d['error']}" for d in summary["failed"])
     if summary["page_errors"]:
         text += "\n오류 난 쪽:\n" + "\n".join(f"  {d['page_id']}: {d['error']}" for d in summary["page_errors"])
+    if summary["warnings"]:
+        text += "\n경고가 있는 문서:\n" + "\n".join(f"  {d['source_name']}: {d['warning']}" for d in summary["warnings"])
     _emit(a, {"run": summary, "report": rep}, text)
     return 1 if (summary["failed"] or summary["page_errors"]) else 0
 
@@ -293,9 +364,14 @@ def cmd_eval(a) -> int:
              f"자동 적재율 {f['auto_rate']}"
              f" (DB 에 없는 정답 {f['answers_not_in_db']}개)",
              f"  정답에 값이 있는 셀 {f['n_value']}개 정확도 {f['accuracy_value']}, 빈 칸 {f['n_empty']}개 정확도 {f['accuracy_empty']}"]
+    ae = f["auto_error"]
+    lines.append(f"  자동 적재 오류율(인식기가 자동 적재한 칸, 기계 값): {ae['wrong']}/{ae['auto']} = {ae['rate']} "
+                 f"(95% {ae['ci95'][0]}–{ae['ci95'][1]}; 값 {ae['auto_value']}, 빈 칸 {ae['auto_empty']}; "
+                 f"잉크 없음으로 확정 {ae['ink_auto']})")
     for k, v in f["by_field_kind"].items():
+        e = v["auto_error"]
         lines.append(f"  {k}: n={v['n']} CER {v['cer']} 정확도 {v['field_accuracy']} (값 {v['accuracy_value']} / 빈 칸 "
-                     f"{v['accuracy_empty']}) 자동 {v['auto_rate']}")
+                     f"{v['accuracy_empty']}) 자동 {v['auto_rate']} · 자동 적재 오류 {e['wrong']}/{e['auto']}")
     lines.append(f"값 유무 판단 (검수 {pr['n']}셀): 정밀도 {pr['precision']}, 재현율 {pr['recall']} "
                  f"(tp {pr['tp']}, fp {pr['fp']}, fn {pr['fn']}, tn {pr['tn']})")
     if "insp_daily" in data:
@@ -319,6 +395,9 @@ def cmd_regress(a) -> int:
         lines.append("기준과 같습니다.")
     else:
         lines.append("기준이 아직 없습니다.")
+    if res["new_keys"]:
+        lines.append(f"기준에 없던 새 항목 {len(res['new_keys'])}개 (어긋남으로 치지 않는다 — --update 로 기준에 넣는다): "
+                     + ", ".join(res["new_keys"][:12]) + (" …" if len(res["new_keys"]) > 12 else ""))
     if res["updated"]:
         lines.append(f"기준을 저장했습니다: {res['baseline']}")
     _emit(a, {k: v for k, v in res.items() if k != "report"} | {"report": res["report"]}, "\n".join(lines))
@@ -343,7 +422,7 @@ def cmd_template(a) -> int:
 def cmd_synth(a) -> int:
     from .tools.synth import generate
 
-    r = generate(a.out, days=a.days, seed=a.seed)
+    r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")
@@ -426,17 +505,126 @@ def cmd_review(a) -> int:
         s, site, con, _imported = _review_db(a)
         try:
             r = export_crops(con, site, s, a.out, split=a.split, kind=a.kind, res=a.res, out_scale=a.scale, pad=a.pad,
-                             allow_in_repo=a.allow_in_repo)
-        except ExportError as e:
+                             allow_in_repo=a.allow_in_repo, include_illegible=a.include_illegible)
+        except (ExportError, ValueError) as e:
             raise SystemExit(str(e)) from e
+        ill = "읽을 수 없음 포함" if a.include_illegible else f"읽을 수 없음 제외 {r['skipped_illegible']}개"
         _emit(a, r, f"크롭 {r['written']}개를 썼습니다: {r['out']} — 분할별 {r['by_split']}, 해상도별 {r['by_source']}, "
-                    f"읽을 수 없음 제외 {r['skipped_illegible']}개\n저장소에 넣지 마세요 — 현장의 글씨가 들어 있습니다.")
+                    f"{ill}\n저장소에 넣지 마세요 — 현장의 글씨가 들어 있습니다.")
         return 0
     raise SystemExit(f"알 수 없는 review 명령: {a.review_command}")
 
 
+_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _geometry(text: str | None) -> list[tuple[int, int]] | None:
+    if not text:
+        return None
+    out = []
+    for g in text.split(","):
+        try:
+            w, h = (int(v) for v in g.lower().split("x"))
+        except ValueError:
+            raise SystemExit(f"--synthetic-geometry 는 WxH[,WxH…] (예: 92x21,112x22): {text}") from None
+        if not (8 <= w <= 2000 and 8 <= h <= 1000):
+            raise SystemExit(f"--synthetic-geometry 의 칸 크기가 범위 밖입니다: {g}")
+        out.append((w, h))
+    return out
+
+
+def cmd_recognizer(a) -> int:
+    from .recognize.digits.model import list_models, models_dir
+
+    s = _settings(a)
+    if a.recognizer_command == "list":
+        site = _need_site(s)
+        models = list_models(site.root)
+        lines = [f"모델 ({models_dir(site.root)}): {len(models)}개"]
+        for m in models:
+            lines.append(f"  {m['name']:<20} {m['created_at'] or '-':<21} {m['spec']:<34} 기준 {m['threshold']}  "
+                         f"학습 {m['train_cells']}셀/{m['train_dates']}일 + 합성 {m['synthetic_cells']} · "
+                         f"검증({m['val_source']}) {m['val_cells']}셀 값 {m['val_value_acc']} 빈 칸 {m['val_empty_acc']}"
+                         + (f"  [{m['error']}]" if m.get("error") else ""))
+        _emit(a, {"models": models}, "\n".join(lines))
+        return 0
+    if a.recognizer_command == "train":
+        from .recognize.digits.train import TrainArgs, TrainError, train
+
+        if not _MODEL_NAME.match(a.name):
+            raise SystemExit(f"--name 은 영문·숫자·.-_ (64자 이하): {a.name}")
+        site = _need_site(s) if (s.site or not a.out) else None
+        out = Path(a.out) if a.out else models_dir(site.root) / a.name
+        args = TrainArgs(name=a.name, steps=a.steps, synthetic=a.synthetic, seed=a.seed, val_share=a.val_share,
+                         target_auto_error=a.target_auto_error, min_val_auto=a.min_val_auto,
+                         geometry=_geometry(a.synthetic_geometry))
+        trips_max = site.option("haul", "trips_max") if site else None
+        try:
+            card = train(a.crops, out, args, split_salt=site.split_salt if site else "synthetic",
+                         trips_max=None if trips_max is None else int(trips_max), allow_in_repo=a.allow_in_repo)
+        except TrainError as e:
+            raise SystemExit(str(e)) from e
+        v = card["validation"]
+        aa = card["auto_accept"]
+        thr = (f"{aa['threshold']} (검증에서 자동 적재 {aa['auto']}칸 중 오류 {aa['errors']}, 오류율 95 % 상한 {aa['upper95']:.1%})"
+               if aa["met"] else f"없음 ({aa.get('reason') or '목표를 만족하는 임계값이 없다'} — 자동 적재하지 않는다)")
+        _emit(a, {"model": str(out), "card": card},
+              f"모델을 만들었습니다: {out}\n"
+              f"  검증({v['source']}) {v['cells']}셀: 값 있는 칸 {v['score']['value']['accuracy']}, "
+              f"빈 칸 {v['score']['empty']['accuracy']} · 온도 {card['temperature']} · 자동 적재 기준 {thr}\n"
+              f"  설정: [recognize.by_kind] handwritten_number = \"digits\",  [recognize.digits] model = \"{a.name}\"")
+        return 0
+    if a.recognizer_command == "eval":
+        return _recognizer_eval(a, s)
+    raise SystemExit(f"알 수 없는 recognizer 명령: {a.recognizer_command}")
+
+
+def _recognizer_eval(a, s: Settings) -> int:
+    from .recognize.digits.evaluate import EvalError, evaluate
+    from .recognize.digits.model import resolve_model
+
+    site = _need_site(s) if s.site and Path(s.site).is_dir() else None
+    try:
+        model_dir = resolve_model(a.model, site.root if site else None)
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from e
+    opts = (s.recognizer_options or {}).get("digits", {})
+    thr = opts.get("auto_accept_conf")                       # 설정이 카드의 기준보다 먼저 (4.6)
+    errors = None if a.errors is None else (Path(a.errors) if a.errors else Path(s.work_root) / "recognizer-errors")
+    trips_max = site.option("haul", "trips_max") if site else None
+    try:
+        r = evaluate(a.crops, model_dir, split=a.split, threshold=None if thr is None else float(thr), errors=errors,
+                     trips_max=None if trips_max is None else int(trips_max))
+    except (EvalError, ValueError) as e:
+        raise SystemExit(str(e)) from e
+    r.pop("predictions")                                      # 칸마다의 답은 내놓지 않는다 (4.7)
+    acc = r["accuracy"]
+    at = r["at_threshold"]
+    lines = [f"모델 {r['model']} · 분할 {r['split']} · {r['cells']}셀 ({r['dates']}일) · 규격 {r['spec']}",
+             f"정확도: 전체 {acc['all']['accuracy']} ({acc['all']['correct']}/{acc['all']['n']}), "
+             f"값 있는 칸 {acc['value']['accuracy']} ({acc['value']['correct']}/{acc['value']['n']}), "
+             f"빈 칸 {acc['empty']['accuracy']} ({acc['empty']['correct']}/{acc['empty']['n']}), "
+             f"읽을 수 없음 {acc['illegible']['accuracy']} ({acc['illegible']['correct']}/{acc['illegible']['n']})",
+             "값별: " + ", ".join(f"{v['value'] or '빈칸'} {v['correct']}/{v['n']}" for v in r["by_value"]),
+             "많이 틀린 쌍(정답→읽은 값): " + (", ".join(f"{c['truth'] or '빈칸'}→{c['read'] or '빈칸'} {c['n']}"
+                                                   for c in r["confusions"]) or "-"),
+             "신뢰도 구간별 정확도: " + ", ".join(f"[{b['bin'][0]},{b['bin'][1]}) {b['n']}셀 평균 {b['mean_conf']} 정확 {b['accuracy']}"
+                                        for b in r["calibration"] if b["n"]),
+             "임계값별 자동 적재 (적재율 · 오류 분자/분모 · 95% 구간):"]
+    lines += [f"  {t['threshold']:<6} {t['auto_rate']:<7} {t['errors']}/{t['auto']} {t['error_ci95']}" for t in r["thresholds"]]
+    lines.append(f"모델의 기준 {r['threshold'] if r['threshold'] is not None else '없음(자동 적재 없음)'} ({r['threshold_source']})"
+                 + ("" if at is None else f": 자동 적재 {at['auto']}/{r['cells']} = {at['auto_rate']}, "
+                                          f"오류 {at['errors']}/{at['auto']} {at['error_ci95']}")
+                 + f" · 읽을 수 없음 칸 중 자동 적재될 것 {r['illegible']['auto']}/{r['illegible']['n']}")
+    if r["errors_image"]:
+        lines.append(f"틀린 칸 {r['errors']}개 모아 보기: {r['errors_image']} (현장 글씨 — 저장소·문서에 넣지 말 것)")
+    _emit(a, r, "\n".join(lines))
+    return 0
+
+
 COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "pages": cmd_pages, "eval": cmd_eval,
-            "regress": cmd_regress, "template": cmd_template, "synth": cmd_synth, "review": cmd_review}
+            "regress": cmd_regress, "template": cmd_template, "synth": cmd_synth, "review": cmd_review,
+            "recognizer": cmd_recognizer}
 
 
 def main(argv: list[str] | None = None) -> int:

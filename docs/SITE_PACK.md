@@ -12,6 +12,7 @@
   templates/<양식>/reference.png   기준 이미지 (빈 양식 또는 깨끗한 스캔 한 장, 200 dpi)
   labels/pages.json                사람이 붙인 페이지 메타 (선택)
   reviews/reviews.jsonl            검수 기록 — 사람이 입력한 값 (추가 전용, 도구가 쓴다)
+  models/<이름>/                   숫자 인식기 모델 (선택, `minedocscan recognizer train` 이 쓴다): model.onnx, card.json, train-log.jsonl
   expected/regression.json         회귀 기준 수치 (선택, `minedocscan regress --update` 가 쓴다)
 ```
 
@@ -30,9 +31,18 @@ date_from_filename = '(?P<yyyy>\d{4})-(?P<mm>\d{2})-(?P<dd>\d{2})'
 # 현장의 장비 구분 → ISO 23725 장비 유형. 대응을 확인하지 못한 구분은 적지 않는다 (NULL 로 남는다)
 "Loader" = "Loader"
 
+[haul]
+# 운반 횟수의 범위. 이보다 큰 값은 숫자 인식기의 신뢰도가 높아도 검수로 보낸다 (ADR 0012). 없으면 검사하지 않는다
+trips_max = 40
+
 [crosscheck.haul]
 # 교차검증에서 뺄 광종 (한쪽 양식에만 있는 행)
 exclude_materials = ["SURFACE"]
+
+[recognize.digits]
+# 숫자 인식기 모델 (models/<이름>). 설정 파일의 같은 항목이 이긴다 — 현장 PC 마다 다르게 둘 필요가 없으면 여기에.
+# 자동 적재 기준을 카드와 다르게 하려면 설정 파일의 [recognize.digits] auto_accept_conf (사이트 팩에는 두지 않는다)
+# model = "digits-v1"
 
 [eval]
 # 평가셋 분할 (ADR 0009): 날짜 단위, hash(split_salt, 날짜) < test_share 면 test. 없으면 소금값은 사이트 이름, 비율 0.2.
@@ -144,6 +154,20 @@ fields:                            # 표 밖의 자유 필드
 `verdict` 는 `value`(적힌 값), `empty`(빈 칸), `illegible`(읽을 수 없음). `source` 부터는 DB 없이도 읽을 수 있게 하는 문맥이고,
 `machine` 은 검수 당시 기계가 낸 값이다. 템플릿을 고쳐 `bbox` 가 달라진 기록은 `review stats` 가 건수를 보여 준다 (적용은 한다).
 실제 값(이름·차량번호)이 들어가므로 저장소에 넣지 않는다.
+
+## models/<이름>/
+
+`minedocscan recognizer train --crops … --name <이름>` 이 만든다 (같은 이름이 있으면 멈춘다 — 덮어쓰지 않는다). 현장의 손글씨로 학습한 것이므로
+현장의 데이터다. **저장소에 넣지 않는다** (ADR 0011).
+
+- `model.onnx` — 추론에 쓰는 망. OpenCV(`cv2.dnn`)로 읽는다. 배치 1 고정.
+- `card.json` — 모델 카드: 이름, 만든 때, 코드 버전, 크롭 규격(`spec` — `digits` 백엔드가 그대로 선언한다), 입력 크기, 문자, 구조와 학습 인자, 씨앗,
+  학습 데이터 요약(분할별 셀 수·날짜 수·값별 개수·합성 셀 수), 검증 성적(OpenCV 로 다시 읽어 잰 것), 온도, 자동 적재 기준과 임계값별 표,
+  라이브러리 버전, `model.onnx` 의 SHA-256 (다르면 백엔드가 받지 않는다). 이미지·이름·차량번호·검수자는 적지 않는다.
+- `train-log.jsonl` — 스텝별 손실·검증 정확도 (값은 없다).
+
+`minedocscan recognizer list` 가 모델과 카드 요약을 보여 준다. 고르는 법은 설정 `[recognize.by_kind] handwritten_number = "digits"` +
+`[recognize.digits] model = "<이름>"` (또는 위의 `site.toml` 항목). 모델이 없으면 `run` 이 시작할 때 멈춘다.
 
 ## 새 양식을 추가하는 절차
 

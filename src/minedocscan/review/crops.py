@@ -1,8 +1,9 @@
 """검수 화면용 크롭. 요청이 올 때 잘라 낸다. 따로 저장하지 않는다.
 
 좌표는 전부 템플릿 좌표계(doc_field 의 bbox)다. 원본에 닿으면(아카이브가 연결된 컴퓨터) 쪽의 호모그래피로 원본을
-높은 해상도로 렌더링해 그 셀만 정합하고(imaging/hires.py, source), 아니면 200 dpi 정합 이미지에서 자른다(aligned).
-어느 쪽을 썼는지 같이 돌려준다 (tasks/0002 4.5). 읽기는 imaging/io.py 를 쓴다 (한글 경로).
+높은 해상도로 렌더링해 그 셀만 정합하고(source), 아니면 200 dpi 정합 이미지에서 자른다(aligned).
+어느 쪽을 썼는지 같이 돌려준다 (tasks/0002 4.5). 잘라 내는 구현은 파이프라인·내보내기와 같은 것이다
+(imaging/cropspec.py — tasks/0003 4.1). 읽기는 imaging/io.py 를 쓴다 (한글 경로).
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from ..imaging.hires import cell_from_source
+from ..imaging.cropspec import CropSpec, CropUnavailable, PageImages, auto_pad, crop_box, crop_cell
 from ..imaging.io import imread_gray, resolve_source
 
 
@@ -46,9 +47,50 @@ def aligned_image(settings, row: sqlite3.Row) -> np.ndarray:
     return _load(str(path), path.stat().st_mtime)
 
 
-def _clip(img: np.ndarray, x0: int, y0: int, x1: int, y1: int) -> np.ndarray:
-    h, w = img.shape[:2]
-    return img[max(0, y0):min(h, y1), max(0, x0):min(w, x1)]
+def page_images(settings, r: sqlite3.Row) -> PageImages:
+    """DB 의 쪽 행(field_info)에서 그 쪽의 그림. 파이프라인이 만든 PageImages 와 같은 그림이 된다:
+    정합 이미지는 그때 저장한 PNG(무손실), 원본은 같은 파일·같은 쪽·같은 호모그래피(JSON 은 float 를 그대로 돌려준다)."""
+    src = resolve_source(r["source_path"], r["source_rel"], settings.archive_root)
+    return PageImages(aligned_loader=lambda: aligned_image(settings, r), source=src, page_no=r["page_no"],
+                      homography=json.loads(r["homography"]) if r["homography"] else None,
+                      render_dpi=r["render_dpi"] or settings.dpi, source_dpi=settings.source_dpi,
+                      damaged=settings.damaged_pdf,
+                      source_missing=f"원본에 닿을 수 없습니다: {r['source_path']} (archive_root 와 source_rel 을 확인하세요)")
+
+
+def _with_fallback(settings, r: sqlite3.Row, res: str, make) -> tuple[np.ndarray, str]:
+    """res: auto(원본이 닿으면 원본, 아니면 정합 이미지) | source | aligned. make(images, res) → 배열.
+    돌려주는 값: (회색조 이미지, 실제로 쓴 res)."""
+    if res not in ("auto", "source", "aligned"):
+        raise ValueError(f"res 는 auto | source | aligned: {res}")
+    images = page_images(settings, r)
+    if res in ("auto", "source") and images.has_source:
+        try:
+            return make(images, "source"), "source"
+        except (OSError, ValueError, KeyError, RuntimeError) as e:
+            if res == "source":
+                raise CropError(f"원본에서 뜰 수 없습니다: {type(e).__name__}: {e}") from e
+    elif res == "source":
+        raise CropError(f"원본에 닿을 수 없습니다: {r['source_path']} (archive_root 와 source_rel 을 확인하세요)")
+    try:
+        return make(images, "aligned"), "aligned"
+    except CropUnavailable as e:
+        raise CropError(str(e)) from e
+
+
+def crop_region(settings, r: sqlite3.Row, bbox: tuple[int, int, int, int], out_scale: float = 1.0,
+                res: str = "auto") -> tuple[np.ndarray, str]:
+    """템플릿 좌표의 상자 bbox 를 out_scale 배 크기로. 돌려주는 값: (회색조 이미지, "source" 또는 "aligned")."""
+    return _with_fallback(settings, r, res, lambda im, rs: crop_box(im, bbox, out_scale, rs))
+
+
+def spec_crop(settings, r: sqlite3.Row, spec_res: str, scale: float, pad: int | None) -> tuple[np.ndarray, CropSpec]:
+    """셀 하나를 규격대로 (spec_res 는 auto | source | aligned). 돌려주는 값: (배열, 실제로 쓴 규격).
+    파이프라인이 인식기에 넘기는 배열과 화소까지 같다 (imaging/cropspec.crop_cell)."""
+    bbox = (r["x0"], r["y0"], r["x1"], r["y1"])
+    img, used = _with_fallback(settings, r, spec_res,
+                               lambda im, rs: crop_cell(im, bbox, CropSpec(rs, scale, pad)))
+    return img, CropSpec(used, scale, pad)
 
 
 def _png(img: np.ndarray) -> bytes:
@@ -60,32 +102,7 @@ def _png(img: np.ndarray) -> bytes:
 
 def _pad(r: sqlite3.Row, pad: int | None) -> int:
     """여유 폭. 실제 양식은 행 높이가 27 px 쯤이라 고정 6 px 로는 칸 선을 넘은 획이 잘린다 → 행 높이의 절반, 최소 8 px."""
-    return pad if pad is not None else max(8, (r["y1"] - r["y0"]) // 2)
-
-
-def crop_region(settings, r: sqlite3.Row, bbox: tuple[int, int, int, int], out_scale: float = 1.0,
-                res: str = "auto") -> tuple[np.ndarray, str]:
-    """템플릿 좌표의 bbox 를 out_scale 배 크기로. res: auto(원본이 닿으면 원본) | source | aligned.
-    돌려주는 값: (회색조 이미지, "source" 또는 "aligned")."""
-    if res not in ("auto", "source", "aligned"):
-        raise ValueError(f"res 는 auto | source | aligned: {res}")
-    src = resolve_source(r["source_path"], r["source_rel"], settings.archive_root) if res != "aligned" else None
-    if src is not None and r["homography"]:
-        try:
-            img = cell_from_source(src, r["page_no"], np.array(json.loads(r["homography"])), r["render_dpi"] or settings.dpi,
-                                   bbox, 0, out_scale, settings.source_dpi)
-            return img, "source"
-        except (OSError, ValueError, KeyError, RuntimeError):
-            if res == "source":
-                raise
-    elif res == "source":
-        raise CropError(f"원본에 닿을 수 없습니다: {r['source_path']} (archive_root 와 source_rel 을 확인하세요)")
-    img = aligned_image(settings, r)
-    x0, y0, x1, y1 = bbox
-    crop = _clip(img, x0, y0, x1, y1)
-    if out_scale != 1 and crop.size:
-        crop = cv2.resize(crop, None, fx=out_scale, fy=out_scale, interpolation=cv2.INTER_CUBIC)
-    return crop, "aligned"
+    return pad if pad is not None else auto_pad((r["x0"], r["y0"], r["x1"], r["y1"]))
 
 
 def cell_crop(con: sqlite3.Connection, settings, field_id: str, pad: int | None = None, scale: float = 3,
@@ -94,9 +111,8 @@ def cell_crop(con: sqlite3.Connection, settings, field_id: str, pad: int | None 
     r = field_info(con, field_id)
     if r is None:
         raise KeyError(field_id)
-    pad = _pad(r, pad)
-    img, src = crop_region(settings, r, (r["x0"] - pad, r["y0"] - pad, r["x1"] + pad, r["y1"] + pad), scale, res)
-    return _png(img), src
+    img, spec = spec_crop(settings, r, res, scale, pad)
+    return _png(img), spec.res
 
 
 def cell_png(con: sqlite3.Connection, settings, field_id: str, pad: int | None = None, scale: int = 3) -> bytes:

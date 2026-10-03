@@ -21,6 +21,9 @@ def build_report(con: sqlite3.Connection) -> dict:
     return {
         "documents": one("SELECT COUNT(*) FROM doc_document"),
         "documents_by_status": _pairs(con, "SELECT status, COUNT(*) FROM doc_document GROUP BY 1 ORDER BY 1"),
+        "warnings": {"n": one("SELECT COUNT(*) FROM doc_document WHERE warning IS NOT NULL"),
+                     "documents": [r[0] for r in con.execute(
+                         "SELECT source_name FROM doc_document WHERE warning IS NOT NULL ORDER BY source_name")]},
         "pages": one("SELECT COUNT(*) FROM doc_page"),
         "pages_by_form": _pairs(con, "SELECT template_name, COUNT(*) FROM doc_page GROUP BY 1 ORDER BY 1"),
         "pages_by_status": _pairs(con, "SELECT status, COUNT(*) FROM doc_page GROUP BY 1 ORDER BY 1"),
@@ -58,7 +61,17 @@ def build_report(con: sqlite3.Connection) -> dict:
             "header_mismatch": one("SELECT COUNT(*) FROM eq_assignment_obs WHERE header_mismatch = 1"),
         },
         "equipment": one("SELECT COUNT(*) FROM eq_equipment"),
+        # 수기 칸을 값으로 만든 주체별: 칸 수, 기계가 자동 적재한 수(status_raw), 지금 검수 대기·검수된 수
+        "fields_by_backend": _by_backend(con),
     }
+
+
+def _by_backend(con: sqlite3.Connection) -> dict:
+    return {("unknown" if r[0] is None else r[0]): {"fields": r[1], "auto": r[2] or 0, "pending": r[3] or 0,
+                                                     "reviewed": r[4] or 0}
+            for r in con.execute("SELECT backend, COUNT(*), SUM(status_raw = 'auto'), SUM(review_status = 'pending'), "
+                                 "SUM(review_status = 'reviewed') FROM doc_field WHERE kind LIKE 'handwritten%' "
+                                 "GROUP BY 1 ORDER BY 1")}
 
 
 def _agreement(con: sqlite3.Connection, log_col: str, matrix_col: str) -> dict:
@@ -149,7 +162,8 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
         return ", ".join(f"{k} {v}" for k, v in d.items()) or "-"
 
     lines = [
-        f"문서 {rep['documents']}건 ({kv(rep['documents_by_status'])})",
+        f"문서 {rep['documents']}건 ({kv(rep['documents_by_status'])})"
+        + (f" — 경고 {rep['warnings']['n']}건: {', '.join(rep['warnings']['documents'])}" if rep["warnings"]["n"] else ""),
         f"페이지 {rep['pages']}장 — 상태: {kv(rep['pages_by_status'])}",
         "양식별 페이지: " + kv(rep["pages_by_form"]),
         "정합:",
@@ -160,6 +174,8 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
     f, i, h = rep["fields"], rep["inspection"], rep["haul"]
     lines += [
         f"필드 {f['total']}개 (값 있음 {f['with_value']}, 검수 대기 {f['pending']})",
+        "수기 칸 백엔드별: " + (", ".join(f"{b} {v['fields']} (자동 {v['auto']}, 대기 {v['pending']}, 검수됨 {v['reviewed']})"
+                                       for b, v in rep["fields_by_backend"].items()) or "-"),
         f"점검 {i['rows']}행 — 자동 적재 {i['auto']}, 이상 유 {i['abnormal_yes']} / 무 {i['abnormal_no']} / "
         f"판정 불가 {i['abnormal_undecided']}",
         f"운반 셀 {h['cells']}개 — 값 있음 {h['filled']} ({kv(h['filled_by_role'])}), 횟수 인식 {h['with_trips']}",

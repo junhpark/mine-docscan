@@ -179,3 +179,5 @@ def test_number_values_are_normalized(srv):
     assert con.execute("SELECT value_final FROM doc_field WHERE field_id=?", (fid,)).fetchone()[0] == "7"
     html = _get(base + "/")[2].decode()
     assert "isComposing" in html and "ev.repeat" in html and "ev.altKey" in html      # 후보 선택은 Alt+숫자
+    assert "ev.code" in html and "Digit[1-9]" in html                              # macOS Option+숫자 (ev.key 는 '™')
+    assert "X 표·지운 칸·이웃 칸에서 넘어온 글씨는 비워 두고" in html

@@ -17,7 +17,8 @@ from ..correct import Corrector
 from ..forms.sitepack import SitePack
 from ..forms.template import Template
 from ..imaging.cells import CellObs
-from ..recognize.base import CellContext, Recognition, Recognizer
+from ..imaging.cropspec import PageImages, crop_cell
+from ..recognize.base import CellContext, Recognition, Recognizer, spec_for
 from ..review.store import apply_verdict, effective
 from ..store.db import upsert
 
@@ -38,6 +39,7 @@ class PageContext:
     recognizer: Recognizer
     corrector: Corrector
     notes: dict = field(default_factory=dict)
+    images: PageImages | None = None    # 이 쪽의 그림(정합 이미지·원본). 인식기에 넘길 크롭을 규격대로 뜨는 데 쓴다
 
     @property
     def work_date(self) -> str | None:
@@ -60,7 +62,7 @@ def field_row(ctx: PageContext, o: CellObs, *, has_value: bool | None, value_raw
         "has_value": None if has_value is None else int(has_value),
         "value_raw": value_raw, "value_final": value_final, "confidence": confidence,
         "candidates": json.dumps(candidates or [], ensure_ascii=False), "backend": backend,
-        "review_status": review_status, "reviewed_by": None, "reviewed_at": None,
+        "review_status": review_status, "status_raw": review_status, "reviewed_by": None, "reviewed_at": None,
     }
 
 
@@ -77,15 +79,53 @@ def apply_reviews(ctx: PageContext, rows: list[dict]) -> list[dict]:
 
 
 def recognize(ctx: PageContext, cells: list[CellObs], choices: dict[str, list[str]] | None = None) -> list[Recognition]:
-    """셀 묶음을 인식 → 교정까지 돌린다. 값이 없는 셀은 호출 전에 걸러서 넘긴다."""
+    """셀 묶음을 인식 → 교정까지 돌린다. 값이 없는 셀은 호출 전에 걸러서 넘긴다.
+
+    크롭은 핸들러가 만들지 않는다: 인식기가 그 칸 종류에 선언한 규격(spec_for)대로 imaging/cropspec.crop_cell 로 뜬다
+    — review export-crops 가 쓰는 것과 같은 구현이라 같은 셀이면 화소까지 같다 (tasks/0003 4.1)."""
     if not cells:
         return []
     source = f"{ctx.source_name}#{ctx.page_no}"
     contexts = [CellContext(ctx.template.name, o.cell.region, o.cell.name, o.cell.kind, o.cell.row_key,
-                            ctx.work_date, ctx.page_id, source, (choices or {}).get(o.cell.name, []))
+                            ctx.work_date, ctx.page_id, source, (choices or {}).get(o.cell.name, []),
+                            field_id=field_id(ctx, o))
                 for o in cells]
-    recs = ctx.recognizer.recognize([o.crop for o in cells], contexts)
+    images = ctx.images or PageImages(aligned=ctx.aligned)
+    crops = [crop_cell(images, o.cell.bbox, spec_for(ctx.recognizer, o.cell.kind)) for o in cells]
+    recs = ctx.recognizer.recognize(crops, contexts)
     return ctx.corrector.correct(recs, contexts)
+
+
+def auto_threshold(r: Recognition, settings: Settings) -> float:
+    """자동 적재 기준: 백엔드가 정한 것(모델 카드·[recognize.<백엔드>]) 아니면 [pipeline] auto_accept_conf."""
+    return settings.auto_accept_conf if r.threshold is None else r.threshold
+
+
+def trips_max(site: SitePack) -> int | None:
+    """숫자 칸 값의 범위 — 현장의 것: site.toml 의 [haul] trips_max. 없으면 검사하지 않는다 (tasks/0003 4.4)."""
+    v = site.option("haul", "trips_max")
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+        raise ValueError(f"site.toml 의 [haul] trips_max 는 0 이상의 정수: {v!r}")
+    return v
+
+
+def number_status(r: Recognition, settings: Settings, max_value: int | None = None) -> tuple[bool, str]:
+    """숫자 칸의 인식 결과 → (기계의 값 유무, review_status). tasks/0003 4.4 의 표 — 답의 종류를 말하는 백엔드(r.answer)용:
+
+      숫자열, 범위 안   신뢰도 ≥ t → 그 값으로 자동 적재        그 밖 → 값 있음 + 검수 대기
+      숫자열, 범위 밖   검수 대기
+      빈 칸             신뢰도 ≥ t → 값 없음으로 자동 적재      그 밖 → 값 있음 + 검수 대기
+      거절("?")         검수 대기
+    인식기는 값을 만들어 내지 않는다: 잉크 판정이 "값 없음"인 칸은 여기 오지 않는다. 읽은 문자열은 value_raw 에 그대로 남긴다.
+    """
+    sure = r.confidence >= auto_threshold(r, settings)
+    if r.answer == "empty":
+        return (False, "auto") if sure else (True, "pending")
+    if r.answer == "value" and r.text.isdigit() and (max_value is None or int(r.text) <= max_value) and sure:
+        return True, "auto"
+    return True, "pending"
 
 
 class FormHandler:
@@ -122,10 +162,14 @@ class FormHandler:
                 rows.append(field_row(ctx, o, has_value=False, value_raw="", value_final="", confidence=1.0,
                                       candidates=None, backend="ink", review_status="auto"))
             else:
-                ok = bool(r.text) and r.confidence >= ctx.settings.auto_accept_conf
-                rows.append(field_row(ctx, o, has_value=True, value_raw=r.text, value_final=r.text,
+                if r.answer is not None and o.cell.kind == "handwritten_number":      # 숫자 인식기: 4.4 의 표
+                    has, status = number_status(r, ctx.settings)
+                else:                                                               # 예전 규칙 (null·oracle·글자 칸)
+                    has = True
+                    status = "auto" if bool(r.text) and r.confidence >= auto_threshold(r, ctx.settings) else "pending"
+                rows.append(field_row(ctx, o, has_value=has, value_raw=r.text, value_final=r.text,
                                       confidence=r.confidence, candidates=r.candidates, backend=r.backend,
-                                      review_status="auto" if ok else "pending"))
+                                      review_status=status))
         return rows
 
     def finalize(self, con: sqlite3.Connection, site: SitePack, settings: Settings) -> dict:

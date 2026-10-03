@@ -26,7 +26,8 @@
 ```bash
 pip install -e ".[dev]"
 
-pytest                      # 합성 양식으로 전체 시험 (약 1분, 실데이터 불필요)
+pytest                      # 합성 양식으로 전체 시험 (약 2분, 실데이터·torch 불필요)
+pytest -m train             # 숫자 인식기 학습 시험 (torch 필요: pip install -e ".[train]", 몇 분)
 ruff check .
 
 minedocscan synth out/demo                  # 개인정보 없는 합성 사이트 팩 + 스캔 + 정답
@@ -40,7 +41,15 @@ minedocscan review serve --site out/demo/site --work-root out/demo/work --queue 
 minedocscan review stats  --site … --work-root …          # 얼마나 했는지 (분할별 포함)
 minedocscan review export-answers answers.json --split test --site … --work-root …
 minedocscan eval --answers answers.json --target raw --only-listed --split test --work-root …   # 기계 값을 검수값과 비교
-minedocscan review export-crops ~/crops --split train --site … --archive-root … --work-root …  # 학습용 크롭 (저장소 밖)
+minedocscan review export-crops ~/crops --split train --kind handwritten_number --include-illegible --site … --archive-root … --work-root …
+                                            # 학습용 크롭 (저장소 밖). illegible 은 숫자 인식기의 "거절"로 학습한다
+
+# 숫자 인식기 (docs/DATA.md "숫자 인식기") — 학습만 torch, 추론은 OpenCV
+minedocscan recognizer train --crops ~/crops --name digits-v1      # → <site>/models/digits-v1/ (test 줄이 있으면 거절)
+minedocscan recognizer eval  --crops ~/crops --model digits-v1 --split val --errors   # 검증 날짜에서, 틀린 칸 모아 보기는 WORK_ROOT
+minedocscan recognizer list                                         # 사이트 팩의 모델과 카드 요약
+# 설정: [recognize.by_kind] handwritten_number = "digits"   [recognize.digits] model = "digits-v1"   → minedocscan info 로 확인
+minedocscan synth out/low --low-cells       # 낮은 칸·거친 숫자·X 표의 합성 양식 (숫자 인식기 시험용)
 
 minedocscan run DB_scans --skip-existing    # 전체 묶음: 깨진 파일은 failed 로 격리, 한 것은 건너뜀 (템플릿·인식기를 바꾼 뒤엔 --fresh)
 minedocscan report --by-month               # 양식 × 월 진단 (개정판의 흔적)
@@ -74,20 +83,24 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 | `imaging/cells.py` | 셀 크롭과 잉크 비율 |
 | `imaging/marks.py` | ✓ 판정 (나란한 두 칸 중 어디에 표시했나) |
 | `imaging/blobs.py` | 괘선 제거 + RLSA 로 글씨 덩어리를 셀에 배정, 여러 칸에 걸친 메모 구분 |
-| `imaging/hires.py` | 원본 해상도 크롭: 쪽의 호모그래피로 원본(300 dpi)에서 그 셀만 다시 정합 |
+| `imaging/cropspec.py` | 인식기에 넘기는 크롭의 규격(`CropSpec`: 해상도 aligned/source·배율·여유)과 자르는 구현 하나 — 파이프라인·내보내기·검수 화면이 같이 쓴다 |
+| `imaging/hires.py` | 원본 쪽 렌더링 (몇 장 캐시). 원본 해상도 크롭은 쪽의 호모그래피로 그 셀만 다시 정합 |
 | `forms/template.py` | 템플릿 로더·검증 (`meta_key`, `family`/`valid_from`/`valid_to`) |
 | `forms/sitepack.py` | 사이트 팩 (템플릿·현장 옵션·페이지 라벨·평가셋 소금값), `templates_for(date)` |
 | `forms/classify.py` | 페이지가 어느 양식인지 (그날 유효한 판만 후보) |
-| `recognize/` | 인식 백엔드 인터페이스와 등록소 (`null`, `oracle`) |
+| `recognize/` | 인식 백엔드 인터페이스와 등록소 (`null`, `oracle`, `digits`), 칸 종류별 백엔드(`ByKindRecognizer`, `[recognize.by_kind]`) |
+| `recognize/digits/` | 숫자 인식기: `model.py`(전처리·CTC 빔 탐색·ONNX 를 cv2.dnn 으로, torch 없음), `backend.py`(카드의 규격·온도·기준), `data.py`(크롭 폴더, test 거절, 검증 날짜), `calib.py`(온도·임계값표·윌슨 구간), `train.py`(학습 — torch 는 여기서만), `evaluate.py`(크롭 단위 평가) |
 | `correct/` | 교정 백엔드 인터페이스와 등록소 (`none`) |
-| `handlers/` | 양식의 의미: 셀 → `doc_field` → 업무 테이블 (`generic`, `inspection`, `haul`) |
+| `handlers/` | 양식의 의미: 셀 → `doc_field` → 업무 테이블 (`generic`, `inspection`, `haul`). 숫자 칸의 자동 적재 표는 `base.number_status` (ADR 0012) |
 | `validate/crosscheck.py` | 양식 간 교차검증, 그날의 실제 배차 관측 (날짜 지정 재계산 가능) |
 | `review/` | 검수: `store.py`(추가 전용 `reviews.jsonl` ↔ `doc_review`, `save()`, 쪽 메타 우선순위), `queue.py`(대기열 4종), `crops.py`(원본/정합), `export.py`(크롭 내보내기), `server.py` + `static/index.html`(표준 라이브러리, 127.0.0.1) |
 | `store/` | `schema.sql`, `upsert()`, 스키마 버전 |
 | `pipeline/runner.py` | 단계 순서와 상태 기록만 안다. 오류 격리(`failed`/`error`), `--skip-existing` |
-| `evaluate/` | CER·필드 정확도·자동 적재율, 값 유무 정밀도·재현율, 날짜 분할(`split.py`), 실데이터 회귀(검수 없이) |
+| `evaluate/` | CER·필드 정확도·자동 적재율·자동 적재 오류율(`status_raw`), 값 유무 정밀도·재현율, 날짜 분할(`split.py`), 실데이터 회귀(검수 없이, 기준에 없던 묶음은 따로 알림) |
 | `report.py` | DB 현황 요약 (회귀 테스트가 비교하는 수치), `by_month`, `list_pages` |
-| `tools/synth.py` | 합성 양식·스캔·정답 생성기 (같은 seed 면 바이트까지 같다, 행렬 개정판 선택) |
+| `tools/synth.py` | 합성 양식·스캔·정답 생성기 (같은 seed 면 바이트까지 같다, 행렬 개정판 선택, `low_cells` 낮은 칸 양식) |
+| `tools/synth_cells.py` | 어려운 합성 숫자 칸: 값·X 표·덧칠·메모·이웃 칸 글씨를 크롭 규격대로 (숫자 인식기의 학습·시험용) |
+| `tools/handfont.py` | 합성 손글씨의 획 정의 (숫자 꼴 몇 가지, 메모용 이어 쓴 글자). OpenCV 내장 글꼴을 쓰지 않는다 |
 | `tools/thumbs.py` | 쪽 미리보기 (1/4, WORK_ROOT/thumbs) |
 | `tools/mktemplate.py` | 새 양식의 템플릿 뼈대 |
 | `cli.py` | `minedocscan` 명령 |
@@ -104,6 +117,7 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 - 스캔 원본, 기준 이미지, 템플릿 YAML(머리글에 이름·차량번호가 들어 있다), 페이지 라벨, 정답 CSV·엑셀, 검수 기록(`reviews.jsonl`)은 전부 저장소 밖(사이트 팩·아카이브)에 둔다.
 - 검수 화면의 갈무리(실제 값이 보인다)를 문서·PR·이슈에 붙이지 않는다. 서버 로그에 입력값을 찍지 않는다.
 - 테스트에 필요한 이미지는 `tools/synth.py` 로 만든다. 실제 문서를 `tests/fixtures/` 에 넣지 않는다.
+- 학습한 모델(`<site>/models/`), 내보낸 크롭, 틀린 칸 모아 보기는 현장 글씨다 — 저장소 밖에. 예외는 합성 셀만으로 만든 `tests/fixtures/digits-fixture` 하나.
 - 문서·코드·커밋 메시지·이슈에 실제 이름이나 차량번호를 예시로 쓰지 않는다. 합성 데이터의 값(`T01`, `V-101`, `ALPHA`)을 쓴다.
 - API 키·비밀값은 환경변수로만 받는다. `.env`, `minedocscan.toml` 은 커밋되지 않는다.
 
@@ -125,7 +139,8 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 - **새 종류의 업무 기록**: `handlers/<이름>.py` 에 `FormHandler` 를 상속해 `load()` 를 쓰고 `handlers/__init__.py` 의 `REGISTRY` 에 등록,
   `store/schema.sql` 에 테이블과 `store/db.py` 의 `PRIMARY_KEYS` 를 추가, `tools/synth.py` 에 그 양식의 합성판과 테스트를 추가.
 - **새 인식 백엔드**: `recognize/<이름>.py` 에 `recognize(crops, contexts) -> list[Recognition]` 을 구현하고 `register()`.
-  무거운 의존성(torch 등)은 그 모듈 안에서만 import 하고 `pyproject.toml` 의 선택 의존성으로 넣는다.
+  원하는 크롭은 `crop_spec`/`crop_spec_for(kind)` 로 선언한다 (ADR 0011). 답의 종류(값·빈 칸·거절)를 말하면 `Recognition.answer` 에.
+  무거운 의존성(torch 등)은 그 모듈 안에서만 import 하고 `pyproject.toml` 의 선택 의존성으로 넣는다. 추론은 현장 PC 에 새 의존성 없이 (ONNX + OpenCV).
 - **새 교정 백엔드**: `correct/` 에 같은 방식으로. 후보를 내고 고르는 구조를 지킨다.
 
 ## 실데이터에서 배운 것 (다시 틀리지 않기 위해)
@@ -140,7 +155,15 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 - 하루에 행렬 양식이 여러 장일 수 있다(상차 장비마다 한 장). 그날의 모든 장을 합쳐서 비교한다.
 - 양식의 여백 행에 손으로 장비를 추가해 적는 날이 있다. `doc_field` 에는 남지만 업무 테이블로 가는 규칙은 아직 없다.
 - PDF 는 200 dpi 회색조로 직접 렌더링한다. 렌더링 경로를 바꾸면 체크 판정 몇 개가 뒤집힌다 — 회귀 기준을 다시 잡아야 한다.
-- 스캔 원본은 300 dpi 다. 정합과 판정은 200 dpi 로 충분하지만, 인식기에 넘기는 크롭은 원본 해상도가 나을 수 있다 (아직 비교하지 않았다).
+- OpenCV 5.0 은 내장 글꼴(`putText`)의 모양을 바꿨다. 그 글꼴로 그린 합성 숫자로 학습한 시험용 모델이 4.x 에서 시험 4개를 떨어뜨렸다 (추론은 판마다 같았다).
+  학습·시험에 쓰는 합성 글씨는 자체 획(`tools/handfont.py`)으로 그리고, CI 는 하한 판(OpenCV 4.9, numpy 1.26)에서도 돈다.
+- 자동 적재 기준은 검증 칸이 적으면 아무 말도 하지 못한다 (13칸·오류 0 → 상한 23 %). 자동 적재된 검증 칸이 100개 미만이면 기준을 정하지 않고, 기준 옆엔 늘 상한 (ADR 0012).
+- 스캔 원본은 300 dpi 다. 정합과 판정은 200 dpi 로 충분하지만, 인식기에 넘기는 크롭은 원본 해상도가 나을 수 있다 (실데이터로는 아직 비교하지 않았다 — 두 규격으로 따로 학습해 검증 날짜에서 본다).
+- 운반 숫자 칸은 낮고 넓다 (괘선 사이 높이 28–30 px, 폭 약 100 px). **글씨가 칸보다 커서** 위아래 괘선을 넘는다 — 칸 그대로 자르면 숫자가 잘린다.
+  크롭에 여유(행 높이의 절반)를 둔다.
+- 그래서 **이웃 칸의 글씨가 이 칸으로 넘어온다.** 잉크로 "값 있음"이라 판정된 칸의 약 5분의 1은 이 칸의 숫자가 아니었다 (X 표, 덧칠, 윗칸 숫자의 꼬리, 메모).
+  숫자 인식기는 "무슨 숫자인가"와 함께 "이 칸에 숫자가 있기는 한가"를 답한다 — 빈 칸과 거절 (ADR 0012).
+- 값은 1–16 근처이고 두 자리가 드물지 않다. 흘려 쓰고, 연하고, 쓰는 사람이 여럿이다 — 값 전체를 분류 항목으로 두지 않고 숫자열(CTC)로 읽는다.
 - 언어모델에 문장을 다시 쓰게 하면 긴 셀에서 항목 순서가 바뀌고 수량이 달라진다 (선행 연구의 비교표). 교정은 후보 선택 + 숫자 불변 검사.
 - 합성 PDF 도 저장할 때 새 /ID 가 들어가면 같은 seed 인데 문서 해시가 달라져 테스트가 운에 따라 실패한다 → `no_new_id`.
 - 회귀 검사는 검수 파일을 읽지 않는다. 검수가 쌓이면 코드 변경 없이도 `pending`·`with_trips` 가 달라진다.

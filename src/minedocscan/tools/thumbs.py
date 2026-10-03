@@ -29,7 +29,7 @@ def write_thumbs(settings, rows: list[dict], out_dir: str | Path | None = None, 
         if src is None:
             continue
         wanted = {r["page_no"]: r for r in pages}
-        for page_no, gray in load_pages(src, max(1, settings.dpi // factor)):   # PDF 는 1/4 해상도로 렌더링
+        for page_no, gray in load_pages(src, max(1, settings.dpi // factor), settings.damaged_pdf):   # PDF 는 1/4 해상도로
             if page_no not in wanted:
                 continue
             if src.suffix.lower() != ".pdf":                                   # 이미지는 그대로 들어오므로 줄인다

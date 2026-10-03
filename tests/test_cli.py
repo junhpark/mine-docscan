@@ -59,7 +59,10 @@ def test_regress_roundtrip(env, capsys):
     assert main(["regress", "--update", "--inputs", "."] + common) == 0
     baseline = root / "data" / "site" / "expected" / "regression.json"
     assert json.loads(baseline.read_text(encoding="utf-8"))["inputs"] == ["."]
+    capsys.readouterr()
     assert main(["regress"] + common) == 0                                    # 같은 코드, 같은 데이터 → 같아야 한다
+    out = capsys.readouterr().out
+    assert "기준과 같습니다" in out and "기준이 아직 없습니다" not in out and "새 항목" not in out
     # 검수가 쌓여도 회귀는 기계 값만 본다 — 사이트 팩의 검수 파일을 읽어 들이지 않는다
     from minedocscan.review.store import Review, append
     from minedocscan.store.db import open_db
@@ -75,6 +78,24 @@ def test_regress_roundtrip(env, capsys):
     capsys.readouterr()
     assert main(["regress"] + common) == 1
     assert "xcheck_haul.mismatch" in capsys.readouterr().out
+
+
+def test_regress_output_lines(env, monkeypatch, capsys):
+    """regress 의 안내문: 같음 / 어긋남 / 기준 없음, 그리고 기준에 없던 새 묶음은 따로 (실행 없이 결과만 바꿔 본다)."""
+    import minedocscan.evaluate.regression as rg
+
+    _root, common = env
+    base = {"diffs": [], "new_keys": [], "report": {}, "baseline": "b.json", "updated": False, "had_baseline": True, "ok": True}
+    cases = [({}, 0, ["기준과 같습니다"], ["기준이 아직 없습니다", "새 항목"]),
+             ({"new_keys": ["warnings.n"]}, 0, ["기준과 같습니다", "기준에 없던 새 항목 1개", "warnings.n"], ["기준이 아직 없습니다"]),
+             ({"diffs": [("fields.pending", 5, 6)], "ok": False}, 1, ["기준과 다른 항목 1개", "fields.pending"], ["기준과 같습니다"]),
+             ({"had_baseline": False}, 0, ["기준이 아직 없습니다"], ["기준과 같습니다"])]
+    for change, code, want, unwanted in cases:
+        monkeypatch.setattr(rg, "run_regression", lambda *a, _r=base | change, **k: _r)
+        capsys.readouterr()
+        assert main(["regress"] + common) == code
+        out = capsys.readouterr().out
+        assert all(w in out for w in want) and not any(u in out for u in unwanted), (change, out)
 
 
 def test_template_init(env, tmp_path, capsys):
