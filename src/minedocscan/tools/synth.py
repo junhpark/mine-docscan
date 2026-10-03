@@ -17,6 +17,10 @@
   · 표 위에 여러 칸에 걸쳐 쓴 메모
   · 두 양식의 값이 서로 다른 칸 (= 교차검증이 잡아야 하는 것)
 
+선택 기능 low_cells=True (tasks/0003 단계 3): 운반 양식 두 종의 칸이 실제처럼 낮고(행 높이 30 px) 숫자가 거칠고 칸보다 커서
+위아래 괘선을 넘으며, 빈 칸 몇 개에 X 표가 있다. X 표 칸은 잉크로는 "값 있음"이지만 정답은 빈 칸이다.
+기본 합성 데이터(low_cells=False)는 그대로다 — 기존 테스트의 기대 수치를 바꾸지 않는다.
+
 글자는 OpenCV 내장 글꼴(영문)로 그린다 — 글꼴 파일에 의존하지 않기 위해서다. 따라서 이 데이터로
 잴 수 있는 것은 파이프라인의 기하·논리이지 한글 손글씨 인식률이 아니다 (docs/DATA.md).
 """
@@ -32,6 +36,7 @@ import numpy as np
 import yaml
 
 from ..imaging.io import imwrite
+from . import synth_cells
 
 DPI = 200
 PORTRAIT = (1654, 2339)          # (폭, 높이) — A4 @ 200 dpi
@@ -68,6 +73,9 @@ SLOTS = [("T01", "V-101", "ALPHA"), ("T02", "V-102", "BRAVO"), ("T03", "V-103", 
 SLOTS_V2 = [("T01", "V-101", "ALPHA"), ("T02", "V-202", "GOLF"), ("T03", "V-103", "CHARLIE"), ("T04", "V-104", "DELTA")]
 T_MATRIX_V2 = "synth_haul_matrix_v2"
 MATRIX_FAMILY = "synth_haul_matrix"
+# 낮은 칸 (선택): 실제 운반 칸처럼 행 높이 30 px. 숫자 칸 폭은 덩어리 배정(imaging/blobs.py)이 가로로 붙여 묶는 거리(칸 폭의
+# 절반)보다 이웃 칸 숫자 사이가 넓게 남도록 120 px — 판정 규칙은 건드리지 않는다
+LOW_ROW_H, LOW_NUM_W = 30, 120
 OK_PHRASES = ["ok", "greased", "filter cleaned", "washed", "checked"]
 FAULT_PHRASES = ["oil leak", "tire worn", "hose broken", "lamp broken", "brake noise", "battery low"]
 SIDE_LABELS = ["Fuel (L)", "Engine hours", "Odometer (km)", "Start time", "End time"]
@@ -199,21 +207,25 @@ def _haul_rows(rows: list[tuple[str, str]]) -> list[dict]:
     return [{"row": i, "key": f"{m}|{lv}", "material": m, "level": lv} for i, (m, lv) in enumerate(rows)]
 
 
-def build_haul_log() -> tuple[np.ndarray, dict]:
+def build_haul_log(low: bool = False) -> tuple[np.ndarray, dict]:
     img = _canvas(LANDSCAPE)
     _label(img, "DUMP TRUCK DAILY HAUL LOG", 150, 170, 1.5, 3)
     _label(img, "Date:  20      .        .", 150, 255, 0.9)
     _label(img, "Vehicle No:", 150, 335, 0.9)
     _label(img, "Operator:", 760, 335, 0.9)
     rows = UG_ROWS + [SURFACE_ROW]
-    xs = [150, 400, 600, 850, 1100]
-    ys = [380, 450] + [450 + 80 * (i + 1) for i in range(len(rows))]
+    if low:
+        xs = [150, 400, 600, 600 + LOW_NUM_W, 600 + 2 * LOW_NUM_W]
+        ys = [380, 430] + [430 + LOW_ROW_H * (i + 1) for i in range(len(rows))]
+    else:
+        xs = [150, 400, 600, 850, 1100]
+        ys = [380, 450] + [450 + 80 * (i + 1) for i in range(len(rows))]
     _grid(img, ys, xs)
-    for ci, s in enumerate(("Material", "Level", "Day trips", "Night trips")):
-        _cell_label(img, s, ys, xs, 0, ci)
+    for ci, s in enumerate(("Material", "Level", "Day", "Night") if low else ("Material", "Level", "Day trips", "Night trips")):
+        _cell_label(img, s, ys, xs, 0, ci, 0.6 if low else 0.7)
     for i, (m, lv) in enumerate(rows):
-        _cell_label(img, m, ys, xs, i + 1, 0)
-        _cell_label(img, lv, ys, xs, i + 1, 1)
+        _cell_label(img, m, ys, xs, i + 1, 0, 0.55 if low else 0.7)
+        _cell_label(img, lv, ys, xs, i + 1, 1, 0.55 if low else 0.7)
 
     sxs = [1300, 1650, 2150]
     sys_ = [450 + 90 * i for i in range(len(SIDE_LABELS) + 1)]
@@ -252,26 +264,32 @@ def build_haul_log() -> tuple[np.ndarray, dict]:
 
 
 def build_haul_matrix(slots: list[tuple[str, str, str]] = SLOTS, name: str = T_MATRIX,
-                      valid: tuple[str | None, str | None] | None = None) -> tuple[np.ndarray, dict]:
-    """slots: 인쇄된 머리글 (자리, 차량, 운전자). valid=(valid_from, valid_to) 를 주면 개정판 계열의 한 판이 된다."""
+                      valid: tuple[str | None, str | None] | None = None, low: bool = False) -> tuple[np.ndarray, dict]:
+    """slots: 인쇄된 머리글 (자리, 차량, 운전자). valid=(valid_from, valid_to) 를 주면 개정판 계열의 한 판이 된다.
+    low: 낮은 칸 (행 높이 LOW_ROW_H, 숫자 칸 폭 LOW_NUM_W)."""
     img = _canvas(LANDSCAPE)
     _label(img, "LOADER DAILY LOG  -  UNDERGROUND LOADING", 150, 170, 1.4, 3)
     _label(img, "Date:  20      .        .", 150, 265, 0.9)
     _label(img, "Loader operator:", 760, 265, 0.9)
-    xs = [150, 400, 600] + [600 + 200 * (k + 1) for k in range(len(SLOTS))]
-    ys = [330, 390, 450] + [450 + 80 * (i + 1) for i in range(len(UG_ROWS))]
+    if low:
+        xs = [150, 400, 600] + [600 + LOW_NUM_W * (k + 1) for k in range(len(SLOTS))]
+        ys = [330, 370, 410] + [410 + LOW_ROW_H * (i + 1) for i in range(len(UG_ROWS))]
+    else:
+        xs = [150, 400, 600] + [600 + 200 * (k + 1) for k in range(len(SLOTS))]
+        ys = [330, 390, 450] + [450 + 80 * (i + 1) for i in range(len(UG_ROWS))]
+    hs = 0.45 if low else 0.65
     _grid(img, ys, xs)
     _cell_label(img, "Material", ys, xs, 0, 0)
     _cell_label(img, "Level", ys, xs, 0, 1)
     columns = [{"idx": 0, "name": "material", "kind": "printed"}, {"idx": 1, "name": "level", "kind": "printed"}]
     for k, (slot, vehicle, operator) in enumerate(slots):
-        _cell_label(img, f"{slot}  {vehicle}", ys, xs, 0, 2 + k, 0.65)
-        _cell_label(img, operator, ys, xs, 1, 2 + k, 0.65)
+        _cell_label(img, f"{slot} {vehicle}" if low else f"{slot}  {vehicle}", ys, xs, 0, 2 + k, hs)
+        _cell_label(img, operator, ys, xs, 1, 2 + k, hs)
         columns.append({"idx": 2 + k, "name": f"slot_{slot}", "kind": "handwritten_number", "slot": slot,
                         "header_vehicle_no": vehicle, "header_operator": operator})
     for i, (m, lv) in enumerate(UG_ROWS):
-        _cell_label(img, m, ys, xs, i + 2, 0)
-        _cell_label(img, lv, ys, xs, i + 2, 1)
+        _cell_label(img, m, ys, xs, i + 2, 0, 0.55 if low else 0.7)
+        _cell_label(img, lv, ys, xs, i + 2, 1, 0.55 if low else 0.7)
     rx = xs[-1] + 120
     cv2.rectangle(img, (rx, 330), (2180, 900), 0, 2)
     _label(img, "Remarks", rx + 20, 375, 0.9)
@@ -325,17 +343,21 @@ test_share = 0.2
 """
 
 
-def write_site_pack(site_dir: str | Path, revision_from: str | None = None) -> Path:
+def _blank_forms(low: bool = False) -> dict:
+    return {T_INSP: build_inspection(), T_LOG: build_haul_log(low), T_MATRIX: build_haul_matrix(low=low)}
+
+
+def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low: bool = False) -> Path:
     """합성 사이트 팩(site.toml + 템플릿 세 종)을 쓴다. revision_from(날짜)을 주면 행렬 양식이 두 판이 된다:
-    그 전날까지 v1, 그날부터 v2 (같은 계열, 유효 기간으로 가린다)."""
+    그 전날까지 v1, 그날부터 v2 (같은 계열, 유효 기간으로 가린다). low: 운반 양식 두 종이 낮은 칸."""
     site = Path(site_dir)
     site.mkdir(parents=True, exist_ok=True)
     (site / "site.toml").write_text(SITE_TOML, encoding="utf-8")
-    built = {name: build() for name, build in BUILDERS.items()}
+    built = _blank_forms(low)
     if revision_from:
         last_v1 = (date.fromisoformat(revision_from) - timedelta(days=1)).isoformat()
-        built[T_MATRIX] = build_haul_matrix(SLOTS, T_MATRIX, (None, last_v1))
-        built[T_MATRIX_V2] = build_haul_matrix(SLOTS_V2, T_MATRIX_V2, (revision_from, None))
+        built[T_MATRIX] = build_haul_matrix(SLOTS, T_MATRIX, (None, last_v1), low=low)
+        built[T_MATRIX_V2] = build_haul_matrix(SLOTS_V2, T_MATRIX_V2, (revision_from, None), low=low)
     for name, (img, spec) in built.items():
         d = site / "templates" / name
         d.mkdir(parents=True, exist_ok=True)
@@ -463,7 +485,59 @@ def _fill_inspection(blank, spec, dt, rng) -> np.ndarray:
     return img
 
 
-def _fill_log(blank, spec, dt, truck, rng) -> np.ndarray:
+def _rough_number(img: np.ndarray, text: str, bbox, rng) -> None:
+    """낮은 칸의 거친 숫자: 칸 높이의 1.0–1.35배로 써서 위아래 괘선을 넘는다. 가로로는 칸 안에 머문다
+    (imaging/blobs.py 가 가로로 칸 폭의 절반까지 붙여 묶기 때문 — 이웃 칸 숫자와 한 덩어리가 되면 메모로 판정된다)."""
+    x0, y0, x1, y1 = bbox
+    ch = y1 - y0
+    h = ch * float(rng.uniform(1.0, 1.35))
+    cx, cy = (x0 + x1) / 2 + rng.uniform(-5, 5), (y0 + y1) / 2 + rng.uniform(-3, 3)
+    m = int(h * 1.5)
+    ox, oy = int(cx) - m, int(cy) - m
+    ink = np.zeros((2 * m, 2 * m), np.float32)
+    style = synth_cells._style(rng)
+    style.update(font=int(rng.choice([cv2.FONT_HERSHEY_SIMPLEX, cv2.FONT_HERSHEY_SCRIPT_SIMPLEX, cv2.FONT_HERSHEY_DUPLEX])),
+                 gap=float(rng.uniform(-0.05, 0.1)), ink=float(rng.uniform(0.75, 1.0)))
+    synth_cells._draw_number(ink, text, cx - ox, cy - oy, h, rng, style)
+    _composite(img, ink, ox, oy, int(rng.integers(20, 70)))
+
+
+def _x_mark(img: np.ndarray, bbox, rng) -> None:
+    """빈 칸의 X 표: 잉크로는 값이 있어 보이지만 이 칸의 값이 아니다."""
+    x0, y0, x1, y1 = bbox
+    ch = y1 - y0
+    s = ch * float(rng.uniform(0.8, 1.2))
+    a = s * float(rng.uniform(0.8, 1.4))
+    cx, cy = (x0 + x1) / 2 + rng.uniform(-6, 6), (y0 + y1) / 2 + rng.uniform(-2, 2)
+    c = int(rng.integers(20, 70))
+    th = int(rng.integers(2, 4))
+    cv2.line(img, (int(cx - a / 2), int(cy - s / 2)), (int(cx + a / 2), int(cy + s / 2)), c, th, cv2.LINE_AA)
+    cv2.line(img, (int(cx + a / 2), int(cy - s / 2)), (int(cx - a / 2), int(cy + s / 2)), c, th, cv2.LINE_AA)
+
+
+def _composite(img: np.ndarray, ink: np.ndarray, ox: int, oy: int, dark: int) -> None:
+    H, W = img.shape
+    hh, ww = ink.shape
+    sx0, sy0, sx1, sy1 = max(0, ox), max(0, oy), min(W, ox + ww), min(H, oy + hh)
+    if sx1 <= sx0 or sy1 <= sy0:
+        return
+    patch = ink[sy0 - oy:sy1 - oy, sx0 - ox:sx1 - ox]
+    val = (255 - np.clip(patch, 0, 1) * (255 - dark)).astype(np.uint8)
+    img[sy0:sy1, sx0:sx1] = np.minimum(img[sy0:sy1, sx0:sx1], val)
+
+
+def _x_marks(img: np.ndarray, empty_cells: list, rng, n_max: int = 2) -> list:
+    """빈 숫자 칸 중 몇 개(최대 n_max)에 X 표를 그린다. 그린 칸을 돌려준다."""
+    if not empty_cells:
+        return []
+    k = int(rng.integers(0, n_max + 1))
+    picks = [empty_cells[int(i)] for i in rng.choice(len(empty_cells), size=min(k, len(empty_cells)), replace=False)]
+    for bbox in picks:
+        _x_mark(img, bbox, rng)
+    return picks
+
+
+def _fill_log(blank, spec, dt, truck, rng, low: bool = False) -> np.ndarray:
     img = blank.copy()
     haul, side = spec["regions"]
     ys, xs = haul["grid"]["ys"], haul["grid"]["xs"]
@@ -472,19 +546,27 @@ def _fill_log(blank, spec, dt, truck, rng) -> np.ndarray:
     _hand(img, truck["vehicle_no"], 370, 340, rng, 1.2)
     _hand(img, truck["operator"].title(), 950, 340, rng, 1.2)
     row_of = {r["key"]: r["row"] for r in haul["rows"]}
+    filled = set()
     for r in dt["haul_log"]:
         if r["slot"] != truck["slot"]:
             continue
         gi = row_of[f"{r['material']}|{r['level']}"] + 1
-        _hand_in_cell(img, str(r["trips"]), _cell_bbox(ys, xs, gi, 2 if r["shift"] == "day" else 3), rng,
-                      1.5, 3, center=True)
+        ci = 2 if r["shift"] == "day" else 3
+        filled.add((gi, ci))
+        if low:
+            _rough_number(img, str(r["trips"]), _cell_bbox(ys, xs, gi, ci), rng)
+        else:
+            _hand_in_cell(img, str(r["trips"]), _cell_bbox(ys, xs, gi, ci), rng, 1.5, 3, center=True)
+    if low:
+        _x_marks(img, [_cell_bbox(ys, xs, gi, ci) for gi in range(1, len(haul["rows"]) + 1) for ci in (2, 3)
+                       if (gi, ci) not in filled], rng)
     sys_, sxs = side["grid"]["ys"], side["grid"]["xs"]
     for i, s in enumerate((str(int(rng.integers(40, 160))), f"{rng.uniform(4, 11):.1f}")):
         _hand_in_cell(img, s, _cell_bbox(sys_, sxs, i, 1), rng, 1.3)
     return img
 
 
-def _fill_matrix(blank, spec, dt, rng) -> np.ndarray:
+def _fill_matrix(blank, spec, dt, rng, low: bool = False) -> np.ndarray:
     img = blank.copy()
     reg = spec["regions"][0]
     ys, xs = reg["grid"]["ys"], reg["grid"]["xs"]
@@ -493,12 +575,23 @@ def _fill_matrix(blank, spec, dt, rng) -> np.ndarray:
     _hand(img, "Foxtrot", 1040, 270, rng, 1.2)
     row_of = {r["key"]: r["row"] for r in reg["rows"]}
     col_of = {c["slot"]: c["idx"] for c in reg["columns"] if "slot" in c}
+    filled = set()
     for r in dt["haul_matrix"]:
         gi = row_of[f"{r['material']}|{r['level']}"] + 2
-        _hand_in_cell(img, str(r["trips"]), _cell_bbox(ys, xs, gi, col_of[r["slot"]]), rng, 1.5, 3, center=True)
+        filled.add((gi, col_of[r["slot"]]))
+        if low:
+            _rough_number(img, str(r["trips"]), _cell_bbox(ys, xs, gi, col_of[r["slot"]]), rng)
+        else:
+            _hand_in_cell(img, str(r["trips"]), _cell_bbox(ys, xs, gi, col_of[r["slot"]]), rng, 1.5, 3, center=True)
     # 여러 칸에 걸친 메모 — 셀 값으로 세면 안 된다
     gi = row_of[f"{NOTE_ROW[0]}|{NOTE_ROW[1]}"] + 2
-    _hand(img, "closed for blasting", xs[2] + 30, ys[gi + 1] - 22, rng, 1.5, 3)
+    if low:
+        _hand(img, "closed for blasting", xs[2] + 30, ys[gi + 1] - 6, rng, 1.0, 2)
+        note_row = gi
+        _x_marks(img, [_cell_bbox(ys, xs, g, c) for g in range(2, len(reg["rows"]) + 2) for c in col_of.values()
+                       if (g, c) not in filled and g != note_row], rng)
+    else:
+        _hand(img, "closed for blasting", xs[2] + 30, ys[gi + 1] - 22, rng, 1.5, 3)
     return img
 
 
@@ -529,21 +622,23 @@ class SynthResult:
 
 
 def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "2030-01-07",
-             strength: float = 1.0, matrix_revision: bool = False) -> SynthResult:
+             strength: float = 1.0, matrix_revision: bool = False, low_cells: bool = False) -> SynthResult:
     """out_dir 에 합성 사이트 팩(site/)과 스캔 문서(scans/), 정답(truth.json, answers.json)을 만든다.
 
     하루에 PDF 한 개: 점검표 1장 → 차량별 일보(일보를 낸 차량 수) → 행렬 1장.
     같은 seed 는 같은 결과를 낸다. matrix_revision=True 면 둘째 날부터 행렬 양식이 개정판(v2)이다 — 기본 데이터는 그대로다.
+    low_cells=True 면 운반 양식 두 종이 낮은 칸·거친 숫자·X 표 (tasks/0003 단계 3). X 표 칸은 정답에 없다(빈 칸)
+    — 잉크로는 값이 있어 보이므로 그 날의 truth["expected"] 의 교차검증 수치와는 맞지 않는다.
     """
     root = Path(out_dir)
     d0 = date.fromisoformat(start)
     revision_from = (d0 + timedelta(days=1)).isoformat() if matrix_revision else None
-    site = write_site_pack(root / "site", revision_from=revision_from)
+    site = write_site_pack(root / "site", revision_from=revision_from, low=low_cells)
     scans = root / "scans"
     rng = np.random.default_rng(seed)
-    blanks = {name: build() for name, build in BUILDERS.items()}
+    blanks = _blank_forms(low_cells)
     if revision_from:
-        blanks[T_MATRIX_V2] = build_haul_matrix(SLOTS_V2, T_MATRIX_V2, (revision_from, None))
+        blanks[T_MATRIX_V2] = build_haul_matrix(SLOTS_V2, T_MATRIX_V2, (revision_from, None), low=low_cells)
 
     day_truths, labels, answers, documents = [], {}, [], {}
     for d in range(days):
@@ -566,7 +661,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         for t in dt["trucks"]:
             if not t["has_log"]:
                 continue
-            n = add(_fill_log(*blanks[T_LOG], dt, t, rng), T_LOG, slot=t["slot"])
+            n = add(_fill_log(*blanks[T_LOG], dt, t, rng, low=low_cells), T_LOG, slot=t["slot"])
             source = f"{stem}#{n}"
             labels[source] = {"vehicle_no": t["vehicle_no"], "operator": t["operator"]}
             for r in dt["haul_log"]:
@@ -575,7 +670,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
                     answers.append({"source": source, "template": T_LOG, "region": "haul",
                                     "field_name": f"trips_{r['shift']}", "row_key": f"{r['material']}|{r['level']}",
                                     "text": str(r["trips"])})
-        n = add(_fill_matrix(*blanks[matrix_name], dt, rng), matrix_name)
+        n = add(_fill_matrix(*blanks[matrix_name], dt, rng, low=low_cells), matrix_name)
         for r in dt["haul_matrix"]:
             answers.append({"source": f"{stem}#{n}", "template": matrix_name, "region": "matrix",
                             "field_name": f"slot_{r['slot']}", "row_key": f"{r['material']}|{r['level']}",
@@ -591,7 +686,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         for p in info:
             pages_by_form[p["template"]] = pages_by_form.get(p["template"], 0) + 1
     truth = {
-        "seed": seed, "start": start, "n_days": days, "documents": documents, "days": day_truths,
+        "seed": seed, "start": start, "n_days": days, "low_cells": low_cells, "documents": documents, "days": day_truths,
         "expected": {
             "documents": days,
             "pages": sum(pages_by_form.values()),
