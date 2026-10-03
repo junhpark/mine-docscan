@@ -5,6 +5,7 @@
   haul-numbers  운반 숫자 셀의 표본 (정답 만들기). 기계 값은 숨긴다 — 보여 주면 그 값에 끌린다
   mismatch      교차검증 불일치 칸마다 한 항목: 일보의 주간·야간 셀과 행렬 셀(여러 장이면 전부)을 묶는다. 기계 값 숨김
   pending       검수 대기 필드 전부, 쪽 순서 (운영용). 기계 값을 보여 주고 입력창에 미리 채운다
+  page-fields   쪽의 메타(차량번호·작성자)가 되는 자유 필드 중 아직 값이 없는 것. 항목 = 쪽 하나. 후보 목록을 같이 준다
 
 haul-numbers 의 표본 규칙 (docs/tasks/0001-review-tool.md 단계 3)
   · 모집단: prod_haul 의 셀. 값이 있다고 판단된 셀(has_value_raw=1)에서 n×(1−empty_share), 비었다고 판단된 셀에서
@@ -21,9 +22,9 @@ import hashlib
 import sqlite3
 from dataclasses import asdict, dataclass, field
 
-from .store import effective
+from .store import effective, field_id_of, meta_from_reviews
 
-QUEUES = ("haul-numbers", "mismatch", "pending")
+QUEUES = ("haul-numbers", "mismatch", "pending", "page-fields")
 INPUT_KINDS = ("handwritten_number", "handwritten_text")      # 이 화면이 입력받는 셀 종류
 
 _FIELD_SQL = (
@@ -40,6 +41,7 @@ class QueueCell:
     kind: str
     review: dict | None = None              # 기존 유효한 검수 {verdict, value, reviewer, reviewed_at}
     machine: dict | None = None             # 기계 값 — pending 대기열에서만
+    meta_key: str | None = None             # page-fields: 이 셀의 값이 되는 메타 키 (후보 목록의 키)
 
 
 @dataclass
@@ -51,16 +53,21 @@ class QueueItem:
 
 
 def build_queue(con: sqlite3.Connection, name: str, *, n: int = 1500, seed: int = 0, empty_share: float = 0.1,
-                template: str | None = None, kind: str | None = None) -> dict:
+                template: str | None = None, kind: str | None = None, site=None) -> dict:
+    candidates: dict = {}
     if name == "haul-numbers":
         items, total, done = _haul_numbers(con, n, seed, empty_share)
     elif name == "mismatch":
         items, total, done = _mismatch(con)
     elif name == "pending":
         items, total, done = _pending(con, template, kind)
+    elif name == "page-fields":
+        if site is None:
+            raise ValueError("page-fields 대기열에는 사이트 팩이 필요합니다 (템플릿의 meta_key 와 라벨)")
+        items, total, done, candidates = _page_fields(con, site)
     else:
         raise KeyError(f"알 수 없는 대기열 '{name}' (가능: {QUEUES})")
-    return {"name": name, "total": total, "done": done, "items": [asdict(i) for i in items]}
+    return {"name": name, "total": total, "done": done, "items": [asdict(i) for i in items], "candidates": candidates}
 
 
 # ── 공통 ───────────────────────────────────────────────────────────────────
@@ -168,3 +175,58 @@ def _pending(con, template: str | None, kind: str | None):
     items = [QueueItem(r["field_id"], _title(r, r["field_name"]), r["work_date"],
                        [_cell(r, r["field_name"], None, show_machine=True)]) for r in todo]
     return items, len(todo), 0
+
+
+# ── page-fields ────────────────────────────────────────────────────────────
+def _page_fields(con, site):
+    """meta_key 필드가 있는 양식의 쪽마다, 쪽 메타(검수값 > 라벨 > 파일명)에 아직 없는 키의 필드를 한 항목으로 묶는다."""
+    metas = {name: t.meta_fields() for name, t in site.templates.items() if t.meta_fields()}
+    if not metas:
+        return [], 0, 0, {}
+    pages = con.execute(
+        "SELECT p.page_id, p.page_no, p.work_date, p.template_name, d.source_name FROM doc_page p "
+        f"JOIN doc_document d ON p.document_id = d.document_id WHERE p.status = 'loaded' AND p.template_name IN "
+        f"({','.join('?' * len(metas))}) ORDER BY p.work_date, d.source_name, p.page_no", list(metas)).fetchall()
+    items, done = [], 0
+    for pg in pages:
+        tpl = site.templates[pg["template_name"]]
+        meta = site.page_meta(pg["source_name"], pg["page_no"])
+        for k, v in meta_from_reviews(con, pg["page_id"], tpl).items():
+            if v is None:
+                meta.pop(k, None)
+            else:
+                meta[k] = v
+        missing = {name: key for name, key in metas[pg["template_name"]].items() if not meta.get(key)}
+        if not missing:
+            done += 1
+            continue
+        cells = []
+        for name, key in missing.items():
+            r = con.execute(_FIELD_SQL + "WHERE f.field_id = ?", (field_id_of(pg["page_id"], name),)).fetchone()
+            if r is not None:
+                cells.append(QueueCell(r["field_id"], key, r["kind"], None, None, meta_key=key))
+        if cells:
+            title = f"{pg['work_date'] or '날짜 없음'} · {pg['template_name']} · {pg['source_name']}#{pg['page_no']}"
+            items.append(QueueItem(pg["page_id"], title, pg["work_date"], cells))
+    keys = sorted({k for m in metas.values() for k in m.values()})
+    return items, len(pages), done, {k: _candidates(con, site, k) for k in keys}
+
+
+def _candidates(con, site, key: str) -> list[str]:
+    """키의 후보 값: 행렬 템플릿 머리글(header_<key>) + 라벨과 검수에 나온 값. 많이 나온 순."""
+    counts: dict[str, int] = {}
+    for t in site.templates.values():
+        for reg in t.regions:
+            for c in reg["columns"]:
+                v = c.get(f"header_{key}")
+                if v not in (None, ""):
+                    counts[str(v)] = counts.get(str(v), 0) + 1
+    for lab in site.labels.values():
+        v = lab.get(key)
+        if v not in (None, ""):
+            counts[str(v)] = counts.get(str(v), 0) + 1
+    names = {(t.name, name) for t in site.templates.values() for name, k in t.meta_fields().items() if k == key}
+    for rv in effective(con).values():
+        if rv.verdict == "value" and rv.region == "fields" and (rv.template, rv.field_name) in names:
+            counts[rv.value] = counts.get(rv.value, 0) + 1
+    return [v for v, _n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]

@@ -202,6 +202,38 @@ def review_from_field(con: sqlite3.Connection, field_id: str, verdict: str, valu
                            "confidence": r["confidence"]})
 
 
+# ── 쪽 메타 ────────────────────────────────────────────────────────────────
+def field_id_of(page_id: str, name: str) -> str:
+    """표 밖 자유 필드의 field_id (handlers/base.field_id 와 같은 규칙: region 'fields', row -1)."""
+    return f"{page_id}:fields:{name}:-1"
+
+
+def meta_from_reviews(con: sqlite3.Connection, page_id: str, template) -> dict:
+    """meta_key 가 있는 자유 필드의 유효한 검수 → {meta_key: 값}. empty 는 None (라벨 값을 지운다), illegible 은 무시."""
+    mf = template.meta_fields()
+    if not mf:
+        return {}
+    reviews = effective(con, field_ids=[field_id_of(page_id, name) for name in mf])
+    out: dict = {}
+    for name, key in mf.items():
+        rv = reviews.get(field_id_of(page_id, name))
+        if rv is None or rv.verdict == "illegible":
+            continue
+        out[key] = rv.value if rv.verdict == "value" else None
+    return out
+
+
+def page_meta(con: sqlite3.Connection, site, source_name: str, page_no: int, page_id: str, template) -> dict:
+    """쪽의 메타. 우선순위: 검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙 (tasks/0002 4.1). 날짜는 검수로 받지 않는다."""
+    meta = site.page_meta(source_name, page_no)
+    for k, v in meta_from_reviews(con, page_id, template).items():
+        if v is None:
+            meta.pop(k, None)
+        else:
+            meta[k] = v
+    return meta
+
+
 # ── 저장 ───────────────────────────────────────────────────────────────────
 def save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
     """검수 한 건을 저장한다: 파일 추가 → doc_review → doc_field → 핸들러의 on_review(업무 테이블·그 날짜의 교차검증)

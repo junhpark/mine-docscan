@@ -15,6 +15,7 @@ handler_options: role, region(숫자 셀이 있는 표 이름)
 from __future__ import annotations
 
 from ..imaging.blobs import assign_blobs
+from ..review.store import page_meta
 from ..store.db import upsert
 from ..validate.crosscheck import crosscheck_haul
 from .base import FormHandler, PageContext, apply_reviews, field_id, field_row, recognize
@@ -109,14 +110,31 @@ class HaulHandler(FormHandler):
         return None if t is None else str(t)
 
     def on_review(self, con, site, settings, field_id: str) -> None:
-        """검수 직후: 그 셀의 prod_haul 행을 최종 필드 행으로 갱신하고, 그 날짜의 교차검증을 다시 계산한다."""
-        frow = con.execute("SELECT * FROM doc_field WHERE field_id = ?", (field_id,)).fetchone()
-        h = con.execute("SELECT * FROM prod_haul WHERE haul_id = ?", (field_id,)).fetchone()
-        if frow is None or h is None:
+        """검수 직후. 운반 셀이면 그 prod_haul 행을 최종 필드 행으로 갱신하고, 쪽의 메타 필드(차량번호·작성자)면
+        그 쪽의 prod_haul 행 전부의 차량·작성자를 다시 정한다. 어느 쪽이든 그 날짜의 교차검증을 다시 계산한다."""
+        frow = con.execute("SELECT f.*, p.template_name, p.page_no, p.work_date, d.source_name FROM doc_field f "
+                           "JOIN doc_page p ON f.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
+                           "WHERE f.field_id = ?", (field_id,)).fetchone()
+        if frow is None:
             return
-        upsert(con, "prod_haul", {**dict(h), **haul_values(dict(frow))})
-        if h["work_date"]:
-            crosscheck_haul(con, exclude_materials=self._exclude(site), dates=[h["work_date"]])
+        date = None
+        if frow["region"] == "fields":
+            tpl = site.templates.get(frow["template_name"])
+            if tpl is None or frow["field_name"] not in tpl.meta_fields() or tpl.handler_options.get("role", "log") != "log":
+                return
+            meta = page_meta(con, site, frow["source_name"], frow["page_no"], frow["page_id"], tpl)
+            vehicle, operator = meta.get("vehicle_no"), meta.get("operator")
+            con.execute("UPDATE prod_haul SET vehicle_no=?, operator=? WHERE page_id=? AND source_role='log'",
+                        (None if vehicle is None else str(vehicle), operator, frow["page_id"]))
+            date = frow["work_date"]
+        else:
+            h = con.execute("SELECT * FROM prod_haul WHERE haul_id = ?", (field_id,)).fetchone()
+            if h is None:
+                return
+            upsert(con, "prod_haul", {**dict(h), **haul_values(dict(frow))})
+            date = h["work_date"]
+        if date:
+            crosscheck_haul(con, exclude_materials=self._exclude(site), dates=[date])
 
     @staticmethod
     def _exclude(site) -> list[str]:

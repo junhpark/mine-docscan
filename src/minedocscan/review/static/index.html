@@ -53,7 +53,7 @@
 (function () {
   'use strict';
   const qs = new URLSearchParams(location.search);
-  const state = { items: [], idx: 0, done: 0, total: 0, showMachine: false, entered: {}, templates: {}, busy: false, renderedAt: 0 };
+  const state = { items: [], idx: 0, done: 0, total: 0, showMachine: false, entered: {}, templates: {}, busy: false, renderedAt: 0, candidates: {} };
   const $ = (id) => document.getElementById(id);
 
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -65,6 +65,7 @@
     if (!r.ok) { msg(q.error || '대기열을 받지 못했습니다'); return; }
     state.items = q.items; state.done = q.done; state.total = q.total; state.showMachine = q.show_machine;
     state.templates = q.templates || {};
+    state.candidates = q.candidates || {};
     $('qname').textContent = '대기열 ' + q.name + ' · ' + (q.site || '');
     $('reviewer').textContent = q.reviewer;
     document.title = 'minedocscan 검수 — ' + q.name;
@@ -108,8 +109,15 @@
         let init = '';
         if (prev) init = prev.verdict === 'value' ? prev.value : (prev.verdict === 'illegible' ? '?' : '');
         else if (state.showMachine && c.machine && c.machine.value_raw) init = c.machine.value_raw;
+        const cands = c.meta_key ? (state.candidates[c.meta_key] || []) : null;
+        const listId = cands ? ('dl-' + i) : '';
         h += '<input class="val ' + (isNum ? 'num' : 'text') + '" data-i="' + i + '" data-fid="' + esc(c.field_id) + '"'
+          + (c.meta_key ? ' data-meta="' + esc(c.meta_key) + '"' : '') + (listId ? ' list="' + listId + '"' : '')
           + (isNum ? ' inputmode="numeric"' : '') + ' value="' + esc(init) + '" autocomplete="off" spellcheck="false">';
+        if (cands) {   // 후보 목록: 행렬 머리글 + 지금까지의 라벨·검수. 외부 자원 없이 <datalist> 로
+          h += '<datalist id="' + listId + '">' + cands.map(v => '<option value="' + esc(v) + '"></option>').join('') + '</datalist>';
+          h += '<span class="label">숫자 키 1–9 로 고를 수 있습니다: ' + cands.slice(0, 9).map((v, k) => (k + 1) + ' ' + esc(v)).join(' · ') + '</span>';
+        }
         if (prev) h += '<span class="prev">입력했던 값: <b>' + esc(shown(prev)) + '</b></span>';
       }
       h += '</div></div>';
@@ -155,6 +163,10 @@
         if (!/^[0-9]+$/.test(p.value)) { msg('숫자만 입력합니다'); inp.focus(); return; }
         if (p.value.length >= 3 && !confirm('세 자리 이상입니다: ' + p.value + ' — 맞습니까?')) { inp.focus(); inp.select(); return; }
       }
+      if (p.verdict === 'value' && inp.dataset.meta) {   // 오타는 막되 새 사람·새 차는 받는다
+        const cands = state.candidates[inp.dataset.meta] || [];
+        if (cands.length && !cands.includes(p.value) && !confirm('목록에 없는 값입니다: ' + p.value + ' — 그대로 저장합니까?')) { inp.focus(); inp.select(); return; }
+      }
       plans.push([inp.dataset.fid, p]);
     }
     state.busy = true;
@@ -177,6 +189,11 @@
   function prev() { if (state.idx > 0) state.idx -= 1; render(); }
 
   function onKey(ev) {
+    if (ev.target.dataset.meta && /^[1-9]$/.test(ev.key) && ev.target.value === '') {
+      const cands = state.candidates[ev.target.dataset.meta] || [];
+      const v = cands[parseInt(ev.key, 10) - 1];
+      if (v !== undefined) { ev.preventDefault(); ev.target.value = v; return; }
+    }
     if (ev.key === 'Enter') {
       ev.preventDefault();
       // 키를 누르고 있을 때의 반복, 한글 입력기의 조합 확정 Enter 는 저장이 아니다 — 보지 않은 셀이 빈 칸으로 저장된다

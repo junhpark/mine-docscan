@@ -9,7 +9,8 @@
     - name, grid: {ys, xs}, header_rows
       columns: [{idx, name, kind, ...메타}]   # kind: printed | handwritten_text | handwritten_number | checkmark
       rows:    [{row, key, ...메타}]
-  fields: [{name, kind, bbox}]                # 표 밖의 자유 필드 (날짜, 작성자, 비고 …)
+  fields: [{name, kind, bbox, meta_key?}]     # 표 밖의 자유 필드 (날짜, 작성자, 비고 …)
+                                              # meta_key: 이 필드의 검수값이 쪽의 메타(vehicle_no, operator …)가 된다. date 는 안 된다
 """
 from __future__ import annotations
 
@@ -67,6 +68,18 @@ class Template:
         self._validate()
 
     def _validate(self) -> None:
+        names = set()
+        for f in self.fields:
+            if f["name"] in names:
+                raise TemplateError(f"{self.name}: 자유 필드 이름 '{f['name']}' 이 겹칩니다")
+            names.add(f["name"])
+            if f.get("kind") not in CELL_KINDS:
+                raise TemplateError(f"{self.name}/fields/{f['name']}: 알 수 없는 kind '{f.get('kind')}'")
+            mk = f.get("meta_key")
+            if mk is not None and (not isinstance(mk, str) or not mk):
+                raise TemplateError(f"{self.name}/fields/{f['name']}: meta_key 는 빈 문자열이 아니어야 합니다")
+            if mk == "date":
+                raise TemplateError(f"{self.name}/fields/{f['name']}: meta_key 'date' 는 받지 않습니다 — 날짜는 파일명 규칙과 라벨로 정한다")
         for reg in self.regions:
             ys, xs = reg["grid"]["ys"], reg["grid"]["xs"]
             if ys != sorted(ys) or xs != sorted(xs):
@@ -126,4 +139,9 @@ class Template:
         return out
 
     def field_cells(self) -> list[Cell]:
-        return [Cell("fields", -1, -1, f["name"], f["kind"], tuple(f["bbox"])) for f in self.fields]
+        return [Cell("fields", -1, -1, f["name"], f["kind"], tuple(f["bbox"]),
+                     col_meta={"meta_key": f["meta_key"]} if f.get("meta_key") else {}) for f in self.fields]
+
+    def meta_fields(self) -> dict[str, str]:
+        """검수값이 쪽의 메타가 되는 자유 필드: {필드 이름: meta_key}."""
+        return {f["name"]: f["meta_key"] for f in self.fields if f.get("meta_key")}

@@ -240,8 +240,8 @@ def build_haul_log() -> tuple[np.ndarray, dict]:
         ],
         "fields": [
             {"name": "date_line", "kind": "handwritten_text", "bbox": [240, 210, 720, 275]},
-            {"name": "vehicle_no", "kind": "handwritten_text", "bbox": [340, 290, 730, 355]},
-            {"name": "operator", "kind": "handwritten_text", "bbox": [920, 290, 1290, 355]},
+            {"name": "vehicle_no", "kind": "handwritten_text", "bbox": [340, 290, 730, 355], "meta_key": "vehicle_no"},
+            {"name": "operator", "kind": "handwritten_text", "bbox": [920, 290, 1290, 355], "meta_key": "operator"},
         ],
     }
     return img, spec

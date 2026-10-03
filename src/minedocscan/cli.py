@@ -85,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
     r = rsub.add_parser("serve", parents=[common], help="로컬 검수 화면 (127.0.0.1)")
-    r.add_argument("--queue", default="haul-numbers", choices=["haul-numbers", "mismatch", "pending"])
+    r.add_argument("--queue", default="haul-numbers", choices=["haul-numbers", "mismatch", "pending", "page-fields"])
     r.add_argument("--n", type=int, default=1500, help="haul-numbers 표본 크기 (기본 1500)")
     r.add_argument("--seed", type=int, default=0, help="표본의 순서를 정하는 씨앗. 같은 값이면 같은 표본")
     r.add_argument("--empty-share", type=float, default=0.1, help="표본 중 빈 칸 비율 (기본 0.1)")

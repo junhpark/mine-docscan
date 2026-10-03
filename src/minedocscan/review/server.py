@@ -65,7 +65,8 @@ class ReviewApp:
         name = params.get("name") or self.queue
         if name not in QUEUES:
             raise ApiError(400, f"알 수 없는 대기열: {name}")
-        q = build_queue(self.con, name, **{k: v for k, v in opts.items() if k in ("n", "seed", "empty_share", "template", "kind")})
+        q = build_queue(self.con, name, site=self.site,
+                        **{k: v for k, v in opts.items() if k in ("n", "seed", "empty_share", "template", "kind")})
         q.update(reviewer=self.reviewer, site=self.site.name, show_machine=(name == "pending"),
                  templates={t.name: t.title for t in self.site.templates.values()})
         return q

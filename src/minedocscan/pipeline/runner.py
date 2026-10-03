@@ -30,6 +30,7 @@ from ..imaging.cells import observe_cells
 from ..imaging.io import SUPPORTED_EXT, imwrite, load_pages
 from ..recognize import Recognizer, get_recognizer
 from ..review.store import import_into
+from ..review.store import page_meta as _page_meta
 from ..store.db import open_db, upsert
 
 
@@ -131,6 +132,7 @@ class Pipeline:
 
         # extract → (recognize → correct → validate → load: 핸들러)
         upsert(self.con, "doc_page", page)      # doc_field 가 참조하므로 먼저 적는다
+        meta = _page_meta(self.con, self.site, source_name, page_no, page_id, tpl)   # 검수값 > 라벨 > 파일명
         handler = self._handler(tpl.handler)
         ctx = PageContext(self.con, self.settings, self.site, tpl, document_id, page_id, page_no, source_name,
                           meta, ar.warped, observe_cells(ar.warped, tpl), self.recognizer, self.corrector)
