@@ -1,6 +1,6 @@
 # 작업 지시서 0001 — 최소 검수 도구
 
-상태: **단계 1–5 구현** (2026-10-02, 브랜치 `feat/review-tool`). 단계 6 과 7절(실데이터 확인)은 남아 있다.
+상태: **단계 1–5 완료** (PR #1, 2026-10-03 병합). 단계 6(페이지 필드)과 7절(실데이터 확인)은 [0002](0002-full-archive-and-evalset.md) 로 옮겼다.
 범위나 순서를 바꾸려면 코드보다 이 파일을 먼저 고친다.
 관련: [ROADMAP.md](../ROADMAP.md) M2, [ADR 0007](../decisions/0007-labels-by-review.md), [ADR 0006](../decisions/0006-show-discrepancies.md)
 
