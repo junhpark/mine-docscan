@@ -75,6 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="final = 최종값(교정·검수 후), raw = 기계가 읽은 값. 검수값과 비교할 때는 raw")
     p.add_argument("--only-listed", action="store_true",
                    help="정답에 있는 셀만 평가 (표본 검수로 만든 정답). 기본은 정답이 있는 표의 셀 전부(없는 셀은 빈 칸)")
+    p.add_argument("--split", choices=["all", "test", "train"], default="all",
+                   help="날짜 분할 ([eval] split_salt). test 는 학습·사전·임계값 조정에 쓰지 않는다")
 
     p = sub.add_parser("regress", parents=[common], help="사이트 팩 기준 수치와 비교 (실데이터 회귀)")
     p.add_argument("--update", action="store_true", help="지금 결과를 새 기준으로 저장")
@@ -110,6 +112,15 @@ def build_parser() -> argparse.ArgumentParser:
     rsub.add_parser("stats", parents=[common], help="검수 진행 현황")
     r = rsub.add_parser("export-answers", parents=[common], help="유효한 검수(value, empty) → answers.json")
     r.add_argument("out", help="출력 파일 (eval --answers 로 읽는 형식)")
+    r.add_argument("--split", choices=["all", "test", "train"], default="all", help="날짜 분할")
+    r = rsub.add_parser("export-crops", parents=[common], help="검수한 셀의 이미지 + 라벨 (인식기 학습·평가용)")
+    r.add_argument("out", help="출력 폴더. git 작업 트리 안이면 거절한다")
+    r.add_argument("--split", choices=["all", "test", "train"], default="all")
+    r.add_argument("--kind", choices=["handwritten_number", "handwritten_text"], help="이 종류의 셀만")
+    r.add_argument("--res", choices=["auto", "source", "aligned"], default="auto",
+                   help="source = 원본 해상도(호모그래피로 다시 정합), aligned = 200 dpi 정합 이미지, auto = 원본이 닿으면 원본")
+    r.add_argument("--scale", type=float, default=1.5, help="템플릿 좌표(200 dpi) 대비 배율 (기본 1.5 = 300 dpi 원본 그대로)")
+    r.add_argument("--allow-in-repo", action="store_true", help="git 작업 트리 안에도 쓴다 (글씨가 들어 있다 — 커밋하지 말 것)")
     return ap
 
 
@@ -263,18 +274,22 @@ def cmd_eval(a) -> int:
 
     s = _settings(a)
     con = open_db(s.resolved_db_url)
-    kw = {"target": a.target, "only_listed": a.only_listed}
+    kw = {"target": a.target, "only_listed": a.only_listed, "split": a.split,
+          "site": _need_site(s) if (a.split != "all" or s.site) and s.site and Path(s.site).is_dir() else None}
+    if a.split != "all" and kw["site"] is None:
+        raise SystemExit("--split 에는 사이트 팩이 필요합니다: --site 또는 MINEDOCSCAN_SITE")
     if a.answers:
         data = {"fields": evaluate_fields(con, load_answers_json(a.answers), **kw)}
     else:
-        site = _need_site(s)
+        site = kw["site"] or _need_site(s)
         name = a.template or _only_inspection_template(site)
         answers = load_answers(a.inspection_csv, site.templates[name])
         data = {"fields": evaluate_fields(con, answers, **kw),
                 "insp_daily": evaluate_inspection(con, answers, site.templates[name])}
     data["presence"] = evaluate_presence(con)
     f, pr = data["fields"], data["presence"]
-    lines = [f"필드 {f['n']}개 ({a.target}): CER {f['cer']}, 필드 정확도 {f['field_accuracy']}, 자동 적재율 {f['auto_rate']}"
+    lines = [f"필드 {f['n']}개 ({a.target}, 분할 {a.split}): CER {f['cer']}, 필드 정확도 {f['field_accuracy']}, "
+             f"자동 적재율 {f['auto_rate']}"
              f" (DB 에 없는 정답 {f['answers_not_in_db']}개)",
              f"  정답에 값이 있는 셀 {f['n_value']}개 정확도 {f['accuracy_value']}, 빈 칸 {f['n_empty']}개 정확도 {f['accuracy_empty']}"]
     for k, v in f["by_field_kind"].items():
@@ -384,11 +399,13 @@ def cmd_review(a) -> int:
         from .review.store import stats
 
         s, site, con, imported = _review_db(a)
-        st = stats(con)
+        st = stats(con, site)
         kv = lambda d: ", ".join(f"{k} {v}" for k, v in d.items()) or "-"      # noqa: E731
         lines = [f"검수 파일: {imported['path']} — 기록 {st['records']}건 (깨진 줄 {imported['skipped']}개), 필드 {st['fields']}개",
                  "판정별: " + kv(st["by_verdict"]), "양식별: " + kv(st["by_template"]), "날짜별: " + kv(st["by_date"]),
                  "검수자별(기록): " + kv(st["by_reviewer"]),
+                 "분할별(value·empty): " + (", ".join(f"{k} {v['fields']}셀/{v['dates']}일" for k, v in st["by_split"].items()) or "-")
+                 + f"  (소금값 {site.split_salt}, test 비율 {site.test_share})",
                  f"템플릿 좌표가 달라진 기록 {st['bbox_changed']}개, 이 DB 에 없는 필드 {st['fields_not_in_db']}개"]
         _emit(a, {"reviews": imported, "stats": st}, "\n".join(lines))
         return 0
@@ -396,9 +413,23 @@ def cmd_review(a) -> int:
         from .review.store import export_answers
 
         s, site, con, _imported = _review_db(a)
-        n = export_answers(con, a.out)
-        _emit(a, {"out": a.out, "answers": n},
-              f"정답 {n}개를 썼습니다: {a.out}\n비교: minedocscan eval --answers {a.out} --target raw --only-listed")
+        n = export_answers(con, a.out, split=a.split, site=site)
+        sp = "" if a.split == "all" else f" --split {a.split}"
+        _emit(a, {"out": a.out, "answers": n, "split": a.split},
+              f"정답 {n}개를 썼습니다 (분할 {a.split}): {a.out}\n"
+              f"비교: minedocscan eval --answers {a.out} --target raw --only-listed{sp}")
+        return 0
+    if a.review_command == "export-crops":
+        from .review.export import ExportError, export_crops
+
+        s, site, con, _imported = _review_db(a)
+        try:
+            r = export_crops(con, site, s, a.out, split=a.split, kind=a.kind, res=a.res, out_scale=a.scale,
+                             allow_in_repo=a.allow_in_repo)
+        except ExportError as e:
+            raise SystemExit(str(e)) from e
+        _emit(a, r, f"크롭 {r['written']}개를 썼습니다: {r['out']} — 분할별 {r['by_split']}, 해상도별 {r['by_source']}, "
+                    f"읽을 수 없음 제외 {r['skipped_illegible']}개\n저장소에 넣지 마세요 — 현장의 글씨가 들어 있습니다.")
         return 0
     raise SystemExit(f"알 수 없는 review 명령: {a.review_command}")
 

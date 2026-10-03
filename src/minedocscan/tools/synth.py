@@ -317,6 +317,11 @@ date_from_filename = '(?P<yyyy>\d{4})-(?P<mm>\d{2})-(?P<dd>\d{2})'
 [crosscheck.haul]
 # SURFACE 행은 일보에만 있어 행렬과 비교할 수 없다
 exclude_materials = ["SURFACE"]
+
+[eval]
+# 평가셋 분할: 날짜 단위, hash(split_salt, 날짜) 로 정한다. 소금값을 바꾸면 평가셋이 바뀐다 (ADR 0009)
+split_salt = "synthetic-2030"
+test_share = 0.2
 """
 
 

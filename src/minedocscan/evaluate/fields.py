@@ -22,9 +22,13 @@ from .metrics import auto_rate, corpus_cer, field_accuracy, normalize
 TARGETS = ("final", "raw")
 
 
-def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final", only_listed: bool = False) -> dict:
+def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final", only_listed: bool = False,
+                    split: str = "all", site=None) -> dict:
+    """split: all | test | train — 쪽의 날짜가 그 분할인 셀만 센다 (site 의 소금값으로 정한다, ADR 0009)."""
     if target not in TARGETS:
         raise ValueError(f"target 은 {TARGETS} 중 하나: {target}")
+    if split != "all" and site is None:
+        raise ValueError("split 에는 사이트 팩이 필요합니다")
     col = "f.value_final" if target == "final" else "f.value_raw"
     tables = {(k[0], k[1], k[2]) for k in answers}          # (출처, template, region) 에 정답이 있는가
     groups: dict[str, dict] = {}
@@ -35,6 +39,8 @@ def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final
             "FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id "
             "JOIN doc_document d ON p.document_id = d.document_id WHERE f.kind LIKE 'handwritten%'"):
         source, work_date, template, region = f"{r[0]}#{r[1]}", r[2], r[3], r[4]
+        if split != "all" and site.split_of(work_date) != split:
+            continue
         origin = source if (source, template, region) in tables else work_date
         if (origin, template, region) not in tables:
             continue
@@ -58,6 +64,7 @@ def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final
     out = summarize([p for g in groups.values() for p in g["pairs"]],
                     [s for g in groups.values() for s in g["statuses"]])
     out["target"] = target
+    out["split"] = split
     out["answers_not_in_db"] = len(set(answers) - seen)      # 페이지가 적재되지 않아 비교하지 못한 정답
     out["by_field_kind"] = {k: summarize(g["pairs"], g["statuses"]) for k, g in sorted(groups.items())}
     return out

@@ -1,7 +1,7 @@
 """사이트 팩: 한 현장의 양식 정의·마스터·라벨 묶음. 저장소 밖에 둔다 (docs/SITE_PACK.md).
 
   <site>/
-    site.toml                       현장 이름, 파일명 규칙, 장비 분류 매핑, 교차검증 옵션
+    site.toml                       현장 이름, 파일명 규칙, 장비 분류 매핑, 교차검증 옵션, 평가셋 분할([eval])
     templates/<form>/template.yaml  양식 정의
     templates/<form>/reference.png  기준 이미지 (빈 양식 또는 깨끗한 스캔 한 장)
     labels/pages.json               사람이 붙인 페이지 메타 (날짜·차량번호·작성자) — 인식기가 생기기 전의 대체물
@@ -38,6 +38,21 @@ class SitePack:
         self._labels: dict | None = None
         pat = self.config.get("ingest", {}).get("date_from_filename")
         self._date_re = re.compile(pat) if pat else None
+
+    # ── 평가셋 분할 ────────────────────────────────────────────────────────
+    @property
+    def split_salt(self) -> str:
+        """[eval] split_salt. 없으면 사이트 이름. 바꾸면 평가셋이 바뀐다 (ADR 0009)."""
+        return str(self.option("eval", "split_salt", None) or self.name)
+
+    @property
+    def test_share(self) -> float:
+        return float(self.option("eval", "test_share", 0.2))
+
+    def split_of(self, work_date: str | None) -> str:
+        from ..evaluate.split import split_of
+
+        return split_of(work_date, self.split_salt, self.test_share)
 
     def templates_for(self, day: str | None) -> list[Template]:
         """그날 유효한 템플릿(분류 후보). 날짜를 모르면 전부."""
