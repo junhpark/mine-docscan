@@ -26,6 +26,7 @@
   input.val:focus { outline:none; border-color:var(--accent); }
   input.val.text { width: 28ch; font-size:24px; }
   .prev { font-size:13px; color:var(--muted); }
+  .src { font-size:11px; color:var(--muted); border:1px solid var(--line); border-radius:3px; padding:0 4px; margin-left:6px; }
   .prev b { color:var(--ok); }
   .ro { font-size:22px; color:var(--ok); }
   .msg { min-height:1.4em; color:var(--bad); }
@@ -100,8 +101,8 @@
       const isNum = c.kind === 'handwritten_number';
       h += '<div class="cell">';
       h += '<div class="label">' + esc(c.label) + '</div>';
-      h += '<div class="row"><img src="/crop?field_id=' + encodeURIComponent(c.field_id) + '&kind=row" alt="행"></div>';
-      h += '<div class="big"><img src="/crop?field_id=' + encodeURIComponent(c.field_id) + '&kind=cell&scale=3" alt="셀">';
+      h += '<div class="row"><img data-crop="/crop?field_id=' + encodeURIComponent(c.field_id) + '&kind=row" alt="행"></div>';
+      h += '<div class="big"><img data-crop="/crop?field_id=' + encodeURIComponent(c.field_id) + '&kind=cell&scale=3" alt="셀">';
       if (c.review && !state.entered[c.field_id] && item.cells.length > 1) {
         // 묶음에서 이미 검수된 셀은 참고용으로만 보여 준다 (다시 입력하지 않는다)
         h += '<div class="ro">' + esc(shown(c.review)) + ' <span class="label">(검수됨 · ' + esc(c.review.reviewer) + ')</span></div>';
@@ -120,11 +121,12 @@
         }
         if (prev) h += '<span class="prev">입력했던 값: <b>' + esc(shown(prev)) + '</b></span>';
       }
-      h += '</div></div>';
+      h += '<span class="src" data-src-of="' + i + '"></span></div></div>';
     });
     h += '<div class="keys">' + (item.cells.filter(c => !(c.review && !state.entered[c.field_id] && item.cells.length > 1)).length > 1
       ? '마지막 칸에서 <kbd>Enter</kbd> 하면 전부 저장합니다.' : '') + '</div></div>';
     v.innerHTML = h;
+    v.querySelectorAll('img[data-crop]').forEach(loadCrop);
     const inputs = v.querySelectorAll('input.val');
     inputs.forEach(inp => {
       inp.addEventListener('keydown', onKey);
@@ -133,6 +135,19 @@
     if (inputs.length) { inputs[0].focus(); inputs[0].select(); }
     state.renderedAt = performance.now();
     msg('');
+  }
+
+  async function loadCrop(img) {
+    // 이미지를 fetch 로 받아야 응답 머리글(X-Crop-Source: 원본 해상도인지 정합 이미지인지)을 읽을 수 있다
+    try {
+      const r = await fetch(img.dataset.crop);
+      if (!r.ok) { img.alt = '이미지 없음 (' + r.status + ')'; return; }
+      const blob = await r.blob();
+      img.src = URL.createObjectURL(blob);
+      const src = r.headers.get('X-Crop-Source');
+      const tag = img.closest('.cell').querySelector('.src');
+      if (tag && src) tag.textContent = src === 'source' ? '원본 해상도' : '정합 이미지';
+    } catch (e) { img.alt = '이미지를 받지 못했습니다'; }
   }
 
   function shown(r) { return r.verdict === 'value' ? r.value : (r.verdict === 'empty' ? '(빈 칸)' : '(읽을 수 없음)'); }

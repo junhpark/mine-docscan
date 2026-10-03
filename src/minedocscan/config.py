@@ -30,6 +30,7 @@ class Settings:
     auto_accept_conf: float = 0.90       # 이 신뢰도 이상이면 검수 없이 적재
     classify_min_margin: float = 1.5     # 양식 분류 1위/2위 비율이 이보다 낮으면 검수 표시
     save_aligned: bool = True
+    source_dpi: int = 300                # 원본 해상도 크롭을 뜰 때 PDF 를 렌더링하는 해상도 (스캔 원본이 300 dpi)
     extra: dict = field(default_factory=dict)
 
     @property
@@ -74,6 +75,7 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         auto_accept_conf=float(pipe.get("auto_accept_conf", 0.90)),
         classify_min_margin=float(pipe.get("classify_min_margin", 1.5)),
         save_aligned=bool(pipe.get("save_aligned", True)),
+        source_dpi=int(raw.get("review", {}).get("source_dpi", 300)),
         extra=raw,
     )
     env = os.environ

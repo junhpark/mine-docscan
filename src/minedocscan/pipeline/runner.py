@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -148,7 +149,8 @@ class Pipeline:
         meta = self.site.page_meta(source_name, page_no)
         page = {"page_id": page_id, "document_id": document_id, "page_no": page_no, "template_name": None,
                 "classify_margin": None, "align_inliers": None, "align_grid_err": None, "align_ok": None,
-                "aligned_image": None, "work_date": meta.get("date"), "status": "unknown_form", "error": None}
+                "aligned_image": None, "homography": None, "render_dpi": None,
+                "work_date": meta.get("date"), "status": "unknown_form", "error": None}
         try:
             out = self._process_page(page, source_name, gray, template)
             self.con.execute("RELEASE SAVEPOINT page")
@@ -188,7 +190,9 @@ class Pipeline:
 
         # align
         ar = align_to_template(gray, tpl.reference, tpl.regions, ref_features=tpl.features)
-        page.update(align_inliers=ar.n_inliers, align_grid_err=_finite(ar.grid_err_px), align_ok=int(ar.ok))
+        page.update(align_inliers=ar.n_inliers, align_grid_err=_finite(ar.grid_err_px), align_ok=int(ar.ok),
+                    homography=json.dumps(np.asarray(ar.homography, dtype=float).round(6).tolist()) if ar.n_inliers else None,
+                    render_dpi=self.settings.dpi)
         if self.settings.save_aligned and ar.n_inliers:
             rel = Path("aligned") / document_id / f"p{page_no:02d}_{tpl.name}.png"
             imwrite(self.settings.work_root / rel, ar.warped)

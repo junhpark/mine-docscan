@@ -50,3 +50,16 @@ def load_pages(path: str | Path, dpi: int = 200) -> Iterator[tuple[int, np.ndarr
         yield 1, imread_gray(path)
     else:
         raise ValueError(f"지원하지 않는 형식입니다: {path}")
+
+
+def resolve_source(source_path: str | None, source_rel: str | None, archive_root: str | Path | None) -> Path | None:
+    """문서의 원본 파일 중 이 컴퓨터에서 닿는 경로. 절대경로가 없으면 archive_root + 상대경로. 둘 다 없으면 None."""
+    if source_path:
+        p = Path(source_path)
+        if p.exists():
+            return p
+    if source_rel and archive_root is not None:
+        q = Path(archive_root) / source_rel
+        if q.exists():
+            return q
+    return None

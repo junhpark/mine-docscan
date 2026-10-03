@@ -2,7 +2,7 @@
 
   GET  /                                   화면 (static/index.html)
   GET  /api/queue?name=&n=&seed=&empty_share=&template=&kind=   항목 목록과 진행 수
-  GET  /crop?field_id=&kind=cell|row[&scale=]                   PNG
+  GET  /crop?field_id=&kind=cell|row[&scale=]                   PNG. 응답 머리글 X-Crop-Source: source | aligned
   POST /api/review  {field_id, verdict, value, note}            저장 (검수자는 서버를 띄울 때 정한다)
   GET  /api/stats                          진행 현황
 
@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .crops import CropError, cell_png, field_info, row_png
+from .crops import CropError, cell_crop, field_info, row_crop
 from .queue import INPUT_KINDS, QUEUES, build_queue
 from .store import VERDICTS, review_from_field, save, stats
 
@@ -71,16 +71,17 @@ class ReviewApp:
                  templates={t.name: t.title for t in self.site.templates.values()})
         return q
 
-    def crop_png(self, params: dict) -> bytes:
+    def crop_png(self, params: dict) -> tuple[bytes, str]:
+        """(PNG, 출처). 출처는 source(원본 해상도) 또는 aligned(정합 이미지)."""
         fid, kind = params.get("field_id", ""), params.get("kind", "cell")
         try:
             if kind == "row":
-                return row_png(self.con, self.settings, fid)
+                return row_crop(self.con, self.settings, fid)
             if kind == "cell":
                 scale = _int_param(params, "scale", 3)
                 if not 1 <= scale <= 6:
                     raise ApiError(400, f"scale 은 1–6: {scale}")
-                return cell_png(self.con, self.settings, fid, scale=scale)
+                return cell_crop(self.con, self.settings, fid, scale=scale)
         except KeyError as e:
             raise ApiError(404, f"없는 필드: {fid}") from e
         except CropError as e:
@@ -129,11 +130,13 @@ class _Handler(BaseHTTPRequestHandler):
     def log_error(self, fmt, *args):
         return None
 
-    def _send(self, status: int, body: bytes, ctype: str) -> None:
+    def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -165,7 +168,8 @@ class _Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/stats":
                 self._json(200, self.app.stats_json())
             elif u.path == "/crop":
-                self._send(200, self.app.crop_png(params), "image/png")
+                png, src = self.app.crop_png(params)
+                self._send(200, png, "image/png", {"X-Crop-Source": src})
             elif u.path == "/favicon.ico":
                 self._send(204, b"", "image/x-icon")
             else:

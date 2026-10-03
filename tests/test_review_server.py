@@ -121,9 +121,17 @@ def test_missing_aligned_image_is_a_clear_error(srv, tmp_path):
     app = srv["app"]
     other = ReviewApp(app.con, app.site, replace(srv["settings"], work_root=tmp_path / "elsewhere"), "jp")
     fid = app.con.execute("SELECT field_id FROM doc_field LIMIT 1").fetchone()[0]
-    with pytest.raises(ApiError) as e:
-        other.crop_png({"field_id": fid, "kind": "cell"})
-    assert e.value.status == 409 and "정합 이미지" in str(e.value)
+    assert other.crop_png({"field_id": fid, "kind": "cell"})[1] == "source"       # 정합 이미지가 없어도 원본이 있으면 된다
+    pdf = next(srv["pipe"].settings.archive_root.glob("*.pdf"))
+    hidden = pdf.with_suffix(".hidden")
+    pdf.rename(hidden)
+    try:
+        with pytest.raises(ApiError) as e:
+            other.crop_png({"field_id": fid, "kind": "cell"})
+        assert e.value.status == 409 and "정합 이미지" in str(e.value)
+        assert app.crop_png({"field_id": fid, "kind": "cell"})[1] == "aligned"    # 원본이 없으면 정합 이미지로 물러난다
+    finally:
+        hidden.rename(pdf)
     with pytest.raises(ValueError):
         ReviewApp(app.con, app.site, srv["settings"], "")                 # 검수자 없이는 띄우지 않는다
     with pytest.raises(OSError, match="--port"):

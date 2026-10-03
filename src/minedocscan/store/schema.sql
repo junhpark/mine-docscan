@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS doc_page (
   align_grid_err  REAL,                      -- 괘선 재검출 오차(px)
   align_ok        INTEGER,                   -- 0/1, 정합을 시도하지 않았으면 NULL
   aligned_image   TEXT,                      -- 정합 이미지 경로 (work_root 기준 상대경로)
+  homography      TEXT,                      -- JSON 3×3: 렌더링한 쪽 픽셀 → 템플릿 픽셀. 원본 해상도 크롭이 쓴다 (imaging/hires.py)
+  render_dpi      INTEGER,                   -- 그 호모그래피를 구할 때 쪽을 렌더링한 해상도 (이미지 파일이면 원본 그대로)
   work_date       TEXT,
   status          TEXT NOT NULL,             -- unknown_form | classified_only | align_failed | loaded | error
   error           TEXT                       -- error 일 때 예외 종류와 메시지. 그 쪽의 반쯤 쓰인 행은 남기지 않는다(SAVEPOINT)

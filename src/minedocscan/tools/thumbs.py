@@ -9,19 +9,12 @@ from pathlib import Path
 
 import cv2
 
-from ..imaging.io import imwrite, load_pages
+from ..imaging.io import imwrite, load_pages, resolve_source
 
 
 def source_file(settings, row: dict) -> Path | None:
     """쪽(또는 문서) 행의 원본 파일. 이 컴퓨터에서 닿는 경로를 돌려주고, 없으면 None."""
-    p = Path(row["source_path"]) if row.get("source_path") else None
-    if p is not None and p.exists():
-        return p
-    if row.get("source_rel") and settings.archive_root is not None:
-        q = Path(settings.archive_root) / row["source_rel"]
-        if q.exists():
-            return q
-    return None
+    return resolve_source(row.get("source_path"), row.get("source_rel"), settings.archive_root)
 
 
 def write_thumbs(settings, rows: list[dict], out_dir: str | Path | None = None, factor: int = 4) -> list[Path]:
