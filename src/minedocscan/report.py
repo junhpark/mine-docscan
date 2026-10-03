@@ -99,9 +99,10 @@ def format_by_month(rows: list[dict]) -> str:
     head = f"{'월':<8} {'양식':<24} {'쪽':>5} {'적재':>5} {'정합실패':>8} {'오류':>4} {'인라이어최소':>10} {'괘선중앙':>8} {'괘선최대':>8} {'여유낮음':>8}"
     lines = [head]
     for g in rows:
+        v = lambda x: "-" if x is None else str(x)        # noqa: E731 — 0.0 도 값이다
         lines.append(f"{g['month']:<8} {g['template']:<24} {g['pages']:>5} {g['loaded']:>5} {g['align_failed']:>8} "
-                     f"{g['error']:>4} {str(g['min_inliers'] or '-'):>10} {str(g['grid_err_median'] or '-'):>8} "
-                     f"{str(g['grid_err_max'] or '-'):>8} {g['low_margin']:>8}")
+                     f"{g['error']:>4} {v(g['min_inliers']):>10} {v(g['grid_err_median']):>8} "
+                     f"{v(g['grid_err_max']):>8} {g['low_margin']:>8}")
     return "\n".join(lines)
 
 

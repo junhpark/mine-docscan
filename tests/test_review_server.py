@@ -177,4 +177,5 @@ def test_number_values_are_normalized(srv):
     assert status == 200 and out["value"] == "7"
     assert load(settings.reviews)[0][-1][1].value == "7"
     assert con.execute("SELECT value_final FROM doc_field WHERE field_id=?", (fid,)).fetchone()[0] == "7"
-    assert "isComposing" in _get(base + "/")[2].decode() and "ev.repeat" in _get(base + "/")[2].decode()
+    html = _get(base + "/")[2].decode()
+    assert "isComposing" in html and "ev.repeat" in html and "ev.altKey" in html      # 후보 선택은 Alt+숫자

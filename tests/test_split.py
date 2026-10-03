@@ -72,12 +72,20 @@ def test_export_crops_writes_labels_and_pngs_outside_the_repo(reviewed_day, tmp_
     assert r["written"] == len(labels) == len(pngs) == n_valid and r["skipped_illegible"] == 1
     assert r["by_split"] == {sp: n_valid} and set(r["by_source"]) == {"source"}
     assert all(lab["split"] == sp and lab["resolution"] == "source" and lab["out_scale"] == 1.5 for lab in labels)
+    assert all(lab["pad"] >= 8 and len(lab["bbox"]) == 4 for lab in labels)          # 여유는 화면과 같이 행 높이의 절반
+    import cv2
+    lab = next(lab for lab in labels if lab["kind"] == "handwritten_number")
+    img = cv2.imread(str(out / lab["file"]), cv2.IMREAD_GRAYSCALE)
+    x0, y0, x1, y1 = lab["bbox"]
+    assert img.shape == (round((y1 - y0 + 2 * lab["pad"]) * 1.5), round((x1 - x0 + 2 * lab["pad"]) * 1.5))
     assert {lab["verdict"] for lab in labels} == {"value", "empty"} and all((out / lab["file"]).exists() for lab in labels)
     assert all(fid != lab["field_id"] for lab in labels)
     other = "train" if sp == "test" else "test"
     assert export_crops(con, rsite, settings, tmp_path / "none", split=other)["written"] == 0
-    numbers = export_crops(con, rsite, settings, tmp_path / "num", kind="handwritten_number", res="aligned", out_scale=1.0)
+    numbers = export_crops(con, rsite, settings, tmp_path / "num", kind="handwritten_number", res="aligned", out_scale=1.0, pad=0)
     assert 0 < numbers["written"] < n_valid and set(numbers["by_source"]) == {"aligned"}
+    lab0 = json.loads((tmp_path / "num" / sp / "labels.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert lab0["pad"] == 0
     # 대상이 git 작업 트리 안이면 거절한다
     assert inside_git_tree(REPO / "out" / "crops") and not inside_git_tree(tmp_path)
     with pytest.raises(ExportError, match="git"):

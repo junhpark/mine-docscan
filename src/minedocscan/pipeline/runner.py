@@ -94,7 +94,8 @@ class Pipeline:
             return self._fail_document(document_id, path, source_name, e)
         if skip_existing:
             row = self.con.execute("SELECT status FROM doc_document WHERE document_id = ?", (document_id,)).fetchone()
-            if row is not None and row[0] in ("processed", "needs_review"):
+            n_err = con_count(self.con, "SELECT COUNT(*) FROM doc_page WHERE document_id = ? AND status = 'error'", document_id)
+            if row is not None and row[0] in ("processed", "needs_review") and n_err == 0:   # 쪽 오류가 있으면 다시 한다
                 self.summary["skipped"] += 1
                 return {"document_id": document_id, "status": row[0], "skipped": True, "pages": []}
         snapshot = copy.deepcopy(self.summary)            # 문서가 실패하면 그 문서의 집계도 되돌린다
@@ -191,7 +192,7 @@ class Pipeline:
         # align
         ar = align_to_template(gray, tpl.reference, tpl.regions, ref_features=tpl.features)
         page.update(align_inliers=ar.n_inliers, align_grid_err=_finite(ar.grid_err_px), align_ok=int(ar.ok),
-                    homography=json.dumps(np.asarray(ar.homography, dtype=float).round(6).tolist()) if ar.n_inliers else None,
+                    homography=homography_json(ar.homography) if ar.n_inliers else None,
                     render_dpi=self.settings.dpi)
         if self.settings.save_aligned and ar.n_inliers:
             rel = Path("aligned") / document_id / f"p{page_no:02d}_{tpl.name}.png"
@@ -252,6 +253,16 @@ def update_document_status(con: sqlite3.Connection, document_id: str) -> str:
     status = "needs_review" if (n_pending or n_bad) else "processed"
     con.execute("UPDATE doc_document SET status=? WHERE document_id=?", (status, document_id))
     return status
+
+
+def homography_json(h) -> str:
+    """3×3 호모그래피 → JSON. 반올림하지 않는다: 원근 항(셋째 행)은 1e-7 크기라 소수 6자리로 자르면 0 이 되어
+    쪽의 구석에서 원본 해상도 크롭이 몇 픽셀 어긋난다 (실데이터에서 최대 3.6 px)."""
+    return json.dumps(np.asarray(h, dtype=float).tolist())
+
+
+def con_count(con: sqlite3.Connection, sql: str, *args) -> int:
+    return con.execute(sql, args).fetchone()[0]
 
 
 def _error_text(e: BaseException) -> str:

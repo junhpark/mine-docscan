@@ -122,5 +122,14 @@ def test_review_beats_label_and_any_value_is_accepted(nolabels):
     out = app.post_review({"field_id": field_id_of(page_id, "vehicle_no"), "verdict": "value", "value": "V-999"})
     assert out["ok"] and "V-999" in build_queue(con, "page-fields", site=site)["candidates"]["vehicle_no"]
     assert con.execute("SELECT DISTINCT vehicle_no FROM prod_haul WHERE page_id=?", (page_id,)).fetchone()[0] == "V-999"
-    # 되돌려 둔다 (다른 테스트의 불변식과 무관하게 파일에는 두 줄 다 남는다)
+    assert con.execute("SELECT DISTINCT slot FROM prod_haul WHERE page_id=?", (page_id,)).fetchone()[0] is not None   # 작성자로 자리가 맞는다
+    # 작성자까지 모르는 사람으로 바꾸면 어느 자리에도 맞지 않는다 → 옛 slot 이 남지 않고, 새로 돌린 DB 와 같다
+    old_operator = nolabels["labels"][source]["operator"]
+    save(con, site, settings, Review(field_id_of(page_id, "operator"), "value", "NOBODY", "jp"))
+    assert con.execute("SELECT DISTINCT slot FROM prod_haul WHERE page_id=?", (page_id,)).fetchone()[0] is None
+    fresh = Pipeline(replace(settings, work_root=settings.work_root.parent / "work_v999"))
+    fresh.run([synth.scans])
+    assert _dump(fresh.con, "prod_haul") == _dump(con, "prod_haul") and _dump(fresh.con, "xcheck_haul") == _dump(con, "xcheck_haul")
+    # 되돌려 둔다 (파일에는 모든 줄이 남는다)
     save(con, site, settings, Review(field_id_of(page_id, "vehicle_no"), "value", nolabels["labels"][source]["vehicle_no"], "jp"))
+    save(con, site, settings, Review(field_id_of(page_id, "operator"), "value", old_operator, "jp"))

@@ -120,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--res", choices=["auto", "source", "aligned"], default="auto",
                    help="source = 원본 해상도(호모그래피로 다시 정합), aligned = 200 dpi 정합 이미지, auto = 원본이 닿으면 원본")
     r.add_argument("--scale", type=float, default=1.5, help="템플릿 좌표(200 dpi) 대비 배율 (기본 1.5 = 300 dpi 원본 그대로)")
+    r.add_argument("--pad", type=int, help="셀 둘레 여유(템플릿 px). 기본은 화면과 같이 행 높이의 절반(최소 8)")
     r.add_argument("--allow-in-repo", action="store_true", help="git 작업 트리 안에도 쓴다 (글씨가 들어 있다 — 커밋하지 말 것)")
     return ap
 
@@ -424,7 +425,7 @@ def cmd_review(a) -> int:
 
         s, site, con, _imported = _review_db(a)
         try:
-            r = export_crops(con, site, s, a.out, split=a.split, kind=a.kind, res=a.res, out_scale=a.scale,
+            r = export_crops(con, site, s, a.out, split=a.split, kind=a.kind, res=a.res, out_scale=a.scale, pad=a.pad,
                              allow_in_repo=a.allow_in_repo)
         except ExportError as e:
             raise SystemExit(str(e)) from e

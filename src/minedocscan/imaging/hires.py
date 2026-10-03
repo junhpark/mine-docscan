@@ -12,16 +12,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .io import load_pages
+from .io import load_page
 
 
 @lru_cache(maxsize=4)
 def _render(path: str, mtime: float, page_no: int, dpi: int) -> np.ndarray:
-    """원본의 한 쪽을 렌더링한다. 같은 쪽의 셀을 연달아 뜰 때를 위해 몇 장만 캐시한다 (mtime 은 캐시 무효화 키)."""
-    for n, gray in load_pages(path, dpi):
-        if n == page_no:
-            return gray
-    raise KeyError(f"{path} 에 {page_no}쪽이 없습니다")
+    """원본의 한 쪽만 렌더링한다 (앞쪽을 차례로 렌더링하지 않는다 — 20쪽째가 2.5초 걸렸다).
+    같은 쪽의 셀을 연달아 뜰 때를 위해 몇 장만 캐시한다 (mtime 은 캐시 무효화 키)."""
+    return load_page(path, page_no, dpi)
 
 
 def cell_from_source(source: str | Path, page_no: int, homography: np.ndarray, render_dpi: int,

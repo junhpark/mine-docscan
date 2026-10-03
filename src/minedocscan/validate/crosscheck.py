@@ -68,6 +68,8 @@ def _crosscheck_date(con: sqlite3.Connection, date: str, exclude: set[str]) -> d
                 break
 
     obs = []
+    # 자리를 못 정한 쪽은 slot 을 비운다 — 차량·작성자를 고쳐 자리가 풀리면 옛 자리가 남으면 안 된다 (새로 돌린 DB 와 같아야 한다)
+    con.execute("UPDATE prod_haul SET slot=NULL WHERE work_date=? AND source_role='log'", (date,))
     for pid, (slot, how) in page_slot.items():
         vehicle, operator = pages[pid]
         h_op, h_veh = slots[slot]

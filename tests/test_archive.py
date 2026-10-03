@@ -133,3 +133,39 @@ def test_page_error_is_isolated_and_unknown_form_is_listed(hard_day, capsys):
     assert sum(r["pages"] for r in rows) == len(pages) and sum(r["error"] for r in rows) == 1
     assert any(r["template"] == "unknown" and r["pages"] == 1 for r in rows)
     assert main(["report", "--by-month"] + common) == 0 and "unknown" in capsys.readouterr().out
+
+
+def test_page_error_document_is_reprocessed_by_skip_existing(hard_day):
+    """핸들러가 고쳐진 뒤 --skip-existing 으로 다시 돌리면 쪽 오류가 있던 문서는 건너뛰지 않고 다시 처리된다."""
+    pipe = Pipeline(hard_day["settings"])
+    summary = pipe.run([hard_day["synth"].scans], skip_existing=True)
+    assert summary["documents"] == 1 and summary["skipped"] == 0 and summary["page_errors"] == []
+    assert pipe.con.execute("SELECT COUNT(*) FROM doc_page WHERE status='error'").fetchone()[0] == 0
+    summary = Pipeline(hard_day["settings"]).run([hard_day["synth"].scans], skip_existing=True)
+    assert summary["documents"] == 0 and summary["skipped"] == 1
+
+
+def test_truncated_pdf_is_failed_not_silently_repaired(tmp_path, capsys):
+    """동기화 중 잘린 PDF: 라이브러리가 조용히 복구해 뒤쪽 쪽을 '양식 없음'으로 섞지 않고 failed 로 낸다. 종료 코드 1, JSON 은 깨지지 않는다."""
+    synth = generate(tmp_path / "data", days=1, seed=3)
+    pdf = next(synth.scans.glob("*.pdf"))
+    data = pdf.read_bytes()
+    pdf.write_bytes(data[: len(data) // 2])
+    common = ["--site", str(synth.site), "--archive-root", str(synth.scans), "--work-root", str(tmp_path / "work"), "--json"]
+    capsys.readouterr()
+    code = main(["run", "--fresh"] + common)
+    out = json.loads(capsys.readouterr().out)                       # 라이브러리 메시지가 섞이면 여기서 깨진다
+    assert code == 1 and out["report"]["documents_by_status"] == {"failed": 1}
+    assert "복구" in out["run"]["failed"][0]["error"] and out["report"]["pages"] == 0
+    pdf.write_bytes(data)
+    assert main(["run", "--skip-existing"] + common) == 0
+    assert json.loads(capsys.readouterr().out)["report"]["documents_by_status"] == {"needs_review": 1}
+
+
+def test_by_month_prints_zero_not_dash():
+    from minedocscan.report import format_by_month
+
+    text = format_by_month([{"template": "t", "month": "2030-01", "pages": 1, "loaded": 1, "align_failed": 0, "error": 0,
+                             "classified_only": 0, "min_inliers": 0, "grid_err_median": 0.0, "grid_err_max": 0.0,
+                             "low_margin": 0}])
+    assert "0.0" in text and " - " not in text.splitlines()[1]

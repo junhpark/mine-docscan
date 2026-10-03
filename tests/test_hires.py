@@ -51,3 +51,24 @@ def test_falls_back_to_aligned_when_source_is_gone(null_run, synth):
     finally:
         hidden.rename(pdf)
     assert cell_crop(con, settings, fid, scale=1)[1] == "source"
+
+
+def test_homography_is_stored_at_full_precision():
+    """원근 항(1e-7 크기)이 반올림으로 0 이 되면 쪽의 구석에서 몇 px 어긋난다 (실데이터 최대 3.6 px)."""
+    from minedocscan.pipeline.runner import homography_json
+
+    h = np.array([[1.0012, -0.0031, 12.3456789], [0.0029, 0.9987, -7.6543219], [2.5e-7, -3.1e-7, 1.0]])
+    back = np.array(json.loads(homography_json(h)))
+    assert np.array_equal(back, h)
+
+
+def test_load_page_renders_only_that_page(synth):
+    from minedocscan.imaging.io import load_page, load_pages
+
+    pdf = sorted(synth.scans.glob("*.pdf"))[0]
+    pages = dict(load_pages(pdf, 50))
+    assert np.array_equal(load_page(pdf, 3, 50), pages[3]) and np.array_equal(load_page(pdf, len(pages), 50), pages[len(pages)])
+    import pytest
+
+    with pytest.raises(KeyError):
+        load_page(pdf, len(pages) + 1, 50)
