@@ -3,7 +3,9 @@
   OUT/<split>/<kind>/<이름>.png          셀 크롭 (기본: 원본 해상도, 템플릿 좌표의 1.5배 = 300 dpi 원본 그대로).
                                          이름은 field_id 에서 파일 이름에 못 쓰는 글자(: 등)를 바꾼 것 — 읽는 쪽은
                                          labels.jsonl 의 file 만 본다 (이름에서 field_id 를 되살리지 않는다)
-  OUT/<split>/labels.jsonl               field_id, 값, 판정, 양식, 열, 행 키, 날짜, 해상도(source|aligned), 검수자
+  OUT/<split>/labels.jsonl               field_id, 값, 판정, 양식, 열, 행 키, 날짜, 규격(spec: res·scale·pad), 검수자
+
+크롭은 파이프라인이 인식기에 넘기는 것과 같은 구현으로 뜬다(imaging/cropspec.py) — 같은 셀이면 화소까지 같다.
 
 illegible 은 뺀다. empty 는 빈 칸의 예로 넣는다. test 와 train 을 섞지 않는다 (날짜 분할, ADR 0009).
 크롭과 라벨에는 현장의 글씨가 들어 있다. 대상이 git 작업 트리 안이면 거절한다 (--allow-in-repo 로만).
@@ -17,7 +19,7 @@ import sqlite3
 from pathlib import Path
 
 from ..imaging.io import imwrite
-from .crops import _pad, crop_region, field_info
+from .crops import field_info, spec_crop
 from .store import effective_with_split
 
 
@@ -74,8 +76,8 @@ def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split
             r = field_info(con, rv.field_id)
             if r is None or (kind and r["kind"] != kind):
                 continue
-            pd = _pad(r, pad)
-            img, src = crop_region(settings, r, (r["x0"] - pd, r["y0"] - pd, r["x1"] + pd, r["y1"] + pd), out_scale, res)
+            img, spec = spec_crop(settings, r, res, out_scale, pad)
+            src, pd = spec.res, spec.pad_for((r["x0"], r["y0"], r["x1"], r["y1"]))
             name = safe_name(rv.field_id)
             if (sp, r["kind"], name) in used:                 # 바꾼 글자 때문에 겹치면 field_id 의 해시를 붙인다
                 name += "-" + hashlib.sha256(rv.field_id.encode()).hexdigest()[:8]
@@ -88,8 +90,8 @@ def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split
             handles[sp].write(json.dumps({
                 "field_id": rv.field_id, "file": rel.as_posix(), "text": rv.value if rv.verdict == "value" else "",
                 "verdict": rv.verdict, "template": r["template_name"], "region": r["region"], "field_name": r["field_name"],
-                "row_key": r["row_key"], "kind": r["kind"], "work_date": d, "split": sp, "resolution": src,
-                "out_scale": out_scale, "pad": pd, "bbox": [r["x0"], r["y0"], r["x1"], r["y1"]],
+                "row_key": r["row_key"], "kind": r["kind"], "work_date": d, "split": sp, "spec": spec.to_dict(),
+                "resolution": src, "out_scale": out_scale, "pad": pd, "bbox": [r["x0"], r["y0"], r["x1"], r["y1"]],
                 "reviewer": rv.reviewer, "reviewed_at": rv.reviewed_at}, ensure_ascii=False) + "\n")
             written += 1
             by_split[sp] = by_split.get(sp, 0) + 1

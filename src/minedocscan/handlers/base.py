@@ -17,7 +17,8 @@ from ..correct import Corrector
 from ..forms.sitepack import SitePack
 from ..forms.template import Template
 from ..imaging.cells import CellObs
-from ..recognize.base import CellContext, Recognition, Recognizer
+from ..imaging.cropspec import PageImages, crop_cell
+from ..recognize.base import CellContext, Recognition, Recognizer, spec_for
 from ..review.store import apply_verdict, effective
 from ..store.db import upsert
 
@@ -38,6 +39,7 @@ class PageContext:
     recognizer: Recognizer
     corrector: Corrector
     notes: dict = field(default_factory=dict)
+    images: PageImages | None = None    # 이 쪽의 그림(정합 이미지·원본). 인식기에 넘길 크롭을 규격대로 뜨는 데 쓴다
 
     @property
     def work_date(self) -> str | None:
@@ -77,14 +79,20 @@ def apply_reviews(ctx: PageContext, rows: list[dict]) -> list[dict]:
 
 
 def recognize(ctx: PageContext, cells: list[CellObs], choices: dict[str, list[str]] | None = None) -> list[Recognition]:
-    """셀 묶음을 인식 → 교정까지 돌린다. 값이 없는 셀은 호출 전에 걸러서 넘긴다."""
+    """셀 묶음을 인식 → 교정까지 돌린다. 값이 없는 셀은 호출 전에 걸러서 넘긴다.
+
+    크롭은 핸들러가 만들지 않는다: 인식기가 그 칸 종류에 선언한 규격(spec_for)대로 imaging/cropspec.crop_cell 로 뜬다
+    — review export-crops 가 쓰는 것과 같은 구현이라 같은 셀이면 화소까지 같다 (tasks/0003 4.1)."""
     if not cells:
         return []
     source = f"{ctx.source_name}#{ctx.page_no}"
     contexts = [CellContext(ctx.template.name, o.cell.region, o.cell.name, o.cell.kind, o.cell.row_key,
-                            ctx.work_date, ctx.page_id, source, (choices or {}).get(o.cell.name, []))
+                            ctx.work_date, ctx.page_id, source, (choices or {}).get(o.cell.name, []),
+                            field_id=field_id(ctx, o))
                 for o in cells]
-    recs = ctx.recognizer.recognize([o.crop for o in cells], contexts)
+    images = ctx.images or PageImages(aligned=ctx.aligned)
+    crops = [crop_cell(images, o.cell.bbox, spec_for(ctx.recognizer, o.cell.kind)) for o in cells]
+    recs = ctx.recognizer.recognize(crops, contexts)
     return ctx.corrector.correct(recs, contexts)
 
 

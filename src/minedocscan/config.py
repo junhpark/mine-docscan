@@ -26,7 +26,8 @@ class Settings:
     db_url: str | None = None
     reviews: Path | None = None          # 검수 기록(jsonl). None 이면 사이트 팩의 reviews/reviews.jsonl
     dpi: int = 200                       # 템플릿 좌표계의 해상도. 템플릿을 만든 해상도와 같아야 한다
-    recognizer: str = "null"             # recognize.REGISTRY 의 이름
+    recognizer: str = "null"             # recognize.REGISTRY 의 이름 — 기본 백엔드
+    recognizer_by_kind: dict = field(default_factory=dict)   # [recognize.by_kind] 칸 종류 → 백엔드 이름
     corrector: str = "none"              # correct.REGISTRY 의 이름
     auto_accept_conf: float = 0.90       # 이 신뢰도 이상이면 검수 없이 적재
     classify_min_margin: float = 1.5     # 양식 분류 1위/2위 비율이 이보다 낮으면 검수 표시
@@ -73,6 +74,7 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         reviews=_p(paths.get("reviews")),
         dpi=int(pipe.get("dpi", 200)),
         recognizer=raw.get("recognize", {}).get("backend", "null"),
+        recognizer_by_kind=dict(raw.get("recognize", {}).get("by_kind", {}) or {}),
         corrector=raw.get("correct", {}).get("backend", "none"),
         auto_accept_conf=float(pipe.get("auto_accept_conf", 0.90)),
         classify_min_margin=float(pipe.get("classify_min_margin", 1.5)),

@@ -181,7 +181,7 @@ def cmd_info(a) -> int:
 
 def cmd_run(a) -> int:
     from .pipeline import Pipeline
-    from .recognize import OracleRecognizer, get_recognizer, load_answers_json
+    from .recognize import OracleRecognizer, build_recognizer, load_answers_json
     from .report import build_report, format_report, xcheck_by_date
 
     s = _settings(a, recognizer=a.recognizer, corrector=a.corrector)
@@ -201,7 +201,10 @@ def cmd_run(a) -> int:
     elif s.recognizer == "oracle":
         raise SystemExit("oracle 백엔드는 --answers 또는 --inspection-csv 가 필요합니다")
     else:
-        recognizer = get_recognizer(s.recognizer)
+        try:
+            recognizer = build_recognizer(s, site)
+        except (KeyError, ValueError, FileNotFoundError) as e:
+            raise SystemExit(f"인식 백엔드를 준비할 수 없습니다: {e}") from e
     pipe = Pipeline(s, site=site, recognizer=recognizer)
     files = pipe.expand(paths)
     if not files:
