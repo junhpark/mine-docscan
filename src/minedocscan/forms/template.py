@@ -81,7 +81,8 @@ def _iso_date(name: str, key: str, v) -> str | None:
 
 
 class Template:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, validate: bool = True):
+        """validate=False: 오류가 있어도 읽기만 한다 (template check 가 problems() 로 전부 모은다)."""
         path = Path(path)
         self.path = path
         self.dir = path.parent
@@ -101,7 +102,8 @@ class Template:
             raise TemplateError(f"{self.name}: valid_from 이 valid_to 보다 늦습니다")
         self._ref: np.ndarray | None = None
         self._feats = None
-        self._validate()
+        if validate:
+            self._validate()
 
     def _validate(self) -> None:
         errs = self.problems()
@@ -172,8 +174,8 @@ class Template:
         for r in rows:
             if not isinstance(r.get("row"), int) or r["row"] + hr + 1 >= len(all_ys):
                 out.append(f"{where}: 행 {r.get('row')} 가 괘선 범위를 벗어납니다")
-            if row_key(r) in keys:
-                out.append(f"{where}: 행 키 '{row_key(r)}' 가 겹칩니다")
+            if row_key(r) in keys:                              # 키 값은 찍지 않는다 (점검표의 행 키는 장비 번호다)
+                out.append(f"{where}: 행 {r.get('row')} 의 행 키가 앞의 행과 겹칩니다")
             keys.add(row_key(r))
         for x in [*columns, *rows]:
             st = x.get("subtotal")

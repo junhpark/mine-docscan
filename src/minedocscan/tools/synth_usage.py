@@ -363,15 +363,26 @@ def _set_activities(p: PagePlan, rng) -> None:
 
 
 # ── 그리기 ─────────────────────────────────────────────────────────────────
+def _ink_extent(g: np.ndarray) -> float:
+    """글자의 폭: 잉크 질량이 열 방향으로 1 %–99 % 인 구간. 문턱(0.2)으로 자른 폭은 OpenCV 판마다 안티에일리어싱이 조금 달라
+    1 px 씩 달라졌고(붙임표 22 ↔ 23), 그 뒤의 글자가 다 밀렸다 — 질량으로 재면 그 차이가 소수점 아래로 줄어든다."""
+    col = g.sum(axis=0).astype(np.float64)
+    if col.sum() <= 0:
+        return g.shape[1] * 0.5
+    c = np.cumsum(col) / col.sum()
+    return float(np.interp(0.99, c, np.arange(len(c))) - np.interp(0.01, c, np.arange(len(c)))) + 1.0
+
+
 def _text_ink(text: str, h: float, style: dict, rng) -> tuple[np.ndarray, float, float]:
-    """숫자·기호 한 줄의 잉크 (0–1). 돌려주는 값: (그림, 글씨가 시작하는 x, 글씨 폭). 세로 가운데 = 그림 높이의 반."""
+    """숫자·기호 한 줄의 잉크 (0–1). 돌려주는 값: (그림, 글씨가 시작하는 x, 글씨 폭). 세로 가운데 = 그림 높이의 반.
+    그림의 크기는 글자 수와 높이로만 정한다 (잰 폭으로 정하면 판마다 1 px 달라질 수 있다)."""
     glyphs = [synth_cells._glyph(ch, h * (float(rng.uniform(0.92, 1.06)) if ch.isdigit() else 1.0), style, rng)
               for ch in text]
-    widths = [synth_cells._ink_width(g) for g in glyphs]
+    widths = [_ink_extent(g) for g in glyphs]
     gap = h * float(rng.uniform(0.05, 0.12))
     total = sum(widths) + gap * (len(glyphs) - 1)
     m = h * 0.8
-    ink = np.zeros((int(h * 2.4), int(total + 2 * m)), np.float32)
+    ink = np.zeros((int(h * 2.4), int(len(text) * h * 1.1 + 2 * m)), np.float32)
     x, cy = m, ink.shape[0] / 2
     for ch, g, w in zip(text, glyphs, widths, strict=True):
         dy = handfont.glyph_offset(ch) * h

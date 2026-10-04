@@ -102,6 +102,15 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--page", type=int, default=1)
     t.add_argument("--handler", default="generic")
     t.add_argument("--overwrite", action="store_true")
+    t = tsub.add_parser("preview", parents=[common],
+                        help="칸·필드의 테두리와 이름·종류·형식·역할·행 번호를 기준 이미지(또는 정합한 스캔) 위에 그린 PNG")
+    t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
+    t.add_argument("--scan", help="이 스캔의 쪽을 정합해서 그 위에 그린다 (칸이 실제 글씨에 맞는지)")
+    t.add_argument("--page", type=int, default=1, help="--scan 의 쪽 번호 (1부터)")
+    t.add_argument("--out", help="출력 폴더 (기본 WORK_ROOT/template-preview). 저장소 안은 거절한다")
+    t = tsub.add_parser("check", parents=[common],
+                        help="템플릿의 오류를 전부: 읽기 오류, 겹치는 칸, 쪽 밖의 칸, 역할에 필요한 칸, 형식과 종류의 불일치 …")
+    t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
 
     p = sub.add_parser("synth", parents=[common], help="합성 사이트 팩 + 스캔 문서 + 정답 생성")
     p.add_argument("out", help="출력 폴더 (site/, scans/, truth.json, answers.json)")
@@ -112,6 +121,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--meta-fields", action="store_true",
                    help="일보의 차량번호(네 자리)·작성자를 사람마다 다른 획으로, 날짜 줄에 월·일 필드 (메타 필드 인식기 시험용)")
     p.add_argument("--mix-pages", action="store_true", help="--meta-fields 와 함께: 마지막 날의 묶음에 첫날의 일보 한 쪽을 섞는다")
+    p.add_argument("--usage-logs", action="store_true",
+                   help="장비 가동 일보 두 종(작업 표 + 계기 / 작업량 표 + 근무 시각 + 계기)을 날마다 묶음 끝에 붙인다")
+    p.add_argument("--usage-only", action="store_true", help="가동 일보만 (점검표·운반 쪽 없이)")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
@@ -512,6 +524,28 @@ def cmd_regress(a) -> int:
 def cmd_template(a) -> int:
     from .tools.mktemplate import init_template
 
+    if a.template_command == "check":
+        from .tools.tpltools import check_template
+
+        errs = check_template(a.template_dir)
+        _emit(a, {"template": a.template_dir, "problems": errs},
+              "\n".join(f"- {e}" for e in errs) + f"\n오류 {len(errs)}개" if errs else "오류 없음")
+        return 1 if errs else 0
+    if a.template_command == "preview":
+        from .tools.tpltools import preview
+
+        s = _settings(a)
+        out = Path(a.out) if a.out else s.work_root / "template-preview"
+        try:
+            r = preview(a.template_dir, out, scan=a.scan, page=a.page, dpi=s.dpi)
+        except (ValueError, OSError) as e:                     # TemplateError 는 ValueError — 오류 목록은 template check 로
+            raise SystemExit(f"{e}\n(오류를 전부 보려면: minedocscan template check {a.template_dir})") from e
+        al = r["aligned"]
+        _emit(a, r, f"그렸습니다: {r['out']} — 테두리 {r['boxes']}개 (칸 + 필드)"
+              + ("" if al is None else f"\n정합: {'통과' if al['ok'] else '실패'}, 인라이어 {al['inliers']}, "
+                 f"괘선 오차 {al['grid_err']} px")
+              + "\n저장소에 넣지 마세요 — 실제 양식의 이름·차량번호가 보입니다.")
+        return 0
     s = _settings(a)
     if s.site is None:
         raise SystemExit("사이트 팩이 지정되지 않았습니다: --site 또는 MINEDOCSCAN_SITE")
@@ -529,7 +563,8 @@ def cmd_synth(a) -> int:
 
     if a.mix_pages and not a.meta_fields:
         raise SystemExit("--mix-pages 는 --meta-fields 와 같이 씁니다")
-    r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages)
+    r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
+                 usage_logs=a.usage_logs, usage_only=a.usage_only)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")
