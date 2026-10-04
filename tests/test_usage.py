@@ -19,7 +19,7 @@ from minedocscan.report import build_report
 from minedocscan.review.queue import build_queue
 from minedocscan.review.server import ReviewApp
 from minedocscan.review.store import Review, load, save
-from minedocscan.tools import synth_meta
+from minedocscan.tools import synth_meta, synth_usage
 from minedocscan.tools.synth_usage import T_LOADER, T_USAGE
 from minedocscan.validate.usage import TOLERANCE, check_usage
 from test_review_store import TABLES, _dump
@@ -172,7 +172,9 @@ def test_machine_run_reads_integers_and_leaves_meters_to_people(usage_run, usage
     assert {f["format"] for f in meter} == {"reading", "time_range"}
     assert all(r["is_subtotal"] == (k[1] == "sub") for cells in tally.values() for k, r in cells.items())
     memo = next(t for t in truth["usage"] if "LOADER_memo_on_tally" in t["scenarios"])
-    assert usage_run["pipe"].summary["handlers"]["usage"]["notes"] >= 1 and memo["tally"] is not None
+    under = {k: r for k, r in tally[memo["source"]].items() if k[0] == "ROCK|YARD"}           # 메모가 지나간 행 (값이 없다)
+    assert under and not any(r["has_value_raw"] for r in under.values())
+    assert usage_run["pipe"].summary["handlers"]["usage"]["notes"] >= 1
 
 
 # ── 검수로 정답을 넣으면 ───────────────────────────────────────────────────
@@ -225,7 +227,11 @@ def test_clock_pages_nothing_written_two_sheets_and_unknown_names(reviewed, usag
     assert {u["operator"] for u in trucks} == {"CHARLIE", "DELTA"}
     rep = build_report(con)["usage"]
     assert rep["pages"] == len(truth) and rep["with_equipment_id"] == sum(t["alias_key"] is not None for t in truth)
-    assert rep["hours_basis"] == {k: sum((t["hours_basis"] or "none") == k for t in truth) for k in rep["hours_basis"]}
+    want: dict = {}
+    for t in truth:
+        want[t["hours_basis"] or "none"] = want.get(t["hours_basis"] or "none", 0) + 1
+    assert rep["hours_basis"] == want and rep["reading"] == {k: sum(t["reading_kind"] == k for t in truth)
+                                                            for k in {t["reading_kind"] for t in truth}}
 
 
 def test_review_file_rebuilds_the_same_db(reviewed, usage_run, usage_synth, tmp_path):
@@ -503,3 +509,132 @@ def test_stats_count_by_format_and_by_queue(reviewed):
     assert st["by_format"]["reading"] > 0 and st["by_format"]["time_range"] > 0 and st["by_format"]["text"] > 0
     assert st["by_queue"]["readings"]["done"] == st["by_queue"]["readings"]["total"] > 0
     assert st["by_queue"]["usage-check"]["total"] >= 4
+
+
+# ── 규칙의 가장자리 (단위 시험 — 파이프라인 없이) ─────────────────────────────
+def _rec(pid, day, start, end, kind="meter", ref="id:x"):
+    return {"page_id": pid, "work_date": day, "meter_start": start, "meter_end": end, "reading_kind": kind, "ref": ref,
+            "start_field_id": f"{pid}:s", "end_field_id": f"{pid}:e"}
+
+
+def test_continuity_never_invents_a_gap():
+    from minedocscan.validate.usage import continuity_rows
+
+    res = lambda recs: {r["page_id"]: (r["result"], r["diff"], r["days_between"]) for r in continuity_rows(recs)}   # noqa: E731
+    base = [_rec("a", "2030-01-01", 100.0, 105.0), _rec("b", "2030-01-02", 105.0, 110.0), _rec("c", "2030-01-04", 112.0, 115.0)]
+    assert res(base) == {"a": ("first", None, None), "b": ("match", 0.0, 0), "c": ("gap", 2.0, 1)}
+    # 시작만 적힌 기록 뒤: 더 앞의 종료와 비교하지 않는다 (있는 날을 빠진 날로 탓하지 않게)
+    start_only = [base[0], _rec("b", "2030-01-02", 105.0, None), base[2]]
+    assert res(start_only)["c"][0] == "unknown"
+    # 같은 날 시작 값을 아직 모르는 장이 있으면 (그 장이 앞일 수 있다) unknown — 검수가 끝나면 match
+    night = _rec("n", "2030-01-02", 108.0, 110.0)
+    day = _rec("d", "2030-01-02", None, None, kind="pending")
+    assert res([base[0], night, day])["n"][0] == "unknown"
+    assert res([base[0], _rec("d", "2030-01-02", 105.0, 108.0), night])["n"] == ("match", 0.0, 0)
+    # 날짜를 모르는 쪽은 비교하지 않고, 다른 쪽의 앞 기록도 되지 않는다
+    dateless = [_rec("z", None, 0.0, 200.0), _rec("b", "2030-01-02", 105.0, 110.0)]
+    assert res(dateless) == {"z": ("unknown", None, None), "b": ("first", None, None)}
+
+
+class _Site:
+    def equipment_id_of(self, name):
+        return None
+
+
+def _usage_of(cells: dict, tmp_path):
+    """합성 세로 양식(계기 표만 채운다)의 eq_usage_daily 행. cells: 칸 → (has_value, value_final, review_status)."""
+    from minedocscan.handlers.usage import usage_rows
+
+    _img, spec = synth_usage.build_usage_log()
+    p = tmp_path / "t" / "template.yaml"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    tpl = Template(p)
+    frows = []
+    for slot in ("start", "end", "total"):
+        has, val, st = cells.get(slot, (0, None, "auto"))
+        frows.append({"field_id": f"p:meter:{slot}:0", "region": "meter", "field_name": slot, "row_key": "reading", "row_no": 0,
+                      "kind": "handwritten_number", "format": "reading", "has_value": has, "has_value_raw": has, "value_final": val,
+                      "value_raw": None, "review_status": st, "confidence": None, "x0": 0})
+    return usage_rows(_Site(), tpl, {"page_id": "p", "work_date": "2030-01-01", "template_name": tpl.name}, {}, frows)[0]
+
+
+def test_hours_rules_at_the_edges(tmp_path):
+    rv = lambda v: (1, v, "reviewed")                                                     # noqa: E731
+    u = _usage_of({"start": rv("08:00"), "end": rv("17:00"), "total": rv("9")}, tmp_path)
+    assert (u["reading_kind"], u["hours"], u["hours_basis"]) == ("clock", 9.0, "total")      # 총(길이)은 수 — 섞인 것이 아니다
+    u = _usage_of({"start": rv("1000.0"), "end": rv("1009.0"), "total": rv("08:00")}, tmp_path)
+    assert (u["reading_kind"], u["hours"], u["hours_basis"]) == ("meter", 9.0, "meter")
+    u = _usage_of({"start": rv("1000.0"), "end": rv("17:00")}, tmp_path)
+    assert (u["reading_kind"], u["hours"], u["hours_basis"]) == ("mixed", None, None)
+    u = _usage_of({"start": rv("22:00"), "end": rv("06:00")}, tmp_path)
+    assert (u["hours"], u["hours_basis"]) == (8.0, "clock")                                  # 자정을 넘는다
+    # "읽을 수 없음": 기계가 빈 칸이라 했어도 모르는 칸 — 총으로 내려가지 않는다
+    u = _usage_of({"start": (0, "", "pending"), "end": rv("1009.0"), "total": rv("9")}, tmp_path)
+    assert (u["reading_kind"], u["hours"], u["hours_basis"]) == ("pending", None, None)
+
+
+def test_illegible_tally_cell_makes_the_subtotal_unknown():
+    from minedocscan.validate.usage import _int
+
+    assert _int({"has_value": 0, "value_final": "", "review_status": "pending"}) is None
+    assert _int({"has_value": 0, "value_final": "", "review_status": "reviewed"}) == 0
+    assert _int({"has_value": 1, "value_final": "7", "review_status": "auto"}) == 7
+
+
+def test_readings_never_carry_machine_or_earlier_values(usage_run, usage_synth, tmp_path):
+    """readings 의 응답에는 기계 값도 앞날의 값도 없다 — 기계가 계기를 읽었고(0006 을 흉내 낸다) 앞날의 계기를 검수한 뒤에도."""
+    con, site = clone_db(usage_run["pipe"].con), usage_run["pipe"].site
+    settings = replace(usage_run["settings"], reviews=tmp_path / "r.jsonl")
+    con.execute("UPDATE doc_field SET value_raw = '9999.9' WHERE region = 'meter' AND has_value_raw = 1")
+    day0 = min(t["date"] for t in usage_synth.truth["usage"])
+    first = {t["source"] for t in usage_synth.truth["usage"] if t["date"] == day0}
+    rows = [f for f in usage_fields(con) if f["source"] in first and f["region"] == "meter"]
+    for f in rows:                                                       # 첫날의 계기 칸만 정답대로
+        text = usage_run["answers"].get((f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"]))
+        save(con, site, settings, Review(f["field_id"], "value", text, "jp") if text else Review(f["field_id"], "empty",
+                                                                                                reviewer="jp"))
+    q = build_queue(con, "readings", site=site)
+    blob = json.dumps(q, ensure_ascii=False)
+    later = [t for t in usage_synth.truth["usage"] if t["date"] != day0 and t["reading_kind"] != "empty"]
+    assert q["items"] and len(q["items"]) == len(later) and rows
+    assert "9999.9" not in blob
+    for t in usage_synth.truth["usage"]:
+        if t["date"] == day0:
+            for v in (t["meter_end"], t["clock_end"]):
+                assert v is None or (f"{v:.1f}" if isinstance(v, float) else v) not in blob
+
+
+def test_usage_pages_sit_in_the_daily_bundle_with_the_other_forms(tmp_path):
+    """usage_logs=True: 기본 양식 셋의 쪽 뒤에 가동 일보가 붙고, 다섯 양식이 서로 헷갈리지 않는다 (분류만 — 파이프라인은 돌리지 않는다)."""
+    from minedocscan.forms.classify import FormClassifier
+    from minedocscan.imaging.io import load_pages
+    from minedocscan.tools.synth import generate
+
+    r = generate(tmp_path / "d", days=1, seed=2, usage_logs=True)
+    clf = FormClassifier(list(SitePack(r.site).templates.values()))
+    doc = next(iter(r.truth["documents"]))
+    want = [p["template"] for p in r.truth["documents"][doc]]
+    got = [clf.classify(g).template for _n, g in load_pages(r.scans / f"{doc}.pdf", 200)]
+    assert got == want and {T_USAGE, T_LOADER, "synth_inspection", "synth_haul_log", "synth_haul_matrix"} <= set(want)
+    assert r.truth["usage"] and r.truth["days"][0]["haul_log"]
+
+
+def test_eval_meta_counts_the_equipment_key(reviewed):
+    """eval --meta 는 키 이름을 고르지 않는다: 기계가 장비명을 읽었다면(여기서는 흉내) equipment 의 정확도·자동 적재 오류를 낸다."""
+    from minedocscan.evaluate.meta import evaluate_meta
+
+    con = clone_db(reviewed["con"])
+    con.execute("UPDATE doc_page_meta SET machine_value = value, machine_confidence = 0.99, machine_status = 'auto' "
+                "WHERE meta_key = 'equipment'")
+    pid = con.execute("SELECT page_id FROM doc_page_meta WHERE meta_key = 'equipment' ORDER BY page_id").fetchone()[0]
+    con.execute("UPDATE doc_page_meta SET machine_value = 'DOZER' WHERE meta_key = 'equipment' AND page_id = ?", (pid,))
+    # 평소의 장비가 아닌 장비를 쓴 쪽 하나 (LOADER 를 늘 쓰는 사람이 하루 SHOVEL 을 탔다 — 사람 값과 기계 값 모두)
+    other = con.execute("SELECT m.page_id FROM doc_page_meta m WHERE m.meta_key = 'equipment' AND m.value = 'LOADER' "
+                        "AND m.page_id <> ? ORDER BY m.page_id", (pid,)).fetchone()[0]
+    con.execute("UPDATE doc_page_meta SET value = 'SHOVEL', machine_value = 'SHOVEL' WHERE meta_key = 'equipment' AND page_id = ?",
+                (other,))
+    k = evaluate_meta(con)["keys"]["equipment"]
+    n = con.execute("SELECT COUNT(*) FROM doc_page_meta WHERE meta_key = 'equipment'").fetchone()[0]
+    assert (k["n"], k["correct"], k["auto_error"]["wrong"]) == (n, n - 1, 1)
+    assert (k["changed"]["n"], k["changed"]["correct"]) == (1, 1)

@@ -8,8 +8,9 @@
                       | unknown(장비를 모른다, 값이 검수 대기다). 차이(시간)와 사이에 낀 날 수를 같이 남긴다
 
 같은 장비 = 장비 ID 가 있으면 ID, 없으면 적힌 이름이 같은 것 (equipment_ref: "id:<UUID>" | "name:<이름>"). 이름이 없는 쪽은 unknown.
-기록의 순서: 날짜 → 계기 시작 값이 작은 쪽 → 문서 이름 → 쪽 번호 (하루 두 장 — tasks/0005 9절). 바로 앞 기록이 계기 칸을 아직
-모르는(검수 대기) 기록이면 그보다 앞을 찾지 않고 unknown — 일부만 검수한 중에 가짜 gap 이 생기지 않게 (crosscheck 와 같은 생각).
+기록의 순서: 날짜 → 계기 시작 값이 작은 쪽 → 문서 이름 → 쪽 번호 (하루 두 장 — tasks/0005 9절). 바로 앞 기록의 종료를 모르면
+(검수 대기, 시작만 적힌 기록), 같은 날 시작 값을 모르는 다른 장이 있으면, 날짜를 모르면 비교하지 않고 unknown — 일부만 검수한 중에
+가짜 gap 이 생기지 않게 (crosscheck 와 같은 생각).
 
 마무리(finalize)에서 전체를, 검수를 저장하면 그 쪽의 쪽 안 검산과 그 장비(이름이 바뀌었으면 예전·새 장비 둘 다)의 연속성만
 다시 계산한다. 연속성은 장비마다 그 장비의 기록만으로 정해지는 함수라 둘의 결과가 같다 (불변식).
@@ -56,7 +57,7 @@ def _subtotal_checks(con, tpl: Template, u) -> list[dict]:
     """작업량 표의 소계 칸: 소계 열이면 같은 행의 소계가 아닌 칸의 합, 소계 행이면 같은 열의 소계가 아닌 행의 합.
     소계 칸에 값이 있을 때만 (비어 있으면 검산할 것이 없다). 더할 칸에 모르는 칸(잉크는 있는데 값이 없다)이 있으면 unknown."""
     cells = {(r["region"], r["row_no"], r["field_name"]): r for r in con.execute(
-        "SELECT region, row_no, field_name, field_id, has_value, value_final FROM doc_field WHERE page_id = ? "
+        "SELECT region, row_no, field_name, field_id, has_value, value_final, review_status FROM doc_field WHERE page_id = ? "
         "AND format = 'integer'", (u["page_id"],))}
     out = []
     for reg in tpl.regions:
@@ -113,10 +114,12 @@ def check_cells(con: sqlite3.Connection, site, check) -> list[str]:
 
 
 def _int(cell) -> int | None:
-    """칸의 최종 정수: 빈 칸 0, 모르는 칸(잉크는 있는데 값이 없다) None."""
+    """칸의 최종 정수: 빈 칸 0, 모르는 칸(잉크는 있는데 값이 없다, 검수 대기·읽을 수 없음) None."""
+    v = cell["value_final"]
+    if cell["review_status"] == "pending" and v in (None, ""):      # "읽을 수 없음"은 기계의 값 유무를 그대로 둔다 — 빈 칸이 아니다
+        return None
     if not cell["has_value"]:
         return 0
-    v = cell["value_final"]
     return int(v) if v is not None and str(v).strip().isdigit() else None
 
 
@@ -136,23 +139,31 @@ def _order(r: dict) -> tuple:
 
 
 def continuity_rows(records: list[dict]) -> list[dict]:
-    """한 장비(같은 ref)의 기록들 → 연속성 검산 행. ref 가 None 인 기록은 하나씩 unknown."""
+    """한 장비(같은 ref)의 기록들 → 연속성 검산 행. 비교하지 못하면 unknown (가짜 gap 을 만들지 않는다):
+      · 장비를 모른다(ref 없음), 날짜를 모른다, 이 기록의 시작 값이 검수 대기다
+      · 같은 날 시작 값을 아직 모르는 다른 장이 있다 (그 장이 앞일 수 있다 — 하루 두 장의 순서는 시작 값으로 정한다)
+      · 바로 앞의 계기 기록의 종료를 모른다 (검수 대기, 또는 시작만 적혀 있다) — 그보다 앞을 찾지 않는다
+    계기 값이 없는 기록(시각·빈 칸)은 건너뛴다."""
+    dated = [r for r in records if r["work_date"]]
     out = []
-    for i, r in enumerate(records):
+    for r in records:
         if r["meter_start"] is None and r["reading_kind"] != "pending":
             continue                                         # 계기 값이 없는 기록 (시각·빈 칸): 연속성 검산이 없다
-        if r["ref"] is None or r["meter_start"] is None:     # 장비를 모른다, 시작 값이 검수 대기다
+        if r["ref"] is None or r["meter_start"] is None or not r["work_date"]:
             out.append(_row(r, "continuity", "", r["meter_start"], None, None, "unknown", ref=r["ref"],
                             field_a=r["start_field_id"]))
             continue
-        prev, blocked = None, False
-        for q in reversed(records[:i]):
+        prev, blocked = None, any(q is not r and q["work_date"] == r["work_date"] and q["meter_start"] is None
+                                  and q["reading_kind"] == "pending" for q in dated)
+        i = next(k for k, q in enumerate(dated) if q is r)
+        for q in reversed(dated[:i]):
+            if blocked:
+                break
             if q["meter_end"] is not None:
                 prev = q
                 break
-            if q["reading_kind"] == "pending":               # 앞 기록의 종료를 아직 모른다 — 더 앞을 보지 않는다
+            if q["reading_kind"] == "pending" or q["meter_start"] is not None:   # 앞 기록의 종료를 모른다 — 더 앞을 보지 않는다
                 blocked = True
-                break
         if blocked:
             out.append(_row(r, "continuity", "", r["meter_start"], None, None, "unknown", ref=r["ref"],
                             field_a=r["start_field_id"]))

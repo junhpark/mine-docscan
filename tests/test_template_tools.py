@@ -73,13 +73,15 @@ def test_check_lists_every_problem_of_a_broken_template(pack, tmp_path, capsys):
     d = _broken(pack, tmp_path)
     errs = check_template(d)
     want = ["role meter 에 필요한 칸이 없습니다: end", "shifts/shift: format 은 손으로 쓰는 칸", "알 수 없는 format 'hours'",
-            "subtotal 은 true/false", "열 이름 'a' 이 겹칩니다", "role meter 인 표가 2개"]
-    for w in want:
+            "subtotal 은 true/false", "열 이름 'a' 이 겹칩니다", "role meter 인 표가 2개", "fields/fuel: 쪽 밖",
+            "fields/check"]
+    for w in want:                                                          # 여덟 가지를 한 번에
         assert any(w in e for e in errs), (w, errs)
+    assert any("칸이 겹칩니다" in e and "fields/check" in e for e in errs)
     with pytest.raises(TemplateError) as e:                                 # 읽을 때는 첫 오류에서 멈춘다
         Template(d / "template.yaml")
-    assert str(e.value) == errs[0] and len(errs) >= 6
-    # 기하: 칸을 만들 수 있게 고친 뒤 — 쪽 밖, 겹침
+    assert str(e.value) == errs[0]
+    # 고칠 수 있는 것을 고치면 기하 오류 둘만 남는다
     spec = yaml.safe_load((d / "template.yaml").read_text(encoding="utf-8"))
     spec["regions"] = [r for r in spec["regions"] if r["name"] != "meter_b"]
     regs = {r["name"]: r for r in spec["regions"]}

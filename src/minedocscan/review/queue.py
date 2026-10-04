@@ -437,10 +437,13 @@ def _usage_check(con, site):
             "SELECT field_id, note, verdict, value FROM doc_review WHERE note LIKE ?", (USAGE_CHECK_NOTE + "%",)):
         confirms.setdefault((fid, note[len(USAGE_CHECK_NOTE):]), set()).add((verdict, value or ""))
     noted = {cid for _f, cid in confirms}
-    checks = [c for c in con.execute(
+    every = con.execute(
         "SELECT x.*, p.page_no, p.template_name, d.source_name FROM xcheck_usage x JOIN doc_page p ON x.page_id = p.page_id "
         "JOIN doc_document d ON p.document_id = d.document_id ORDER BY x.work_date, d.source_name, p.page_no, x.check_kind, "
-        "x.item").fetchall() if c["result"] in BAD_RESULTS or check_id(c) in noted]
+        "x.item").fetchall()
+    checks = [c for c in every if c["result"] in BAD_RESULTS or check_id(c) in noted]
+    # 고쳐서 검산 자체가 없어진 것(예: 총 칸을 비웠다 — 총 검산은 셋 다 값이 있을 때만)도 끝난 것으로 센다
+    gone = len(noted - {check_id(c) for c in every})
     cells_of = {check_id(c): check_cells(con, site, c) for c in checks}
     reviews = effective(con, field_ids=sorted({f for fs in cells_of.values() for f in fs}))
     items, done = [], 0
@@ -466,7 +469,7 @@ def _usage_check(con, site):
                 f"{names.get(c['check_kind'], c['check_kind'])} {c['result']}{diff}"
         items.append(QueueItem(USAGE_CHECK_NOTE + cid, title, c["work_date"], cells,
                                check={k: c[k] for k in ("check_kind", "result", "value_a", "value_b", "diff", "days_between")}))
-    return items, len(checks), done
+    return items, len(checks) + gone, done + gone
 
 
 def _check_label(c, k: int, r) -> str:

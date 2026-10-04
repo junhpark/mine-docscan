@@ -166,7 +166,9 @@ def test_bad_values_never_reach_the_review_file(decimal_day, tmp_path):
     assert load(settings.reviews)[0][-1][1].value == "3.50"
     q = app.queue_json({})
     assert q["formats"]["decimal"]["chars"] == "0-9." and "1234.5" in q["formats"]["reading"]["hint"]
-    assert {c["format"] for it in q["items"] for c in it["cells"] if c["field_id"] in (a, b)} <= {"decimal"}
+    rest = {c["field_id"] for c in night[2:]}                                 # 아직 검수하지 않은 야간 칸: 형식이 화면까지 간다
+    assert rest and {c["format"] for it in q["items"] for c in it["cells"] if c["field_id"] in rest} == {"decimal"}
+    assert not {c["field_id"] for it in q["items"] for c in it["cells"]} & {a, b}  # 검수한 칸은 대기열에서 빠졌다
     day = _cells(con, "trips_day")[0]["field_id"]                            # 정수 칸은 지금과 같다: "07" → "7"
     assert app.post_review({"field_id": day, "verdict": "value", "value": "07"})["value"] == "7"
 

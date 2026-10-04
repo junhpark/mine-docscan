@@ -240,10 +240,14 @@ def _meter_slot(r: dict) -> str | None:
 
 
 def _state(r: dict):
-    """최종 필드 행의 값: None(빈 칸) | UNKNOWN(잉크는 있는데 값이 없다 — 검수 대기·읽을 수 없음) | 정규화한 표기."""
+    """최종 필드 행의 값: None(빈 칸) | UNKNOWN(잉크는 있는데 값이 없다 — 검수 대기·읽을 수 없음) | 정규화한 표기.
+    검수 대기인데 값이 없으면 기계가 빈 칸이라 했어도 UNKNOWN 이다 — "읽을 수 없음" 검수는 기계의 값 유무를 그대로 두므로
+    (has_value 0), 그것을 빈 칸으로 치면 가동 시간이 다음 근거로 내려간다 (추정)."""
+    v = r["value_final"]
+    if r["review_status"] == "pending" and v in (None, ""):
+        return UNKNOWN
     if not r["has_value"]:
         return None
-    v = r["value_final"]
     if v in (None, ""):
         return UNKNOWN
     return try_normalize(r["format"], v)
@@ -275,8 +279,13 @@ def _reading(vals: dict, meter: dict, has_meter: bool) -> tuple[str, dict]:
             out[mv[0]][slot] = mv[1]
     if any(v is UNKNOWN for v in vals.values()):
         return "pending", out
-    kinds = [k for k in ("meter", "clock") if out[k]]
-    return ("mixed" if len(kinds) > 1 else (kinds[0] if kinds else "empty")), out
+    # 계기 값인지 시각인지는 시작·종료로 가른다. 총(가동시간)은 길이라 시각 옆에 숫자로 적혀도 섞인 것이 아니다
+    kinds = [k for k in ("meter", "clock") if "start" in out[k] or "end" in out[k]]
+    if len(kinds) > 1:
+        return "mixed", out
+    if kinds:
+        return kinds[0], out
+    return ("meter" if "total" in out["meter"] else ("clock" if "total" in out["clock"] else "empty")), out
 
 
 def _shifts(rows: list[dict]) -> tuple[str | None, int | None]:
@@ -299,7 +308,8 @@ def _shifts(rows: list[dict]) -> tuple[str | None, int | None]:
 
 
 def _hours(vals: dict, kind: str, m: dict, shift_min: int | None, shift_rows: list[dict]) -> tuple[float | None, str | None]:
-    """4.3 의 순서. 앞선 근거에 모르는 칸이 있으면 내려가지 않고 NULL. 계기 칸이 섞였으면 NULL."""
+    """4.3 의 순서. 앞선 근거에 모르는 칸이 있으면 내려가지 않고 NULL. 계기 칸(시작·종료)이 계기 값과 시각으로 섞였으면 NULL.
+    총은 수일 때만 근거가 된다 (시각으로 적힌 총은 쓰지 않는다)."""
     if kind == "mixed":
         return None, None
     meter, clock = m.get("meter", {}), m.get("clock", {})

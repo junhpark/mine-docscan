@@ -62,10 +62,11 @@ def check_template(tdir: str | Path) -> list[str]:
         b = f.get("bbox")
         if not (isinstance(b, list | tuple) and len(b) == 4 and all(isinstance(v, int) for v in b)):
             out.append(f"{tpl.name}/fields/{f.get('name')}: bbox 는 정수 네 개 [x0, y0, x1, y1]")
-    if out:                                                  # 칸을 만들 수 없는 오류가 있으면 기하 검사는 하지 않는다
+    try:                                                     # 칸을 만들 수 없으면(괘선 범위 밖의 행·열 …) 기하 검사는 하지 않는다
+        cells = _boxes(tpl)
+    except (KeyError, IndexError, TypeError, ValueError):
         return out
     size = _page_size(tpl, out)
-    cells = _boxes(tpl)
     for name, (x0, y0, x1, y1) in cells:
         if x1 - x0 < 4 or y1 - y0 < 4:
             out.append(f"{name}: 칸이 너무 좁습니다 ({x1 - x0}×{y1 - y0} px — 괘선 안쪽 여백 4 px 를 뺀 크기)")
@@ -124,15 +125,16 @@ def preview(tdir: str | Path, out_dir: str | Path, scan: str | Path | None = Non
         base = ar.warped
         aligned = {"ok": bool(ar.ok), "inliers": int(ar.n_inliers), "grid_err": None if ar.grid_err_px == float("inf")
                    else round(float(ar.grid_err_px), 2)}
-    img = draw(tpl, base)
+    img, boxes = draw(tpl, base)
     stem = tpl.name if scan is None else f"{tpl.name}__{Path(scan).stem}_p{page}"
     out = out_dir / f"{stem}.png"
     imwrite(out, img)
-    return {"out": str(out), "boxes": len(tpl.cells()) + len(tpl.field_cells()), "aligned": aligned}
+    return {"out": str(out), "boxes": boxes, "aligned": aligned}
 
 
-def draw(tpl: Template, gray: np.ndarray) -> np.ndarray:
-    """그림 (BGR). 칸은 종류의 색, 나눔 선(split_ys·split_xs)은 노란 점선, 표의 테두리 위에 표 이름·역할."""
+def draw(tpl: Template, gray: np.ndarray) -> tuple[np.ndarray, int]:
+    """그림 (BGR)과 그린 테두리 수. 칸은 종류의 색, 나눔 선(split_ys·split_xs)은 노란 점선, 표의 테두리 위에 표 이름·역할."""
+    boxes = 0
     img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) if gray.ndim == 2 else gray.copy()
     img = cv2.addWeighted(img, 0.55, np.full_like(img, 255), 0.45, 0)        # 바탕을 흐리게 — 테두리가 보이게
     for reg in tpl.regions:
@@ -149,6 +151,7 @@ def draw(tpl: Template, gray: np.ndarray) -> np.ndarray:
         x0, y0, x1, y1 = c.bbox
         color = COLORS.get(c.kind, (0, 0, 0))
         cv2.rectangle(img, (x0, y0), (x1, y1), color, 2)
+        boxes += 1
         label = c.name + (f" [{c.fmt}]" if c.fmt and c.kind.startswith("handwritten") else "")
         if c.kind == "printed":
             label = c.name
@@ -160,10 +163,11 @@ def draw(tpl: Template, gray: np.ndarray) -> np.ndarray:
         x0, y0, x1, y1 = c.bbox
         color = COLORS.get(c.kind, (0, 0, 0))
         cv2.rectangle(img, (x0, y0), (x1, y1), color, 2)
+        boxes += 1
         extra = ", ".join(x for x in (c.kind, c.col_meta.get("meta_key"), c.col_meta.get("format")) if x)
         _text(img, f"{c.name} ({extra})", x0 + 3, y0 + 14, color, 0.45)
     _legend(img)
-    return img
+    return img, boxes
 
 
 def _text(img, s: str, x: int, y: int, color, scale: float) -> None:
