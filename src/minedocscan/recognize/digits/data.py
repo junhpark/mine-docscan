@@ -39,6 +39,7 @@ class Sample:
     bbox: tuple[int, int, int, int] | None
     field_id: str = ""
     inked: bool = True              # 잉크 판정이 "값 있음"이던 칸 (파이프라인이 인식기에 보내는 칸). 예전 라벨에는 없다 → True
+    meta_key: str = ""              # 메타 필드 줄이면 그 키 (vehicle_no, operator, date.day …)
 
     def image(self) -> np.ndarray:
         return imread_gray(self.path)
@@ -77,6 +78,16 @@ def text_of(line: dict) -> str | None:
         return VERDICT_TEXT[v]
     t = str(line.get("text", "")).strip()
     return normalize_answer(t) if t.isdigit() else None
+
+
+def meta_text_of(line: dict) -> str | None:
+    """메타 필드 줄의 정답: 값 그대로 (차량번호의 앞 0 도 번호다, 이름은 이름). illegible → "?" (숫자 모델의 거절),
+    empty → "". 숫자인지는 읽는 쪽이 본다 (숫자 모델은 숫자만, 분류기는 이름도)."""
+    v = line.get("verdict", "value")
+    if v in VERDICT_TEXT:
+        return VERDICT_TEXT[v]
+    t = str(line.get("text", "")).strip()
+    return t or None
 
 
 def read_crops(root: str | Path, *, allow_test: bool = False, only_split: str | None = None,
@@ -125,13 +136,14 @@ def read_crops(root: str | Path, *, allow_test: bool = False, only_split: str | 
             if "spec" not in line:
                 raise CropsError(f"{lf}:{k} 에 크롭 규격(spec)이 없습니다 — 이 버전의 `review export-crops` 로 다시 내보내세요")
             specs.add(CropSpec.from_dict(line["spec"]))
-            text = text_of(line)
+            text = text_of(line) if meta_keys is None else meta_text_of(line)
             if text is None:
-                skipped["not_a_number"] += 1
+                skipped["not_a_number" if meta_keys is None else "no_value"] += 1
                 continue
             bbox = tuple(line["bbox"]) if line.get("bbox") else None
             samples.append(Sample(_resolve(root, lf, line["file"]), text, line.get("verdict", "value"),
-                                  line.get("work_date"), bbox, line.get("field_id", ""), bool(line.get("inked", True))))
+                                  line.get("work_date"), bbox, line.get("field_id", ""), bool(line.get("inked", True)),
+                                  str(line.get("meta_key") or "")))
     if len(specs) > 1:
         raise CropsError(f"크롭 규격이 한 가지가 아닙니다 ({len(specs)}가지: "
                          f"{', '.join(sorted(s.describe() for s in specs))}). 규격마다 따로 내보내고 따로 학습하세요")

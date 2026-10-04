@@ -97,6 +97,8 @@ class TrainArgs:
     channels: tuple[int, int, int, int, int] = (16, 32, 64, 64, 96)
     eval_every: int = 500
     workers: int | None = None              # 합성 셀을 만드는 프로세스 수. None 이면 CPU 수
+    real_share: float = 0.5                 # 배치 중 실제 셀의 몫 (합성 셀이 있을 때)
+    position: bool = True                   # 위치 채널 (model.normalize). 메타 필드 숫자 모델은 끈다 (meta/train.py)
 
     def synthetic_n(self, n_real: int) -> int:
         return int(self.synthetic) if self.synthetic is not None else (4000 if n_real else 8000)
@@ -167,9 +169,11 @@ def synth_pool(n: int, seed: int, geometry, spec: CropSpec, workers: int | None 
 
 
 # ── 변형 ──────────────────────────────────────────────────────────────────
-def augment_batch(torch, ink, gen):
+def augment_batch(torch, ink, gen, padding: str = "border"):
     """약한 변형을 배치째로 (정규화한 잉크 채널 (B, 1, H, W) 에서): 이동·크기·회전·기울임·대비·밝기·흐림·잡음.
-    좌우 뒤집기는 하지 않는다 (숫자의 모양이 바뀐다). 추론 때의 입력(model.normalize)은 이 변형이 없는 것이다."""
+    좌우 뒤집기는 하지 않는다 (숫자의 모양이 바뀐다). 추론 때의 입력(model.normalize)은 이 변형이 없는 것이다.
+    padding: 그림 밖에서 끌어오는 값 — border(가장자리를 늘인다, 숫자 칸) | zeros(종이 — 메타 필드: 가장자리에 걸친 테두리·
+    밑줄을 늘이면 띠가 생겨 마지막 자리를 늘 틀렸다)."""
     F = torch.nn.functional
     n = ink.shape[0]
 
@@ -181,7 +185,7 @@ def augment_batch(torch, ink, gen):
     theta = torch.stack([torch.stack([cos, -sin + sh, u(-0.08, 0.08)], 1),         # 이동: 가로 ±4 %, 세로 ±6 %
                          torch.stack([sin, cos, u(-0.12, 0.12)], 1)], 1)
     grid = F.affine_grid(theta, list(ink.shape), align_corners=False)
-    x = F.grid_sample(ink, grid, mode="bilinear", padding_mode="border", align_corners=False)
+    x = F.grid_sample(ink, grid, mode="bilinear", padding_mode=padding, align_corners=False)
     x = x * u(0.7, 1.2).view(n, 1, 1, 1) + u(-0.1, 0.1).view(n, 1, 1, 1)
     k = torch.tensor([0.25, 0.5, 0.25])
     blurred = F.conv2d(F.pad(x, (1, 1, 1, 1), mode="replicate"), (k[:, None] * k[None, :]).view(1, 1, 3, 3))
@@ -306,60 +310,8 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
     # 학습 (torch 는 합성 셀을 다 만든 뒤에 불러온다 — 위의 프로세스 풀이 fork 한다)
     torch = require_torch()
     _check_export(torch, args.channels)                        # 몇 분 학습한 뒤가 아니라 지금 실패한다
-    torch.manual_seed(args.seed)
-    torch.set_num_threads(max(1, os.cpu_count() or 1))
-    gen = torch.Generator().manual_seed(args.seed)
-    coords = torch.from_numpy(normalize(np.zeros((INPUT_H, INPUT_W), np.uint8))[1:])[None]     # 위치 채널 (1, 2, H, W)
-    net = build_net(torch, args.channels).to(memory_format=torch.channels_last)     # CPU 합성곱이 1.3–1.5배 빠르다
-    n_params = int(sum(p.numel() for p in net.parameters()))
-    opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.steps, pct_start=0.15)
-    ctc = torch.nn.CTCLoss(blank=0, reduction="sum", zero_infinity=True)
-    log_lines: list[dict] = []
-    best = {"acc": -1.0, "loss": float("inf"), "step": 0, "state": None}
-    t_train = time.time()
-    run_loss = 0.0
-    for step in range(1, args.steps + 1):
-        net.train()
-        if len(tr_ink) and len(syn_ink):
-            n_r = args.batch // 2
-            idx_r = rng.integers(0, len(tr_ink), n_r)
-            idx_s = rng.integers(0, len(syn_ink), args.batch - n_r)
-            ink = np.concatenate([tr_ink[idx_r], syn_ink[idx_s]])
-            texts = [tr_y[i] for i in idx_r] + [syn_y[i] for i in idx_s]
-        else:
-            pool_x, pool_y = (tr_ink, tr_y) if len(tr_ink) else (syn_ink, syn_y)
-            idx = rng.integers(0, len(pool_x), args.batch)
-            ink, texts = pool_x[idx], [pool_y[i] for i in idx]
-        x = augment_batch(torch, torch.from_numpy(ink)[:, None], gen)
-        xb = torch.cat([x, coords.expand(len(texts), -1, -1, -1)], 1).contiguous(memory_format=torch.channels_last)
-        tg, tl = _targets(torch, texts)
-        logp = net(xb).squeeze(2).permute(2, 0, 1).log_softmax(2)                     # (T, N, C)
-        il = torch.full((len(texts),), logp.shape[0], dtype=torch.long)
-        loss = ctc(logp, tg, il, tl) / len(texts)
-        opt.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
-        opt.step()
-        sched.step()
-        run_loss = 0.9 * run_loss + 0.1 * loss.item() if step > 1 else loss.item()
-        if step % args.eval_every == 0 or step == args.steps:
-            lg = _torch_logits(torch, net, va_x)
-            acc = float(np.mean([_greedy(z) == y for z, y in zip(lg, va_y, strict=True)])) if len(va_y) else 0.0
-            vloss = float(np.mean([min(calib.ctc_nll(log_softmax(z), encode(y)), 50.0) for z, y in zip(lg, va_y, strict=True)])) \
-                if len(va_y) else 0.0
-            rec = {"step": step, "loss": round(run_loss, 5), "lr": round(sched.get_last_lr()[0], 6),
-                   "val_acc": round(acc, 5), "val_loss": round(vloss, 5), "seconds": round(time.time() - t_train, 1)}
-            log_lines.append(rec)
-            progress(f"[{step}/{args.steps}] 손실 {run_loss:.4f} · 검증 정확도 {acc:.4f} · 검증 손실 {vloss:.4f} · "
-                     f"{time.time() - t_train:.0f}s")
-            if (acc, -vloss) > (best["acc"], -best["loss"]):
-                best = {"acc": acc, "loss": vloss, "step": step,
-                        "state": {k: v.detach().clone() for k, v in net.state_dict().items()}}
-    train_seconds = time.time() - t_train
-    if best["state"] is not None:
-        net.load_state_dict(best["state"])
-    net.eval()
+    net, best, log_lines, train_seconds, n_params = fit(torch, args, rng, tr_ink, tr_y, syn_ink, syn_y, va_x, va_y,
+                                                        progress)
 
     # 4. ONNX 로 내보내고 OpenCV 로 다시 읽어 검증
     tmp = out_dir.parent / f".{out_dir.name}.tmp-{os.getpid()}"
@@ -442,6 +394,68 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
              f"{f'없음 ({reason})' if chosen is None else _with_upper(chosen)} · "
              f"{time.time() - t_start:.0f}s")
     return card
+
+
+def fit(torch, args: TrainArgs, rng: np.random.Generator, tr_ink: np.ndarray, tr_y: list[str], syn_ink: np.ndarray,
+        syn_y: list[str], va_x: np.ndarray, va_y: list[str], progress=_log):
+    """CTC 학습 한 번: 배치마다 실제:합성 = 1:1 (한쪽만 있으면 그것만), 약한 변형, eval_every 스텝마다 검증 셀로 정확도·손실을
+    재고 가장 좋은 스텝의 가중치를 남긴다. 돌려주는 값: (망(eval 모드), best, 기록, 학습 초, 파라미터 수).
+    메타 필드 학습(recognize/meta/train.py)도 이것을 부른다."""
+    torch.manual_seed(args.seed)
+    torch.set_num_threads(max(1, os.cpu_count() or 1))
+    gen = torch.Generator().manual_seed(args.seed)
+    coords = torch.from_numpy(normalize(np.zeros((INPUT_H, INPUT_W), np.uint8), args.position)[1:])[None]   # 위치 채널 (1, 2, H, W)
+    net = build_net(torch, args.channels).to(memory_format=torch.channels_last)     # CPU 합성곱이 1.3–1.5배 빠르다
+    n_params = int(sum(p.numel() for p in net.parameters()))
+    opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.steps, pct_start=0.15)
+    ctc = torch.nn.CTCLoss(blank=0, reduction="sum", zero_infinity=True)
+    log_lines: list[dict] = []
+    best = {"acc": -1.0, "loss": float("inf"), "step": 0, "state": None}
+    t_train = time.time()
+    run_loss = 0.0
+    for step in range(1, args.steps + 1):
+        net.train()
+        if len(tr_ink) and len(syn_ink):
+            n_r = max(1, int(round(args.batch * args.real_share)))
+            idx_r = rng.integers(0, len(tr_ink), n_r)
+            idx_s = rng.integers(0, len(syn_ink), args.batch - n_r)
+            ink = np.concatenate([tr_ink[idx_r], syn_ink[idx_s]])
+            texts = [tr_y[i] for i in idx_r] + [syn_y[i] for i in idx_s]
+        else:
+            pool_x, pool_y = (tr_ink, tr_y) if len(tr_ink) else (syn_ink, syn_y)
+            idx = rng.integers(0, len(pool_x), args.batch)
+            ink, texts = pool_x[idx], [pool_y[i] for i in idx]
+        x = augment_batch(torch, torch.from_numpy(ink)[:, None], gen)
+        xb = torch.cat([x, coords.expand(len(texts), -1, -1, -1)], 1).contiguous(memory_format=torch.channels_last)
+        tg, tl = _targets(torch, texts)
+        logp = net(xb).squeeze(2).permute(2, 0, 1).log_softmax(2)                     # (T, N, C)
+        il = torch.full((len(texts),), logp.shape[0], dtype=torch.long)
+        loss = ctc(logp, tg, il, tl) / len(texts)
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
+        opt.step()
+        sched.step()
+        run_loss = 0.9 * run_loss + 0.1 * loss.item() if step > 1 else loss.item()
+        if step % args.eval_every == 0 or step == args.steps:
+            lg = _torch_logits(torch, net, va_x)
+            acc = float(np.mean([_greedy(z) == normalize_answer(y) for z, y in zip(lg, va_y, strict=True)])) if len(va_y) else 0.0
+            vloss = float(np.mean([min(calib.ctc_nll(log_softmax(z), encode(y)), 50.0) for z, y in zip(lg, va_y, strict=True)])) \
+                if len(va_y) else 0.0
+            rec = {"step": step, "loss": round(run_loss, 5), "lr": round(sched.get_last_lr()[0], 6),
+                   "val_acc": round(acc, 5), "val_loss": round(vloss, 5), "seconds": round(time.time() - t_train, 1)}
+            log_lines.append(rec)
+            progress(f"[{step}/{args.steps}] 손실 {run_loss:.4f} · 검증 정확도 {acc:.4f} · 검증 손실 {vloss:.4f} · "
+                     f"{time.time() - t_train:.0f}s")
+            if (acc, -vloss) > (best["acc"], -best["loss"]):
+                best = {"acc": acc, "loss": vloss, "step": step,
+                        "state": {k: v.detach().clone() for k, v in net.state_dict().items()}}
+    train_seconds = time.time() - t_train
+    if best["state"] is not None:
+        net.load_state_dict(best["state"])
+    net.eval()
+    return net, best, log_lines, train_seconds, n_params
 
 
 def _geometry_of(samples: list[data.Sample], k: int = 6) -> list[tuple[int, int]]:

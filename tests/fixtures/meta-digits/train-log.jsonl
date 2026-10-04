@@ -1,0 +1,3 @@
+{"step": 500, "loss": 0.12344, "lr": 0.002666, "val_acc": 0.9725, "val_loss": 0.16123, "seconds": 36.0}
+{"step": 1000, "loss": 0.03981, "lr": 0.000998, "val_acc": 0.985, "val_loss": 0.05871, "seconds": 68.7}
+{"step": 1500, "loss": 0.0217, "lr": 0.0, "val_acc": 0.9875, "val_loss": 0.05305, "seconds": 98.1}

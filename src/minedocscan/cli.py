@@ -146,15 +146,25 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--synthetic", type=int, help="합성 셀 수 (기본: 실제 셀이 있으면 4000, 없으면 8000)")
     n.add_argument("--seed", type=int, default=0)
     n.add_argument("--val-share", type=float, default=0.2, help="검증으로 떼는 train 날짜의 비율 (기본 0.2)")
-    n.add_argument("--target-auto-error", type=float, default=0.01,
-                   help="자동 적재 오류율의 목표 (검증 날짜, 기본 0.01). 이 이하인 가장 낮은 임계값을 고른다")
+    n.add_argument("--target-auto-error", type=float,
+                   help="자동 적재 오류율의 목표 (검증 날짜, 기본: 숫자 칸 0.01, 메타 필드 0.02). 이 이하인 가장 낮은 임계값을 고른다")
     n.add_argument("--min-val-auto", type=int, default=100,
                    help="기준을 정하려면 그 임계값에서 자동 적재된 검증 칸이 이만큼은 있어야 한다 (기본 100). 모자라면 자동 적재 없음")
-    n.add_argument("--steps", type=int, default=2500, help="학습 스텝 (배치 64, 기본 2500 — CPU 4코어에서 약 1분 반)")
+    n.add_argument("--steps", type=int, help="학습 스텝 (배치 64, 기본 2500 — CPU 4코어에서 약 1분 반. 분류기(choice)는 기본 600)")
     n.add_argument("--synthetic-geometry", metavar="WxH[,WxH…]",
                    help="합성 칸 크기(템플릿 px, doc_field bbox). 실제 셀이 없을 때만 쓴다 (있으면 실제 칸 크기). 기본 92x21")
     n.add_argument("--out", help="모델 폴더를 직접 지정 (기본: <site>/models/<이름>)")
     n.add_argument("--allow-in-repo", action="store_true", help="git 작업 트리 안에도 쓴다 (합성 셀만으로 만든 시험용 모델)")
+    n.add_argument("--meta-key", metavar="KEY[,KEY…]",
+                   help="표 밖 메타 필드의 모델: vehicle_no, operator, date.month, date.day … (export-crops --meta 의 폴더). "
+                        "쉼표로 여럿 — 숫자 모델만")
+    n.add_argument("--reader", choices=["digits", "choice"],
+                   help="--meta-key: 읽는 법. 기본은 정답이 전부 숫자열이면 digits(읽고 목록에서 고른다), 아니면 choice(분류기)")
+    n.add_argument("--cv", type=int, metavar="K",
+                   help="--meta-key: train 날짜를 K 묶음으로 나눠 돌려 가며 읽은 것 전체로 온도·기준을 정한다 (정답이 적을 때)")
+    n.add_argument("--min-examples", type=int, default=3, help="--reader choice: 종류가 되려면 필요한 예의 수 (기본 3)")
+    n.add_argument("--synthetic-meta", type=int, metavar="DAYS",
+                   help="--meta-key, --crops 없이: 합성 메타 필드 DAYS 일치로 학습 (시험용 모델, tools/synth_meta)")
     nsub.add_parser("list", parents=[common], help="사이트 팩의 모델과 카드 요약")
     n = nsub.add_parser("eval", parents=[common], help="크롭 폴더에서 바로 평가 (파이프라인을 돌리지 않는다)")
     n.add_argument("--crops", required=True, help="review export-crops 로 내보낸 폴더")
@@ -569,22 +579,31 @@ def cmd_recognizer(a) -> int:
         models = list_models(site.root)
         lines = [f"모델 ({models_dir(site.root)}): {len(models)}개"]
         for m in models:
+            if m.get("reader"):                              # 메타 필드 모델
+                lines.append(f"  {m['name']:<20} {m['created_at'] or '-':<21} {m['spec']:<34} 기준 {m['threshold']}  "
+                             f"메타 {', '.join(m['keys'])} ({m['reader']}) · 학습 {m['train_cells']}쪽/{m['train_dates']}일 "
+                             f"+ 합성 {m['synthetic_cells']} · 읽기({m['val_source']}) {m['val_cells']}번 정확도 {m['val_value_acc']}")
+                continue
             lines.append(f"  {m['name']:<20} {m['created_at'] or '-':<21} {m['spec']:<34} 기준 {m['threshold']}  "
                          f"학습 {m['train_cells']}셀/{m['train_dates']}일 + 합성 {m['synthetic_cells']} · "
                          f"검증({m['val_source']}) {m['val_cells']}셀 값 {m['val_value_acc']} 빈 칸 {m['val_empty_acc']}"
                          + (f"  [{m['error']}]" if m.get("error") else ""))
         _emit(a, {"models": models}, "\n".join(lines))
         return 0
+    if a.recognizer_command == "train" and (a.meta_key or a.synthetic_meta):
+        return _recognizer_train_meta(a, s)
     if a.recognizer_command == "train":
         from .recognize.digits.train import TrainArgs, TrainError, train
 
         if not _MODEL_NAME.match(a.name):
             raise SystemExit(f"--name 은 영문·숫자·.-_ (64자 이하): {a.name}")
+        if a.cv or a.reader:
+            raise SystemExit("--cv, --reader 는 메타 필드 모델(--meta-key)에서만 씁니다")
         site = _need_site(s) if (s.site or not a.out) else None
         out = Path(a.out) if a.out else models_dir(site.root) / a.name
-        args = TrainArgs(name=a.name, steps=a.steps, synthetic=a.synthetic, seed=a.seed, val_share=a.val_share,
-                         target_auto_error=a.target_auto_error, min_val_auto=a.min_val_auto,
-                         geometry=_geometry(a.synthetic_geometry))
+        args = TrainArgs(name=a.name, steps=a.steps or 2500, synthetic=a.synthetic, seed=a.seed, val_share=a.val_share,
+                         target_auto_error=0.01 if a.target_auto_error is None else a.target_auto_error,
+                         min_val_auto=a.min_val_auto, geometry=_geometry(a.synthetic_geometry))
         trips_max = site.option("haul", "trips_max") if site else None
         try:
             card = train(a.crops, out, args, split_salt=site.split_salt if site else "synthetic",
@@ -606,15 +625,67 @@ def cmd_recognizer(a) -> int:
     raise SystemExit(f"알 수 없는 recognizer 명령: {a.recognizer_command}")
 
 
+def _recognizer_train_meta(a, s: Settings) -> int:
+    """메타 필드 모델 (tasks/0004 단계 3·4). 카드·출력에 값(이름·차량번호)을 적지 않는다."""
+    import tempfile
+
+    from .recognize.digits.model import models_dir
+    from .recognize.digits.train import TrainError
+    from .recognize.meta.model import template_values
+    from .recognize.meta.train import MetaTrainArgs, train_meta
+
+    if not _MODEL_NAME.match(a.name):
+        raise SystemExit(f"--name 은 영문·숫자·.-_ (64자 이하): {a.name}")
+    if not a.meta_key:
+        raise SystemExit("--synthetic-meta 에는 --meta-key 가 필요합니다")
+    if a.crops and a.synthetic_meta:
+        raise SystemExit("--crops 와 --synthetic-meta 는 같이 쓰지 않습니다")
+    if not a.crops and not a.synthetic_meta:
+        raise SystemExit("메타 필드 모델은 --crops (review export-crops --meta 의 폴더) 또는 --synthetic-meta DAYS 로 학습합니다")
+    keys = tuple(k.strip() for k in a.meta_key.split(",") if k.strip())
+    site = _need_site(s) if (s.site or not a.out) else None
+    out = Path(a.out) if a.out else models_dir(site.root) / a.name
+    args = MetaTrainArgs(name=a.name, steps=a.steps,                     # None: 읽는 법마다 기본값 (train_meta)
+                         synthetic=a.synthetic, seed=a.seed, val_share=a.val_share, min_val_auto=a.min_val_auto,
+                         target_auto_error=0.02 if a.target_auto_error is None else a.target_auto_error, keys=keys,
+                         reader=a.reader, cv=a.cv, min_examples=a.min_examples,
+                         template_values={k: template_values(site, k) for k in keys} if site else {})
+    try:
+        with tempfile.TemporaryDirectory(prefix="minedocscan-synth-meta-") as tmp:
+            crops = a.crops
+            if a.synthetic_meta:
+                from .tools.synth_meta import write_meta_crops
+
+                write_meta_crops(tmp, keys, a.synthetic_meta, seed=a.seed)
+                crops = tmp
+            card = train_meta(crops, out, args, split_salt=site.split_salt if site else "synthetic",
+                              allow_in_repo=a.allow_in_repo)
+    except TrainError as e:
+        raise SystemExit(str(e)) from e
+    aa, v, m = card["auto_accept"], card["validation"], card["meta"]
+    thr = (f"{aa['threshold']} (읽기에서 자동 적재 {aa['auto']} 중 오류 {aa['errors']}, 오류율 95 % 상한 {aa['upper95']:.1%})"
+           if aa["met"] else f"없음 ({aa.get('reason')} — 자동 적재하지 않는다)")
+    sc = v["score"]
+    _emit(a, {"model": str(out), "card": card},
+          f"모델을 만들었습니다: {out} ({m['reader']}, 키 {', '.join(m['keys'])})\n"
+          f"  읽기({v['source']}) {v['reads']}번: 정확도 {sc['accuracy']}, 목록에 있던 값 {sc['listed']['accuracy']}, "
+          f"목록에 없는 값으로 답함 {sc['unlisted_answers']} · 온도 {card['temperature']} · 자동 적재 기준 {thr}\n"
+          "  설정: [recognize.meta] " + ", ".join(f'"{k}" = "{a.name}"' for k in m["keys"]))
+    return 0
+
+
 def _recognizer_eval(a, s: Settings) -> int:
     from .recognize.digits.evaluate import EvalError, evaluate
     from .recognize.digits.model import resolve_model
+    from .recognize.meta.model import is_meta_card
 
     site = _need_site(s) if s.site and Path(s.site).is_dir() else None
     try:
         model_dir = resolve_model(a.model, site.root if site else None)
     except FileNotFoundError as e:
         raise SystemExit(str(e)) from e
+    if is_meta_card(model_dir):
+        return _recognizer_eval_meta(a, s, site, model_dir)
     opts = (s.recognizer_options or {}).get("digits", {})
     thr = opts.get("auto_accept_conf")                       # 설정이 카드의 기준보다 먼저 (4.6)
     errors = None if a.errors is None else (Path(a.errors) if a.errors else Path(s.work_root) / "recognizer-errors")
@@ -645,6 +716,37 @@ def _recognizer_eval(a, s: Settings) -> int:
                  + f" · 읽을 수 없음 칸 중 자동 적재될 것 {r['illegible']['auto']}/{r['illegible']['n']}")
     if r["errors_image"]:
         lines.append(f"틀린 칸 {r['errors']}개 모아 보기: {r['errors_image']} (현장 글씨 — 저장소·문서에 넣지 말 것)")
+    _emit(a, r, "\n".join(lines))
+    return 0
+
+
+def _recognizer_eval_meta(a, s: Settings, site, model_dir: Path) -> int:
+    from .recognize.digits.evaluate import EvalError
+    from .recognize.meta.evaluate import evaluate_meta
+    from .recognize.meta.model import MetaModelError
+
+    errors = None if a.errors is None else (Path(a.errors) if a.errors else Path(s.work_root) / "recognizer-errors")
+    try:
+        r = evaluate_meta(a.crops, model_dir, split=a.split, site=site, errors=errors)
+    except (EvalError, MetaModelError, ValueError) as e:
+        raise SystemExit(str(e)) from e
+    r.pop("predictions")                                      # 쪽마다의 답(값)은 내놓지 않는다 (4.7)
+    sc, at = r["score"], r["at_threshold"]
+    lines = [f"모델 {r['model']} ({r['reader']}, 키 {', '.join(r['keys'])}) · 분할 {r['split']} · {r['cells']}쪽 ({r['dates']}일) · "
+             f"규격 {r['spec']} · 후보 {r['candidates']}",
+             f"정확도 {sc['accuracy']} ({sc['correct']}/{sc['n']}), 정답이 목록에 있던 쪽 {sc['listed']['accuracy']} "
+             f"({sc['listed']['correct']}/{sc['listed']['n']}), 목록에 없는 값으로 답함 {sc['unlisted_answers']}, 거절 {sc['rejects']}",
+             f"정답이 목록 밖인 쪽 {sc['truth_unlisted']['n']}: 목록에 없는 값으로 답함 {sc['truth_unlisted']['answered_unlisted']}, "
+             f"목록의 값으로 답함 {sc['truth_unlisted']['answered_value']}",
+             "신뢰도 구간별 정확도: " + ", ".join(f"[{b['bin'][0]},{b['bin'][1]}) {b['n']}쪽 평균 {b['mean_conf']} 정확 {b['accuracy']}"
+                                        for b in r["calibration"] if b["n"]),
+             "임계값별 자동 적재 (적재율 · 오류 분자/분모 · 95% 구간):"]
+    lines += [f"  {t['threshold']:<6} {t['auto_rate']:<7} {t['errors']}/{t['auto']} {t['error_ci95']}" for t in r["thresholds"]]
+    lines.append(f"모델의 기준 {r['threshold'] if r['threshold'] is not None else '없음(자동 적재 없음)'}"
+                 + ("" if at is None else f": 자동 적재 {at['auto']}/{r['cells']} = {at['auto_rate']}, "
+                                          f"오류 {at['errors']}/{at['auto']} {at['error_ci95']}"))
+    if r["errors_image"]:
+        lines.append(f"틀린 쪽 {r['errors']}개 모아 보기: {r['errors_image']} (이름·차량번호 글씨 — 저장소·문서에 넣지 말 것)")
     _emit(a, r, "\n".join(lines))
     return 0
 

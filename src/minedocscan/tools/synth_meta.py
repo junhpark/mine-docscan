@@ -89,17 +89,28 @@ def render_field_ink(text: str, kind: str, box_w: int, box_h: int, margin: int, 
     h = box_h * style["size"] * r
     x = (margin + box_w * style["x0"]) * r
     cy = (margin + box_h * (0.5 + style["dy"])) * r
+    room = (margin * 0.5 + box_w) * r                         # 글씨가 들어갈 오른쪽 끝 (상자를 조금 넘을 수는 있다)
     if kind == "name":
         g = handfont.draw_word(written_name(text), h * 0.95, style, rng)
         g = _elastic(g, rng, alpha=h * 0.03, sigma=max(2.0, h * 0.1))
         w = _ink_width(g)
+        if w > room - margin * r:                             # 긴 이름은 작게 (자리가 모자라면 사람도 줄여 쓴다)
+            k = (room - margin * r) / w
+            g = cv2.resize(g, (max(1, int(g.shape[1] * k)), max(1, int(g.shape[0] * k))), interpolation=cv2.INTER_AREA)
+            w = _ink_width(g)
+        x = min(x, room - w)
         _paste(ink, g, x + w / 2, cy, style["ink"])
         return ink
+    glyphs = [_elastic(handfont.draw_glyph(ch, h * float(rng.uniform(0.92, 1.08)), style, rng), rng, alpha=h * 0.05,
+                       sigma=max(2.0, h * 0.12)) for ch in text]
+    widths = [_ink_width(g) for g in glyphs]
     gap = style["gap"] * h
-    for ch in text:
-        g = handfont.draw_glyph(ch, h * float(rng.uniform(0.92, 1.08)), style, rng)
-        g = _elastic(g, rng, alpha=h * 0.05, sigma=max(2.0, h * 0.12))
-        w = _ink_width(g)
+    # 다 들어가게: 글자 사이를 좁히고, 그래도 넘치면 왼쪽으로 당긴다. 상자 밖으로 잘린 글자에 그 값을 정답으로 달면
+    # 모델이 없는 글자를 지어내는 법을 배운다 (마지막 자리를 늘 틀렸다)
+    if len(glyphs) > 1 and x + sum(widths) + gap * (len(glyphs) - 1) > room:
+        gap = max(0.08 * h, (room - x - sum(widths)) / (len(glyphs) - 1))
+    x = max(margin * 0.5 * r, min(x, room - sum(widths) - gap * (len(glyphs) - 1)))
+    for g, w in zip(glyphs, widths, strict=True):
         _paste(ink, g, x + w / 2, cy + rng.uniform(-0.06, 0.06) * h, style["ink"] * float(rng.uniform(0.88, 1.0)))
         x += w + gap
     return ink
@@ -181,5 +192,60 @@ def random_text(rng: np.random.Generator, meta_key: str) -> str:
     elif meta_key == "date.day":
         v = int(rng.integers(1, 32))
     else:
-        return str(int(rng.integers(1000, 10000)))
+        # 반은 다른 자릿수(1–6): 네 자리 꼴만 외우지 않고 숫자를 읽게 (닫힌 목록 밖의 새 차도 읽어야 한다)
+        n = 4 if rng.random() < 0.5 else int(rng.integers(1, 7))
+        return str(int(rng.integers(1, 10))) + "".join(str(int(d)) for d in rng.integers(0, 10, n - 1))
     return f"{v:02d}" if v < 10 and rng.random() < 0.25 else str(v)
+
+
+# ── 내보낸 크롭 폴더처럼 (학습·시험용) ─────────────────────────────────────
+DEFAULT_BOX = {"vehicle_no": (390, 65), "operator": (370, 65), "date.month": (140, 65), "date.day": (140, 65)}
+META_SPEC = CropSpec("source", 1.5, 8)          # export-crops --meta 의 기본 규격 (원본 해상도 ×1.5, 여유 8 px)
+
+
+def write_meta_crops(out, keys: tuple[str, ...], days: int, seed: int = 0, start: str = "2030-03-01",
+                     writers: tuple[str, ...] = ROSTER, vehicles: dict[str, str] | None = None,
+                     spec: CropSpec = META_SPEC, split: str = "train", swap_share: float = 0.0) -> dict:
+    """`review export-crops --meta` 가 만드는 폴더와 같은 모양의 합성 폴더: OUT/<split>/meta/<키>/*.png + OUT/<split>/meta/labels.jsonl.
+    날마다 writers 의 사람이 한 쪽씩 쓴다 — 자기 이름, 자기 차(vehicles: 사람 → 번호, 기본은 ROSTER[i] ↔ VEHICLES[i]),
+    그날의 월·일. swap_share: 다른 사람의 차를 탄 쪽의 몫 (0 이면 번호마다 쓰는 사람이 정해져 있다).
+    돌려주는 값: {"written", "by_key", "dates"}."""
+    import json
+    from datetime import date, timedelta
+    from pathlib import Path
+
+    from ..imaging.io import imwrite
+
+    out = Path(out)
+    vehicles = vehicles or {w: VEHICLES[i % len(VEHICLES)] for i, w in enumerate(writers)}
+    d0 = date.fromisoformat(start)
+    rng = np.random.default_rng([seed, 4004])
+    lines, by_key, dates = [], {}, []
+    for d in range(days):
+        day = (d0 + timedelta(days=d)).isoformat()
+        dates.append(day)
+        for w in writers:
+            style = page_style(writer_style(w), rng)
+            veh = vehicles[w]
+            if swap_share and rng.random() < swap_share:
+                veh = str(rng.choice([v for v in vehicles.values() if v != vehicles[w]]))
+            _y, m, dd = day.split("-")
+            vals = {"vehicle_no": veh, "operator": w, "date.month": str(int(m)), "date.day": str(int(dd))}
+            for key in keys:
+                bw, bh = DEFAULT_BOX[key]
+                text = vals[key]
+                written = f"0{text}" if key.startswith("date.") and len(text) == 1 and rng.random() < 0.25 else text
+                img = make_field_crop(rng, written, kind_of(key), FieldSpec(bw, bh, spec), style)
+                fid = f"synth-{day}-{w.lower()}:fields:{key}:-1"
+                rel = Path(split) / "meta" / key / f"synth-{day}-{w.lower()}.png"
+                imwrite(out / rel, img)
+                lines.append({"field_id": fid, "file": rel.as_posix(), "meta_key": key, "text": text, "verdict": "value",
+                              "label_source": "synthetic", "template": "synth_meta", "region": "fields",
+                              "field_name": key, "kind": "handwritten_text", "work_date": day, "split": split,
+                              "spec": spec.to_dict(), "inked": True, "bbox": [0, 0, bw, bh]})
+                by_key[key] = by_key.get(key, 0) + 1
+    (out / split / "meta").mkdir(parents=True, exist_ok=True)
+    with open(out / split / "meta" / "labels.jsonl", "a", encoding="utf-8") as f:
+        for ln in lines:
+            f.write(json.dumps(ln, ensure_ascii=False) + "\n")
+    return {"written": len(lines), "by_key": by_key, "dates": dates}

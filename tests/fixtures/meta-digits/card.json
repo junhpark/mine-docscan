@@ -1,0 +1,374 @@
+{
+ "name": "meta-digits",
+ "created_at": "2026-10-04T01:55:50Z",
+ "code_version": {
+  "minedocscan": "0.2.0",
+  "git": "4727770"
+ },
+ "spec": {
+  "res": "source",
+  "scale": 1.5,
+  "pad": 8
+ },
+ "input": {
+  "width": 96,
+  "height": 32,
+  "channels": 3,
+  "position": false,
+  "preprocess": "recognize/digits/model.py: resize_input → normalize (잉크, 세로 위치, 가로 위치) — 위치 채널은 0"
+ },
+ "chars": "0123456789?",
+ "kinds": [],
+ "architecture": {
+  "layers": "conv3x3(16)-pool2-conv3x3(32)-pool2-conv3x3(64)-conv3x3(64)-pool(2,1)-conv3x3(96)-maxpool(4,1)-conv1x3(96)-conv1x1(12); 합성곱마다 BN+ReLU; CTC, T=24",
+  "channels": [
+   16,
+   32,
+   64,
+   64,
+   96
+  ],
+  "params": 145180,
+  "onnx_bytes": 581951,
+  "exporter": "torchscript, opset 13",
+  "batch": 1
+ },
+ "train_args": {
+  "steps": 1500,
+  "batch": 64,
+  "lr": 0.003,
+  "synthetic": 3000,
+  "val_share": 0.2,
+  "target_auto_error": 0.02,
+  "min_val_auto": 100,
+  "geometry": {
+   "vehicle_no": [
+    390,
+    65
+   ],
+   "date.month": [
+    140,
+    65
+   ],
+   "date.day": [
+    140,
+    65
+   ]
+  },
+  "channels": [
+   16,
+   32,
+   64,
+   64,
+   96
+  ],
+  "eval_every": 500,
+  "real_share": 0.2,
+  "position": false,
+  "reader": null,
+  "cv": null,
+  "min_examples": 3,
+  "mix": "실제:합성 = 0.2:0.8 (배치 기준)"
+ },
+ "seed": 0,
+ "data": {
+  "crops": {
+   "lines": 1080,
+   "skipped": {},
+   "splits": [
+    "train"
+   ]
+  },
+  "train": {
+   "cells": 810,
+   "dates": 45,
+   "classes": 34,
+   "per_class": {
+    "min": 6,
+    "median": 12.0,
+    "max": 156
+   },
+   "by_verdict": {
+    "value": 810
+   }
+  },
+  "all": {
+   "cells": 1080,
+   "dates": 60,
+   "classes": 37,
+   "per_class": {
+    "min": 6,
+    "median": 12,
+    "max": 198
+   },
+   "by_verdict": {
+    "value": 1080
+   }
+  },
+  "synthetic": {
+   "cells": 3000,
+   "val_cells": 400
+  },
+  "val_rule": {
+   "salt": "synthetic:val",
+   "share": 0.2,
+   "rule": "sha256(salt:날짜) 앞 32비트 / 2^32 < share 이면 검증 (evaluate/split.py)"
+  }
+ },
+ "validation": {
+  "source": "val_dates",
+  "reads": 270,
+  "score": {
+   "n": 270,
+   "correct": 269,
+   "accuracy": 0.9963,
+   "listed": {
+    "n": 270,
+    "correct": 269,
+    "accuracy": 0.9963
+   },
+   "unlisted_answers": 1,
+   "truth_unlisted": {
+    "n": 0,
+    "answered_unlisted": 0,
+    "answered_value": 0
+   },
+   "rejects": 0
+  },
+  "best_step": 1500,
+  "train_seconds": 98.1,
+  "total_seconds": 137.8,
+  "export_check": {
+   "max_abs_diff": 1.049041748046875e-05,
+   "same_answers": true,
+   "cells": 400
+  },
+  "calibration": {
+   "reads": 270,
+   "nll_at_1": 0.00013,
+   "nll": 0.0
+  }
+ },
+ "temperature": 0.3,
+ "auto_accept": {
+  "target": 0.02,
+  "threshold": 0.5,
+  "met": true,
+  "reason": null,
+  "min_auto": 100,
+  "auto": 269,
+  "errors": 0,
+  "upper95": 0.0141,
+  "basis": "읽기 270번 (val_dates)",
+  "rule": "오류율(자동 적재된 쪽 중 정답과 다른 비율)이 목표 이하인 가장 낮은 임계값, 자동 적재된 읽기가 min_auto 이상 (ADR 0012, tasks/0004 4.5)",
+  "table": [
+   {
+    "threshold": 0.5,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   },
+   {
+    "threshold": 0.6,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   },
+   {
+    "threshold": 0.7,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   },
+   {
+    "threshold": 0.8,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   },
+   {
+    "threshold": 0.85,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   },
+   {
+    "threshold": 0.9,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   },
+   {
+    "threshold": 0.93,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   },
+   {
+    "threshold": 0.95,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   },
+   {
+    "threshold": 0.97,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   },
+   {
+    "threshold": 0.98,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   },
+   {
+    "threshold": 0.99,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   },
+   {
+    "threshold": 0.995,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   },
+   {
+    "threshold": 0.998,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   },
+   {
+    "threshold": 0.999,
+    "auto": 269,
+    "auto_rate": 0.9963,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0141
+    ]
+   }
+  ]
+ },
+ "libraries": {
+  "python": "3.11.15",
+  "torch": "2.14.1+cu130",
+  "onnx": "1.23.1",
+  "numpy": "2.4.6",
+  "opencv": "5.0.0"
+ },
+ "model_sha256": "18e9ce7753c4a6c8a712fad34b30ceb40a2f4ad18f8e82e545dfe276a2b9280e",
+ "meta": {
+  "reader": "digits",
+  "keys": [
+   "vehicle_no",
+   "date.month",
+   "date.day"
+  ],
+  "classes": {
+   "vehicle_no": {
+    "n": 6
+   },
+   "date.month": {
+    "n": 12
+   },
+   "date.day": {
+    "n": 31
+   }
+  },
+  "template_values": {},
+  "cv": {
+   "method": "val_dates",
+   "salt": "synthetic:val",
+   "share": 0.2,
+   "dates": [
+    "2030-03-02",
+    "2030-03-11",
+    "2030-03-12",
+    "2030-03-14",
+    "2030-03-17",
+    "2030-03-18",
+    "2030-03-19",
+    "2030-03-22",
+    "2030-03-23",
+    "2030-03-30",
+    "2030-04-02",
+    "2030-04-07",
+    "2030-04-19",
+    "2030-04-20",
+    "2030-04-28"
+   ],
+   "cells": 270
+  },
+  "unlisted_ratio": 10.0,
+  "candidates": "classes.json 의 값 + 템플릿의 header_<키> (날짜의 부분은 월 1–12, 일 1–31)"
+ }
+}

@@ -54,7 +54,7 @@ _YS = np.repeat(np.linspace(-1, 1, INPUT_H, dtype=np.float32)[:, None], INPUT_W,
 _XS = np.repeat(np.linspace(-1, 1, INPUT_W, dtype=np.float32)[None, :], INPUT_H, axis=0)
 
 
-def normalize(small: np.ndarray) -> np.ndarray:
+def normalize(small: np.ndarray, position: bool = True) -> np.ndarray:
     """모델 입력 크기의 회색조 → (3, H, W) float32: 잉크 채널, 세로 위치, 가로 위치.
     잉크 = (종이 - 화소) / 대비. 종이는 중앙값, 대비는 종이와 가장 진한 1 % 의 차 — 단 48 미만으로는 두지 않는다
     (거의 빈 칸에서 종이의 잡음을 잉크로 키우지 않게. 연한 잉크는 최대 약 5배까지 키운다)."""
@@ -62,12 +62,15 @@ def normalize(small: np.ndarray) -> np.ndarray:
     paper = float(np.median(g))
     dark = float(np.percentile(g, 1))
     ink = np.clip((paper - g) / max(paper - dark, 48.0), -0.3, 1.2)
+    if not position:                         # 메타 필드 모델: 위치 채널을 0 으로 (meta/train.py — 넓은 필드에서 지름길이 되었다)
+        z = np.zeros_like(_YS)
+        return np.stack([ink, z, z]).astype(np.float32)
     return np.stack([ink, _YS, _XS]).astype(np.float32)
 
 
-def preprocess(crop: np.ndarray) -> np.ndarray:
-    """크롭 하나 → 모델 입력 (1, 3, H, W)."""
-    return normalize(resize_input(crop))[None]
+def preprocess(crop: np.ndarray, position: bool = True) -> np.ndarray:
+    """크롭 하나 → 모델 입력 (1, 3, H, W). position=False 면 위치 채널이 0 (카드의 input.position)."""
+    return normalize(resize_input(crop), position)[None]
 
 
 # ── 답 ────────────────────────────────────────────────────────────────────
@@ -227,6 +230,20 @@ def list_models(site_root: str | Path) -> list[dict]:
                "train_dates": 0, "synthetic_cells": 0, "val_source": "-", "val_cells": 0, "val_value_acc": None,
                "val_empty_acc": None}
         try:
+            raw = json.loads((d / "card.json").read_text(encoding="utf-8")) if (d / "card.json").is_file() else {}
+            if raw.get("meta"):                                # 메타 필드 모델 (tasks/0004): 읽는 법·키, 읽기 수치
+                from ..meta.model import MetaModel
+
+                card = MetaModel(d).card
+                aa, v, m = card["auto_accept"], card["validation"], card["meta"]
+                row.update(created_at=card["created_at"], spec=CropSpec.from_dict(card["spec"]).describe(),
+                           threshold=(f"{aa['threshold']} (상한 {aa['upper95']:.1%})" if aa.get("met") else "없음"),
+                           train_cells=card["data"]["train"]["cells"], train_dates=card["data"]["train"]["dates"],
+                           synthetic_cells=card["data"]["synthetic"]["cells"], val_source=v["source"], val_cells=v["reads"],
+                           val_value_acc=v["score"]["accuracy"], val_empty_acc=None, reader=m["reader"], keys=m["keys"],
+                           classes={k: c["n"] for k, c in m["classes"].items()} if m["reader"] == "digits" else m["classes"])
+                out.append(row)
+                continue
             card = load_card(resolve_model(str(d), site_root))
         except (OSError, ValueError, KeyError) as e:
             row["error"] = str(e)
