@@ -284,7 +284,8 @@ def _train_digits(crops: data.Crops, out_dir: Path, args: MetaTrainArgs, split_s
         def read_with(onnx, tr, va, f) -> list[calib.Read]:
             cands = {k: candidates_for(k, tr, args) for k in args.keys}
             lg = onnx.logits_many(np.stack([normalize(small(s), args.position) for s in va]))
-            return [calib.Read(z, s.meta_key, cands[s.meta_key], s.text, s.work_date, f) for z, s in zip(lg, va, strict=True)]
+            return [calib.Read(z, s.meta_key, cands[s.meta_key], s.text, s.work_date, f, {"field_id": s.field_id})
+                    for z, s in zip(lg, va, strict=True)]
 
         if args.cv:                                       # 묶음마다 나머지로 학습해 그 묶음을 읽는다
             for f, (tr, va) in enumerate(plans):
@@ -365,6 +366,8 @@ def _train_digits(crops: data.Crops, out_dir: Path, args: MetaTrainArgs, split_s
         with open(tmp / "train-log.jsonl", "w", encoding="utf-8") as fh:
             for rec in log_lines:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if args.cv:
+            calib.write_cv_reads(tmp / calib.CV_READS, reads, preds)
         for p in tmp.glob("read*.onnx"):
             p.unlink()
         if out_dir.exists():

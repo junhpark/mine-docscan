@@ -4,8 +4,9 @@
 목록에 없는 값으로 답한 수와, 정답이 목록 밖이었던 쪽의 처리가 더해진다.
 값별 표·많이 틀린 쌍은 내지 않는다 — 값이 이름·차량번호다 (4.7). 틀린 칸 모아 보기에도 값을 적지 않는다 (맞음/틀림 표시만).
 
-분할: val = 모델이 기준을 정한 읽기와 같은 날짜 — --cv 로 만든 모델은 train 날짜 전부로 학습했으므로 다시 잴 수 없다
-(카드의 읽기 수치를 본다). train = 나머지, test = test 로 내보낸 폴더 (마지막에 한 번).
+분할: val = 모델이 기준을 정한 읽기와 같은 날짜. --cv 로 만든 모델은 train 날짜 전부로 학습했으므로 다시 읽어서는 잴 수 없다 —
+학습 때 묶음마다의 모델로 읽은 결과(모델 폴더의 cv-reads.jsonl, 값 없이 맞음·신뢰도·답의 종류만)로 같은 표를 내고, 틀린 칸 모아 보기는
+그 필드의 크롭을 이 폴더에서 찾아 만든다. train = 나머지, test = test 로 내보낸 폴더 (마지막에 한 번).
 """
 from __future__ import annotations
 
@@ -32,8 +33,10 @@ def evaluate_meta(crops_dir: str | Path, model_dir: str | Path, split: str | Non
     m = MetaModel(model_dir)
     method = m.card["meta"].get("cv") or {}
     if split == "val" and method.get("method", "").startswith("cv"):
-        raise EvalError(f"이 모델은 --cv {method.get('k')} 로 기준을 정하고 train 날짜 전부로 학습했습니다 — 검증 수치는 카드의 읽기 "
-                        f"{m.card['validation']['reads']}번입니다 (`recognizer list`). 크롭으로는 --split test 를 보세요")
+        if not (m.dir / calib.CV_READS).is_file():
+            raise EvalError(f"이 모델은 --cv {method.get('k')} 로 기준을 정하고 train 날짜 전부로 학습했고 묶음 교차 읽기({calib.CV_READS})가 "
+                            f"없습니다 — 검증 수치는 카드의 읽기 {m.card['validation']['reads']}번입니다 (`recognizer list`)")
+        return _evaluate_cv_reads(m, crops_dir, site, errors)
     try:
         crops = data.read_crops(crops_dir, allow_test=True, meta_keys=tuple(m.keys),
                                 only_split="test" if split == "test" else ("train" if split in ("val", "train") else None))
@@ -76,6 +79,39 @@ def evaluate_meta(crops_dir: str | Path, model_dir: str | Path, split: str | Non
     out["errors"] = len(wrong)
     if errors is not None and wrong:
         out["errors_image"] = str(_sheet(wrong, Path(errors) / f"{m.name}-{out['split']}-errors.png"))
+    return out
+
+
+def _evaluate_cv_reads(m: MetaModel, crops_dir, site, errors) -> dict:
+    """--cv 모델의 val: 학습 때 묶음마다의 모델로 읽은 결과로 같은 표를 낸다 (다시 읽지 않는다 — 내보낸 모델은 그 날짜로도 학습했다)."""
+    rows = calib.load_cv_reads(m.dir / calib.CV_READS)
+    if not rows:
+        raise EvalError(f"묶음 교차 읽기가 비었습니다 ({m.dir / calib.CV_READS})")
+    preds, truths, cand_lists = calib.cv_preds(rows)
+    t = m.threshold
+    out = {"model": m.name, "reader": m.reader, "keys": m.keys, "split": "val", "source": f"{calib.CV_READS} "
+           f"({m.card['meta']['cv'].get('method')}: 묶음마다 나머지 날짜로 학습한 모델이 읽은 것)",
+           "cells": len(rows), "dates": len({r["date"] for r in rows if r["date"]}), "spec": m.spec.describe(),
+           "threshold": None if not math.isfinite(t) else t, "score": calib.score(preds, truths, cand_lists),
+           "by_key": {k: calib.score(*[[x for x, r in zip(col, rows, strict=True) if r["key"] == k]
+                                       for col in (preds, truths, cand_lists)]) for k in m.keys},
+           "calibration": _calibration(preds, truths), "thresholds": calib.threshold_table(preds, truths),
+           "at_threshold": calib.threshold_table(preds, truths, grid=(t,))[0] if math.isfinite(t) else None,
+           "candidates": {k: len(m.candidates(k, site)) for k in m.keys}, "skipped": {}, "errors_image": None,
+           "predictions": [{"field_id": r["field_id"], "correct": r["correct"], "confidence": r["confidence"],
+                            "answer": r["answer"]} for r in rows]}
+    wrong = [r for r in rows if not r["correct"]]
+    out["errors"] = len(wrong)
+    if errors is not None and wrong:
+        try:
+            by_id = {s.field_id: s for s in data.read_crops(crops_dir, allow_test=True, meta_keys=tuple(m.keys),
+                                                            only_split="train").samples}
+        except data.CropsError as e:
+            raise EvalError(str(e)) from e
+        tiles = [(by_id[r["field_id"]].image(), r["confidence"]) for r in wrong if r["field_id"] in by_id]
+        out["errors_missing_crops"] = len(wrong) - len(tiles)
+        if tiles:
+            out["errors_image"] = str(_sheet(tiles, Path(errors) / f"{m.name}-val-errors.png"))
     return out
 
 

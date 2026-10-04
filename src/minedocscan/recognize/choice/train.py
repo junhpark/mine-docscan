@@ -191,7 +191,7 @@ def train_choice(crops: data.Crops, out_dir: Path, args: MetaTrainArgs, *, split
 
         def read_with(path: Path, cls: list[str], va: list[data.Sample], f) -> list[calib.Read]:
             lg = _cv_logits(path, np.stack([x_of(s) for s in va]))
-            return [calib.Read(z, key, cls, s.text, s.work_date, f) for z, s in zip(lg, va, strict=True)]
+            return [calib.Read(z, key, cls, s.text, s.work_date, f, {"field_id": s.field_id}) for z, s in zip(lg, va, strict=True)]
 
         if args.cv:
             for f, (tr, va) in enumerate(plans):
@@ -272,6 +272,8 @@ def train_choice(crops: data.Crops, out_dir: Path, args: MetaTrainArgs, *, split
         with open(tmp / "train-log.jsonl", "w", encoding="utf-8") as fh:
             for rec in log_lines:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if args.cv:
+            calib.write_cv_reads(tmp / calib.CV_READS, reads, preds)
         for p in tmp.glob("read*.onnx"):
             p.unlink()
         if out_dir.exists():

@@ -180,13 +180,13 @@ def meta_null(meta_synth, tmp_path_factory):
 META_FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
-def meta_options() -> dict:
-    """시험용 메타 필드 모델 두 개를 네 키에 (설정 [recognize.meta] 와 같은 모양)."""
-    d, o = str(META_FIXTURES / "meta-digits"), str(META_FIXTURES / "meta-operator")
+def meta_options(digits: Path = META_FIXTURES / "meta-digits", operator: Path = META_FIXTURES / "meta-operator") -> dict:
+    """메타 필드 모델 두 개(기본: 시험용)를 네 키에 (설정 [recognize.meta] 와 같은 모양)."""
+    d, o = str(digits), str(operator)
     return {"meta": {"vehicle_no": d, "date.month": d, "date.day": d, "operator": o}}
 
 
-def meta_run(synth, root: Path, labels: dict | None = None, **kw) -> dict:
+def meta_run(synth, root: Path, labels: dict | None = None, options: dict | None = None, **kw) -> dict:
     """사이트 팩을 복사해(라벨을 labels 로 바꿔) 메타 필드 모델로 돌린다. 정합 이미지는 저장하지 않는다."""
     import json
     import shutil
@@ -197,7 +197,7 @@ def meta_run(synth, root: Path, labels: dict | None = None, **kw) -> dict:
         (site / "labels" / "pages.json").write_text(json.dumps(labels, ensure_ascii=False), encoding="utf-8")
     kw.setdefault("save_aligned", False)
     settings = Settings(site=site, archive_root=synth.scans, work_root=root / "work", reviews=root / "reviews.jsonl",
-                        recognizer_options=meta_options(), **kw)
+                        recognizer_options=options or meta_options(), **kw)
     pipe = Pipeline(settings)
     pipe.run([synth.scans])
     return {"root": root, "settings": settings, "pipe": pipe}

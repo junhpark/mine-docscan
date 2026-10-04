@@ -804,7 +804,7 @@ def _recognizer_eval_meta(a, s: Settings, site, model_dir: Path) -> int:
     r.pop("predictions")                                      # 쪽마다의 답(값)은 내놓지 않는다 (4.7)
     sc, at = r["score"], r["at_threshold"]
     lines = [f"모델 {r['model']} ({r['reader']}, 키 {', '.join(r['keys'])}) · 분할 {r['split']} · {r['cells']}쪽 ({r['dates']}일) · "
-             f"규격 {r['spec']} · 후보 {r['candidates']}",
+             f"규격 {r['spec']} · 후보 {r['candidates']}" + (f"\n읽기: {r['source']}" if r.get("source") else ""),
              f"정확도 {sc['accuracy']} ({sc['correct']}/{sc['n']}), 정답이 목록에 있던 쪽 {sc['listed']['accuracy']} "
              f"({sc['listed']['correct']}/{sc['listed']['n']}), 목록에 없는 값으로 답함 {sc['unlisted_answers']}, 거절 {sc['rejects']}",
              f"정답이 목록 밖인 쪽 {sc['truth_unlisted']['n']}: 목록에 없는 값으로 답함 {sc['truth_unlisted']['answered_unlisted']}, "

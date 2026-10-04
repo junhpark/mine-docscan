@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -16,6 +17,8 @@ import numpy as np
 
 from ...evaluate.stats import wilson
 from ..digits.calib import COARSE_GRID, THRESHOLD_GRID, choose_threshold, why_no_threshold  # noqa: F401
+
+CV_READS = "cv-reads.jsonl"
 
 
 @dataclass
@@ -87,3 +90,24 @@ def status_of(answer: str, confidence: float, threshold: float) -> str:
     if answer == "value":
         return "auto" if confidence >= threshold else "pending"
     return "unlisted" if answer == "unlisted" else "pending"
+
+
+def write_cv_reads(path, reads: list[Read], preds: list[tuple[str, float, str]]) -> None:
+    """--cv 의 읽기(묶음마다의 모델로 읽은 것)를 모델 폴더에 남긴다 — recognizer eval --split val 이 쓴다 (묶음마다의 모델은 남기지 않으므로).
+    값(이름·차량번호)은 적지 않는다: 필드, 키, 날짜, 묶음, 맞았나, 신뢰도(카드의 온도로), 답의 종류, 정답이 그 읽기의 후보에 있었나."""
+    with open(path, "w", encoding="utf-8") as fh:
+        for r, (v, c, a) in zip(reads, preds, strict=True):
+            fh.write(json.dumps({"field_id": r.extra.get("field_id"), "key": r.key, "date": r.date, "fold": r.fold,
+                                 "correct": v == r.truth, "confidence": round(float(c), 6), "answer": a,
+                                 "truth_listed": r.truth in r.candidates}, ensure_ascii=False) + "\n")
+
+
+def load_cv_reads(path) -> list[dict]:
+    with open(path, encoding="utf-8") as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+def cv_preds(rows: list[dict]) -> tuple[list[tuple[str, float, str]], list[str], list[list[str]]]:
+    """write_cv_reads 의 줄 → (preds, truths, candidates). 값 대신 자리표시자: 정답 "y", 맞으면 고른 값도 "y"."""
+    preds = [("y" if r["correct"] else "n", r["confidence"], r["answer"]) for r in rows]
+    return preds, ["y"] * len(rows), [["y"] if r["truth_listed"] else [] for r in rows]

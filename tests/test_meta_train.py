@@ -91,6 +91,16 @@ def test_cv_folds_are_disjoint_dates_without_test(tmp_path):
     assert card["temperature"] > 0 and card["auto_accept"]["basis"].endswith("(cv5)")
     assert card["auto_accept"]["met"] is False and "100" in card["auto_accept"]["reason"]     # 72번 읽기로는 기준이 없다
     assert cv_folds(dates, "s", 5) == cv_folds(list(reversed(dates)), "s", 5)              # 순서와 무관
+    # 묶음 교차 읽기는 값 없이 모델 폴더에 남고, recognizer eval --split val 이 그것으로 카드와 같은 표를 낸다
+    rows = [json.loads(line) for line in (tmp_path / "m" / "cv-reads.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == card["validation"]["reads"] and {r["fold"] for r in rows} == set(range(5))
+    assert set(rows[0]) == {"field_id", "key", "date", "fold", "correct", "confidence", "answer", "truth_listed"}
+    from minedocscan.recognize.meta.evaluate import evaluate_meta
+
+    r = evaluate_meta(tmp_path / "c", tmp_path / "m", split="val", errors=tmp_path / "err")
+    assert r["score"] == card["validation"]["score"] and r["thresholds"] == card["auto_accept"]["table"]
+    assert r["cells"] == len(rows) and "cv-reads" in r["source"]
+    assert r["errors"] == 0 or r["errors_image"] is not None
     synth_meta.write_meta_crops(tmp_path / "c", ("date.day",), 2, seed=2, start="2031-01-01", split="test")
     from minedocscan.recognize.digits.train import TrainError
 
@@ -161,3 +171,38 @@ def test_rare_values_are_not_classes(tmp_path):
     cls = card["meta"]["classes"]
     assert cls["n"] == 6 and cls["dropped_values"] == 1 and cls["dropped_examples"] == 2
     assert "MIKE" not in json.loads((tmp_path / "m" / "classes.json").read_text(encoding="utf-8"))["classes"]
+
+
+# ── 시험용 모델을 다시 만들어도 (tasks/0004 6절) ────────────────────────────────
+def test_regenerated_meta_fixtures_meet_stage5(tmp_path):
+    """tests/fixtures 의 메타 모델 두 개를 README 의 명령으로 다시 만들어도 단계 5 의 문턱을 넘는다 (바이트가 같을 필요는 없다):
+    라벨 없이 돌린 합성 묶음에서 자동 적재된 차량번호·작성자 중 틀린 것 2 % 이하, 일보의 자리가 라벨을 준 실행과 같은 쪽 0.95 이상."""
+    from pathlib import Path
+
+    from conftest import meta_options, meta_run
+    from minedocscan.tools.synth import generate
+
+    readme = (Path(__file__).parent / "fixtures" / "README.md").read_text(encoding="utf-8").replace("\\\n    ", "")
+    cmds = {"meta-digits": ["--meta-key", "vehicle_no,date.month,date.day", "--synthetic-meta", "60", "--steps", "1500",
+                            "--name", "meta-digits"],
+            "meta-operator": ["--meta-key", "operator", "--synthetic-meta", "100", "--name", "meta-operator"]}
+    for name, args in cmds.items():
+        assert " ".join(args) in readme, name                                  # README 의 명령과 같은 인자
+        assert main(["recognizer", "train", *args, "--out", str(tmp_path / name)]) == 0
+    synth = generate(tmp_path / "data", days=4, seed=3, meta_fields=True)
+    truth = json.loads((synth.site / "labels" / "pages.json").read_text(encoding="utf-8"))
+    opts = meta_options(tmp_path / "meta-digits", tmp_path / "meta-operator")
+    run = meta_run(synth, tmp_path / "nolabels", labels={}, options=opts)
+    lab = meta_run(synth, tmp_path / "labeled", options=opts)
+    con = run["pipe"].con
+    rows = con.execute("SELECT m.meta_key, m.machine_status, m.machine_value, d.source_name || '#' || p.page_no AS src "
+                       "FROM doc_page_meta m JOIN doc_page p ON m.page_id = p.page_id JOIN doc_document d ON "
+                       "p.document_id = d.document_id WHERE m.meta_key IN ('vehicle_no', 'operator')").fetchall()
+    auto = [r for r in rows if r["machine_status"] == "auto"]
+    wrong = sum(r["machine_value"] != truth[r["src"]][r["meta_key"]] for r in auto)
+    slots = lambda c: dict(c.execute("SELECT page_id, MAX(slot) FROM prod_haul WHERE source_role='log' GROUP BY 1"))  # noqa: E731
+    got, want = slots(con), slots(lab["pipe"].con)
+    same = sum(got.get(p) == s and s is not None for p, s in want.items())
+    print(f"다시 만든 메타 모델: 자동 적재 {len(auto)}/{len(rows)}, 틀린 것 {wrong}; 자리 같은 쪽 {same}/{len(want)}")
+    assert len(auto) >= 0.85 * len(rows) and wrong <= 0.02 * len(auto)
+    assert same >= 0.95 * len(want)
