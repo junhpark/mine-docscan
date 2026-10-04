@@ -195,6 +195,15 @@ def test_label_date_that_is_not_iso_and_regress_without_meta_models(meta_synth, 
     machine = {k: pagemeta.MachineRead("7", 0.99, "auto") for k in ("date.month", "date.day")}
     rows = {r["meta_key"]: r for r in pagemeta.resolve("pid", tpl, human, machine)}
     assert rows["date.day"]["check_result"] == "none" and rows["date"]["check_result"] == "none"
+    # 날짜 대조: 자동 적재된 부분 하나라도 다르면 mismatch — 다른 부분(월)을 읽지 못했어도
+    iso = {"date": ("2030-01-10", "filename"), "date.month": ("1", "filename"), "date.day": ("10", "filename")}
+    R = pagemeta.MachineRead
+    cases = [({"date.month": R(None, None, "empty"), "date.day": R("7", 0.99, "auto")}, "mismatch"),
+             ({"date.month": R(None, None, "empty"), "date.day": R("10", 0.99, "auto")}, "unread"),
+             ({"date.month": R("1", 0.99, "auto"), "date.day": R("10", 0.99, "auto")}, "match"),
+             ({"date.month": R("1", 0.4, "pending"), "date.day": R("10", 0.99, "auto")}, "unread")]
+    for machine, want in cases:
+        assert {r["meta_key"]: r for r in pagemeta.resolve("pid", tpl, iso, machine)}["date"]["check_result"] == want
     run = meta_mislabeled
     res = run_regression(run["settings"], run["pipe"].site, update=True, inputs=[sorted(meta_synth.scans.glob("*.pdf"))[0].name])
     pm = res["report"]["page_meta"]["vehicle_no"]

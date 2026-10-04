@@ -97,13 +97,16 @@ def _check(human: tuple[str, str] | None, m: MachineRead | None) -> str:
 
 
 def _date_check(human: dict, machine: dict[str, MachineRead], keys: list[str]) -> str:
-    """읽은 날짜의 부분이 전부 기준을 넘었을 때만 쪽의 날짜와 비교한다 (하나라도 못 넘으면 unread)."""
+    """쪽의 날짜와 읽은 월·일의 대조: 자동 적재된 부분 하나라도 다르면 mismatch (다른 날의 쪽 — 다른 부분은 못 읽었어도),
+    읽은 부분이 전부 자동 적재이고 같으면 match, 그 밖은 unread. 월 "1" 처럼 괘선 제거에 획이 다 지워져 읽지 못한 부분이 있어도
+    일이 다르면 섞인 쪽으로 드러난다."""
     parts = [k for k in DATE_PARTS if k in keys and k in machine]
     if not parts or "date" not in human or not all(k in human for k in parts):     # 날짜가 ISO 가 아니면 부분이 없다
         return "none"
-    if not all(machine[k].status == "auto" for k in parts):
-        return "unread"
-    return "match" if all(machine[k].value == human[k][0] for k in parts) else "mismatch"
+    auto = [k for k in parts if machine[k].status == "auto"]
+    if any(machine[k].value != human[k][0] for k in auto):
+        return "mismatch"
+    return "match" if len(auto) == len(parts) else "unread"
 
 
 def resolve(page_id: str, template: Template | None, human: dict[str, tuple[str, str]],
