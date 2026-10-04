@@ -118,7 +118,7 @@ def clone_db(con):
     """세션 픽스처의 DB 를 메모리로 복사한다 (검수를 넣어 볼 때)."""
     import sqlite3
 
-    out = sqlite3.connect(":memory:")
+    out = sqlite3.connect(":memory:", check_same_thread=False)          # 검수 서버 시험은 다른 스레드에서 쓴다
     con.backup(out)
     out.row_factory = sqlite3.Row
     return out
@@ -186,8 +186,9 @@ def meta_options(digits: Path = META_FIXTURES / "meta-digits", operator: Path = 
     return {"meta": {"vehicle_no": d, "date.month": d, "date.day": d, "operator": o}}
 
 
-def meta_run(synth, root: Path, labels: dict | None = None, options: dict | None = None, **kw) -> dict:
-    """사이트 팩을 복사해(라벨을 labels 로 바꿔) 메타 필드 모델로 돌린다. 정합 이미지는 저장하지 않는다."""
+def meta_run(synth, root: Path, labels: dict | None = None, options: dict | None = None, inputs: list | None = None,
+             **kw) -> dict:
+    """사이트 팩을 복사해(라벨을 labels 로 바꿔) 메타 필드 모델로 돌린다. 정합 이미지는 저장하지 않는다. inputs: 돌릴 파일 (기본 전부)."""
     import json
     import shutil
 
@@ -199,7 +200,7 @@ def meta_run(synth, root: Path, labels: dict | None = None, options: dict | None
     settings = Settings(site=site, archive_root=synth.scans, work_root=root / "work", reviews=root / "reviews.jsonl",
                         recognizer_options=options or meta_options(), **kw)
     pipe = Pipeline(settings)
-    pipe.run([synth.scans])
+    pipe.run(inputs or [synth.scans])
     return {"root": root, "settings": settings, "pipe": pipe}
 
 
@@ -216,7 +217,19 @@ def meta_nolabels(meta_synth, tmp_path_factory) -> dict:
     return meta_run(meta_synth, tmp_path_factory.mktemp("meta_nolabels"), labels={})
 
 
+WRONG_LABELS = 2          # meta_mislabeled: 일보 쪽 앞의 둘은 차량번호 라벨이 틀렸다 ("4999")
+
+
 @pytest.fixture(scope="session")
-def meta_labeled(meta_synth, tmp_path_factory) -> dict:
-    """meta_synth 를 라벨 그대로 메타 필드 모델로 돌린 것 (기계 값은 대조에만). 이 DB 에 쓰지 않는다."""
-    return meta_run(meta_synth, tmp_path_factory.mktemp("meta_labeled"))
+def meta_mislabeled(meta_synth, meta_truth, tmp_path_factory) -> dict:
+    """meta_synth 의 첫날을 라벨과 함께(앞의 두 쪽은 차량번호 라벨을 일부러 틀리게) 메타 필드 모델로 돌린 것 — 기계 값은 대조에만.
+    이 DB 에 쓰지 않는다 (쓸 시험은 clone_db 로). 돌려주는 값에 wrong: 라벨이 틀린 쪽의 "<파일명>#<쪽>"."""
+    import json
+
+    labels = json.loads(json.dumps(meta_truth))
+    wrong = sorted(k for k in labels if "#" in k)[:WRONG_LABELS]
+    for src in wrong:
+        labels[src]["vehicle_no"] = "4999"
+    first = sorted(meta_synth.scans.glob("*.pdf"))[0]                     # 첫날만 (틀린 라벨 둘이 그날의 쪽이다)
+    assert all(src.startswith(first.stem + "#") for src in wrong)
+    return meta_run(meta_synth, tmp_path_factory.mktemp("meta_mislabeled"), labels=labels, inputs=[first]) | {"wrong": wrong}

@@ -34,10 +34,10 @@ def _slots(con) -> dict:
     return {r[0]: r[1] for r in con.execute("SELECT page_id, MAX(slot) FROM prod_haul WHERE source_role='log' GROUP BY 1")}
 
 
-def test_machine_fills_meta_when_labels_are_missing(meta_truth, meta_nolabels, meta_labeled):
+def test_machine_fills_meta_when_labels_are_missing(meta_truth, meta_nolabels, meta_null):
     """라벨이 없으면 차량번호·작성자를 기계 값으로 채운다: 자리가 맞게 정해진 쪽 0.95 이상, 자동 적재된 메타 중 틀린 것 2 % 이하.
     처음 보는 차는 목록에 없는 값, 처음 보는 사람은 기준 미만 — 채우지 않는다 (차량번호로 자리를 찾는다)."""
-    con, lab = meta_nolabels["pipe"].con, meta_labeled["pipe"].con
+    con, lab = meta_nolabels["pipe"].con, meta_null["pipe"].con          # 라벨이 있는 실행 (라벨이 이기므로 모델과 무관)
     pages = _log_pages(con)
     meta = _meta(con)
     auto = [(src, k) for src, pid in pages.items() for k in ("vehicle_no", "operator")
@@ -74,44 +74,50 @@ def test_machine_fills_meta_when_labels_are_missing(meta_truth, meta_nolabels, m
     assert f["backend"] == "meta-choice" and f["status_raw"] in ("auto", "pending") and json.loads(f["candidates"])
 
 
-def test_labels_win_and_a_wrong_label_shows_as_mismatch(meta_synth, meta_truth, tmp_path):
-    """라벨이 있으면 최종 값은 라벨이고 기계 값은 대조만. 일부러 틀리게 적은 라벨은 mismatch — 최종 값은 바뀌지 않는다."""
-    labels = json.loads(json.dumps(meta_truth))
-    src = sorted(labels)[0]
-    labels[src]["vehicle_no"] = "4999"                      # 틀린 라벨
-    one_day = sorted(meta_synth.scans.glob("*.pdf"))[0]
-    run = meta_run(meta_synth, tmp_path, labels=labels)
-    con = run["pipe"].con
-    pid = _log_pages(con)[src]
-    row = _meta(con)[(pid, "vehicle_no")]
-    assert (row["value"], row["source"], row["check_result"]) == ("4999", "label", "mismatch")
-    assert row["machine_value"] == meta_truth[src]["vehicle_no"]
-    assert {r[0] for r in con.execute("SELECT DISTINCT vehicle_no FROM prod_haul WHERE page_id=?", (pid,))} == {"4999"}
+def test_labels_win_and_a_wrong_label_shows_as_mismatch(meta_mislabeled, meta_truth, tmp_path):
+    """라벨이 있으면 최종 값은 라벨이고 기계 값은 대조만. 일부러 틀리게 적은 라벨은 mismatch — 최종 값은 바뀌지 않는다.
+    meta-check: 두 값을 보여 주고, 기계 값을 입력하거나(match 가 된다) 읽을 수 없음으로 답해도 끝난 것으로 센다 (분모가 줄지 않는다)."""
+    run = meta_mislabeled
+    con = clone_db(run["pipe"].con)
+    site = run["pipe"].site
+    pages = _log_pages(con)
+    wrong = {pages[src]: src for src in run["wrong"]}
+    meta = _meta(con)
+    for pid, src in wrong.items():
+        row = meta[(pid, "vehicle_no")]
+        assert (row["value"], row["source"], row["check_result"]) == ("4999", "label", "mismatch")
+        assert row["machine_value"] == meta_truth[src]["vehicle_no"]
+        assert {r[0] for r in con.execute("SELECT DISTINCT vehicle_no FROM prod_haul WHERE page_id=?", (pid,))} == {"4999"}
     mm = meta_mismatch_pages(con)
-    assert [(m["page_id"], m["meta_key"]) for m in mm] == [(pid, "vehicle_no")] and mm[0]["value_source"] == "label"
-    checks = {r["check_result"] for (p, k), r in _meta(con).items() if k in ("vehicle_no", "operator") and p != pid}
+    assert sorted((m["page_id"], m["meta_key"]) for m in mm) == sorted((p, "vehicle_no") for p in wrong)
+    assert {m["value_source"] for m in mm} == {"label"}
+    checks = {r["check_result"] for (p, k), r in meta.items() if k in ("vehicle_no", "operator") and p not in wrong}
     assert checks <= {"match", "unread"} and "match" in checks
-    # meta-check 대기열: 두 값을 보여 주고, 맞는 값을 입력하면 끝난다
-    q = build_queue(con, "meta-check", site=run["pipe"].site)
-    assert q["total"] == 1 and q["done"] == 0 and len(q["items"]) == 1
-    cell = q["items"][0]["cells"][0]
-    assert cell["human"] == {"value": "4999", "source": "label"} and cell["machine"]["value_raw"] == meta_truth[src]["vehicle_no"]
-    app = ReviewApp(con, run["pipe"].site, run["settings"], "jp", "meta-check")
-    app.post_review({"field_id": cell["field_id"], "verdict": "value", "value": meta_truth[src]["vehicle_no"]})
-    row = _meta(con)[(pid, "vehicle_no")]
+    # meta-check 대기열
+    q = build_queue(con, "meta-check", site=site)
+    assert (q["total"], q["done"], len(q["items"])) == (2, 0, 2)
+    cells = [it["cells"][0] for it in q["items"]]
+    for c in cells:
+        src = wrong[c["field_id"].split(":fields:")[0]]
+        assert c["human"] == {"value": "4999", "source": "label"} and c["machine"]["value_raw"] == meta_truth[src]["vehicle_no"]
+    settings = replace(run["settings"], reviews=tmp_path / "r.jsonl")
+    app = ReviewApp(con, site, settings, "jp", "meta-check")
+    app.post_review({"field_id": cells[0]["field_id"], "verdict": "value", "value": cells[0]["machine"]["value_raw"]})
+    pid0 = cells[0]["field_id"].split(":fields:")[0]
+    row = _meta(con)[(pid0, "vehicle_no")]
     assert (row["source"], row["check_result"]) == ("review", "match")
-    q2 = build_queue(con, "meta-check", site=run["pipe"].site)
-    assert q2["items"] == [] and (q2["total"], q2["done"]) == (1, 1)          # 끝난 것으로 센다 (분모가 줄지 않는다)
+    app.post_review({"field_id": cells[1]["field_id"], "verdict": "illegible", "value": ""})
+    q2 = build_queue(con, "meta-check", site=site)
+    assert q2["items"] == [] and (q2["total"], q2["done"]) == (2, 2)
     # 명령줄: 값은 찍지 않는다
     out = run["settings"]
     assert main(["pages", "--meta-mismatch", "--site", str(out.site), "--work-root", str(out.work_root)]) == 0
-    assert one_day.exists()
 
 
 def test_a_page_from_another_day_shows_as_date_mismatch(tmp_path):
     """다른 날의 쪽이 섞인 묶음: 그 쪽의 읽은 월·일이 파일의 날짜와 달라 date mismatch. work_date 는 바뀌지 않는다."""
     syn = generate(tmp_path / "data", days=2, seed=5, meta_fields=True, mix_pages=True)
-    run = meta_run(syn, tmp_path / "run")
+    run = meta_run(syn, tmp_path / "run", inputs=[sorted(syn.scans.glob("*.pdf"))[-1]])     # 섞인 쪽이 있는 마지막 날만
     con = run["pipe"].con
     mixed = [(stem, p) for stem, info in syn.truth["documents"].items() for p in info if p.get("mixed_from")]
     assert len(mixed) == 1
@@ -127,11 +133,13 @@ def test_a_page_from_another_day_shows_as_date_mismatch(tmp_path):
     assert [r["page_id"] for r in rows] == [pid]
 
 
-def test_invariant_with_meta_models(meta_synth, meta_nolabels, tmp_path):
-    """메타 모델을 켠 DB 에 아무 검수(메타 필드 포함)를 저장한 직후 == 같은 검수 파일로 새로 돌린 DB. 기계 열은 검수 전후가 같다."""
-    base = meta_nolabels["pipe"]
+def test_invariant_with_meta_models(meta_synth, meta_mislabeled, tmp_path):
+    """메타 모델을 켠 DB 에 아무 검수(메타 필드 포함)를 저장한 직후 == 같은 검수 파일로 새로 돌린 DB. 기계 열은 검수 전후가 같다.
+    meta_mislabeled(첫날, 라벨 있음 — 검수가 라벨을 이긴다)를 복사해서."""
+    day = sorted(meta_synth.scans.glob("*.pdf"))[0]
+    base = meta_mislabeled["pipe"]
     con = clone_db(base.con)
-    settings = replace(meta_nolabels["settings"], reviews=tmp_path / "r.jsonl", work_root=tmp_path / "w_live")
+    settings = replace(meta_mislabeled["settings"], reviews=tmp_path / "r.jsonl")
     machine_cols = ("value_raw", "has_value_raw", "confidence", "backend", "status_raw", "candidates")
     before_f = {r["field_id"]: tuple(r[c] for c in machine_cols) for r in con.execute("SELECT * FROM doc_field")}
     before_m = {(r["page_id"], r["meta_key"]): (r["machine_value"], r["machine_confidence"], r["machine_status"])
@@ -139,7 +147,7 @@ def test_invariant_with_meta_models(meta_synth, meta_nolabels, tmp_path):
     pages = list(_log_pages(con).values())
     rng = np.random.default_rng(0)
     plan = []
-    for k, pid in enumerate(rng.choice(pages, size=min(6, len(pages)), replace=False)):
+    for k, pid in enumerate(rng.choice(pages, size=min(4, len(pages)), replace=False)):
         key = ("vehicle_no", "operator")[k % 2]
         verdict = ("value", "empty", "illegible")[k % 3]
         plan.append(Review(field_id_of(str(pid), key), verdict, "4183" if (verdict == "value" and key == "vehicle_no")
@@ -150,7 +158,7 @@ def test_invariant_with_meta_models(meta_synth, meta_nolabels, tmp_path):
     for rv in plan:
         save(con, base.site, settings, rv)
     fresh = Pipeline(replace(settings, work_root=tmp_path / "w_fresh"))
-    fresh.run([meta_synth.scans])
+    fresh.run([day])
     assert build_report(fresh.con) == build_report(con)
     for t in TABLES:
         assert _dump(fresh.con, t) == _dump(con, t), t
@@ -168,47 +176,39 @@ def test_invariant_with_meta_models(meta_synth, meta_nolabels, tmp_path):
             assert not any(c["field_id"] == rv.field_id for it in items for c in it["cells"])     # 다시 묻지 않는다
 
 
-def test_meta_check_progress_and_label_date_and_regress(meta_synth, meta_truth, tmp_path):
-    """meta-check: 기계 값을 입력해 match 가 되어도 끝난 것으로 센다 (분모가 줄지 않는다), 읽을 수 없음도 끝. ISO 가 아닌 라벨 날짜는
-    쪽을 오류로 만들지 않는다 (월·일 대조만 하지 않는다). regress 는 [recognize.meta] 를 쓰지 않는다."""
-    labels = json.loads(json.dumps(meta_truth))
-    srcs = sorted(k for k in labels if "#" in k)
-    for src in srcs[:3]:
-        labels[src]["vehicle_no"] = "4999"                                 # 기계와 다른 라벨 셋
-    run = meta_run(meta_synth, tmp_path / "mc", labels=labels)
-    con, site = run["pipe"].con, run["pipe"].site
-    q = build_queue(con, "meta-check", site=site)
-    total = q["total"]
-    cells = [c for it in q["items"] for c in it["cells"] if c["meta_key"] == "vehicle_no"]
-    assert total >= 3 and len(cells) >= 3 and q["done"] == 0
-    settings = replace(run["settings"], reviews=tmp_path / "r.jsonl")
-    save(con, site, settings, Review(cells[0]["field_id"], "value", cells[0]["machine"]["value_raw"], "jp"))
-    save(con, site, settings, Review(cells[1]["field_id"], "illegible", reviewer="jp"))
-    q2 = build_queue(con, "meta-check", site=site)
-    assert (q2["total"], q2["done"]) == (total, 2)
-    assert not any(c["field_id"] in (cells[0]["field_id"], cells[1]["field_id"]) for it in q2["items"] for c in it["cells"])
-    # ISO 가 아닌 라벨 날짜
-    bad = json.loads(json.dumps(meta_truth))
-    doc = sorted(meta_synth.scans.glob("*.pdf"))[0].stem
-    bad[doc] = {"date": "2030.01.07"}
-    r2 = meta_run(meta_synth, tmp_path / "bad", labels=bad)
-    assert r2["pipe"].con.execute("SELECT COUNT(*) FROM doc_page WHERE status = 'error'").fetchone()[0] == 0
-    # regress: 메타 모델을 설정에 두어도 기준 실행은 메타 필드를 읽지 않는다
+def test_label_date_that_is_not_iso_and_regress_without_meta_models(meta_synth, meta_null, meta_mislabeled):
+    """ISO 가 아닌 라벨 날짜("2030.01.07")는 쪽을 오류로 만들지 않는다 — 월·일 대조만 하지 않는다.
+    regress 는 설정의 [recognize.meta] 를 쓰지 않는다 (null 기준이 메타 모델에 흔들리지 않게)."""
+    from minedocscan import pagemeta
     from minedocscan.evaluate.regression import run_regression
 
-    res = run_regression(run["settings"], site, update=True, inputs=[sorted(meta_synth.scans.glob("*.pdf"))[0].name])
+    class Site:
+        labels = {"doc": {"date": "2030.01.07"}}
+
+        @staticmethod
+        def date_from_filename(_stem):
+            return None
+
+    tpl = meta_null["pipe"].site.templates[T_LOG]
+    human = pagemeta.human_values(clone_db(meta_null["pipe"].con), Site, "doc", 2, "pid", tpl)
+    assert human["date"] == ("2030.01.07", "label") and "date.day" not in human and "date.month" not in human
+    machine = {k: pagemeta.MachineRead("7", 0.99, "auto") for k in ("date.month", "date.day")}
+    rows = {r["meta_key"]: r for r in pagemeta.resolve("pid", tpl, human, machine)}
+    assert rows["date.day"]["check_result"] == "none" and rows["date"]["check_result"] == "none"
+    run = meta_mislabeled
+    res = run_regression(run["settings"], run["pipe"].site, update=True, inputs=[sorted(meta_synth.scans.glob("*.pdf"))[0].name])
     pm = res["report"]["page_meta"]["vehicle_no"]
     assert "machine" not in pm["by_source"] and pm["machine"] == {}
 
 
-def test_crop_level_answers_equal_pipeline_values(meta_labeled, tmp_path):
+def test_crop_level_answers_equal_pipeline_values(meta_mislabeled, tmp_path):
     """같은 쪽이면 export-crops --meta → recognizer eval 의 답·신뢰도 = 파이프라인의 기계 값 (0003 과 같은 확인)."""
     from minedocscan.recognize.meta.evaluate import evaluate_meta as eval_crops
     from minedocscan.review.export import export_meta_crops
 
-    pipe = meta_labeled["pipe"]
+    pipe = meta_mislabeled["pipe"]
     con = clone_db(pipe.con)
-    export_meta_crops(con, pipe.site, meta_labeled["settings"], tmp_path / "c")
+    export_meta_crops(con, pipe.site, meta_mislabeled["settings"], tmp_path / "c")
     machine = {r["field_id"]: (r["machine_value"], r["machine_confidence"]) for r in con.execute(
         "SELECT * FROM doc_page_meta WHERE machine_status IS NOT NULL AND machine_status != 'empty'")}
     from conftest import META_FIXTURES

@@ -12,7 +12,7 @@ from minedocscan.report import build_report
 from minedocscan.review.export import export_meta_crops
 from minedocscan.review.store import Review, field_id_of, save
 from minedocscan.tools import synth_meta
-from minedocscan.tools.synth import T_LOG
+from minedocscan.tools.synth import T_LOG, T_MATRIX
 from test_review_store import TABLES, _dump
 
 
@@ -47,9 +47,9 @@ def test_sources_of_page_meta(meta_synth, meta_null):
             assert row["machine_status"] is None and row["check_result"] == "none"
         assert meta[(pid, "vehicle_no")]["field_id"] == field_id_of(pid, "vehicle_no")
         assert meta[(pid, "date")]["field_id"] is None
-    # 점검표 쪽에는 날짜 한 줄만 (메타 필드가 없다)
-    insp = con.execute("SELECT page_id FROM doc_page WHERE template_name = 'synth_inspection'").fetchall()
-    assert insp and all({k for (p, k) in meta if p == r[0]} == {"date"} for r in insp)
+    # 행렬 쪽에는 날짜 한 줄만 (메타 필드가 없다)
+    mat = con.execute("SELECT page_id FROM doc_page WHERE template_name = ?", (T_MATRIX,)).fetchall()
+    assert mat and all({k for (p, k) in meta if p == r[0]} == {"date"} for r in mat)
     # 일보의 차량·작성자는 이 테이블의 최종 값이다
     for _source, pid in pages.items():
         veh = {r[0] for r in con.execute("SELECT DISTINCT vehicle_no FROM prod_haul WHERE page_id=?", (pid,))}
@@ -104,11 +104,11 @@ def test_reviews_take_over_from_empty_labels(meta_synth, meta_null, tmp_path):
         for key in ("vehicle_no", "operator"):
             assert (after[(pid, key)]["value"], after[(pid, key)]["source"]) == (labels[source][key], "review")
     assert after[(pid0, "date.day")]["source"] == "filename" and after[(pid0, "date.day")]["value"] != "31"
-    # 라벨이 있는 실행과 업무 테이블이 같다
-    labeled = Pipeline(replace(meta_null["settings"], work_root=tmp_path / "w_lab", reviews=tmp_path / "none.jsonl"))
-    labeled.run([one_day])
+    # 라벨이 있는 실행(meta_null 의 그날 행)과 업무 테이블이 같다
+    day = con.execute("SELECT DISTINCT work_date FROM doc_page WHERE work_date IS NOT NULL").fetchone()[0]
     for t in ("prod_haul", "xcheck_haul", "eq_assignment_obs"):
-        assert _dump(labeled.con, t) == _dump(con, t), t
+        lab = [r for r in _dump(meta_null["pipe"].con, t) if day in r]
+        assert lab and lab == _dump(con, t), t
     fresh = Pipeline(replace(settings, work_root=tmp_path / "w2"))
     fresh.run([one_day])
     assert build_report(fresh.con) == build_report(con)

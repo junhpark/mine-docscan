@@ -24,6 +24,7 @@
 선택 기능 meta_fields=True (tasks/0004 단계 2): 일보의 차량번호가 네 자리 숫자, 작성자는 사람마다 다른 획(tools/synth_meta.py),
 날짜 줄에 월·일 필드(meta_key date.month, date.day). 날마다 돌아가며: 두 사람이 차를 바꿔 탄 날, 처음 보는 차, 처음 보는
 사람이 쓴 날. mix_pages=True 면 마지막 날의 묶음에 첫날의 일보 한 쪽이 섞인다 (적힌 날짜가 파일의 날짜와 다르다).
+메타 필드 합성에는 점검표가 없다 (일보와 행렬만 — 그 시험에 쓰지 않는 쪽을 돌리지 않게).
 
 글자는 OpenCV 내장 글꼴(영문)로 그린다 — 글꼴 파일에 의존하지 않기 위해서다. 따라서 이 데이터로
 잴 수 있는 것은 파이프라인의 기하·논리이지 한글 손글씨 인식률이 아니다 (docs/DATA.md).
@@ -372,9 +373,8 @@ test_share = 0.2
 
 
 def _blank_forms(low: bool = False, meta: bool = False) -> dict:
-    if meta:
-        return {T_INSP: build_inspection(), T_LOG: build_haul_log(low, meta=True),
-                T_MATRIX: build_haul_matrix(SLOTS_META, low=low)}
+    if meta:                           # 메타 필드 합성에는 점검표가 없다 (그 시험에 쓰지 않는다 — 쪽마다 시간만 든다)
+        return {T_LOG: build_haul_log(low, meta=True), T_MATRIX: build_haul_matrix(SLOTS_META, low=low)}
     return {T_INSP: build_inspection(), T_LOG: build_haul_log(low), T_MATRIX: build_haul_matrix(low=low)}
 
 
@@ -724,6 +724,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         blanks[T_MATRIX_V2] = build_haul_matrix(SLOTS_V2, T_MATRIX_V2, (revision_from, None), low=low_cells)
 
     day_truths, labels, answers, documents = [], {}, [], {}
+    insp_blank = build_inspection() if meta_fields else None
     for d in range(days):
         day = (d0 + timedelta(days=d)).isoformat()
         v2 = bool(revision_from) and day >= revision_from
@@ -739,10 +740,13 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
             _info.append({"page": len(_pages), "template": template, **extra})
             return len(_pages)
 
-        add(_fill_inspection(*blanks[T_INSP], dt, rng), T_INSP)
-        for r in dt["inspection"]:
-            answers.append({"work_date": day, "template": T_INSP, "region": "main", "field_name": "remark",
-                            "row_key": r["row_key"], "text": r["remark"]})
+        if meta_fields:                # 점검표 쪽은 넣지 않지만 난수는 같은 만큼 쓴다 (나머지 쪽의 글씨가 그대로이게)
+            scan_effect(_fill_inspection(*insp_blank, dt, rng), rng, strength)
+        else:
+            add(_fill_inspection(*blanks[T_INSP], dt, rng), T_INSP)
+            for r in dt["inspection"]:
+                answers.append({"work_date": day, "template": T_INSP, "region": "main", "field_name": "remark",
+                                "row_key": r["row_key"], "text": r["remark"]})
         for t in dt["trucks"]:
             if not t["has_log"]:
                 continue
