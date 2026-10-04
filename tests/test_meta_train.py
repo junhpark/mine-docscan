@@ -112,3 +112,52 @@ def test_cli_trains_from_synthetic_meta_and_prints_no_values(tmp_path, capsys):
 
     with pytest.raises(ValueError, match="recognize.meta"):
         DigitsRecognizer(out)
+
+
+# ── 분류기 (단계 4) ─────────────────────────────────────────────────────────
+def test_operator_classifier_from_five_examples(tmp_path, capsys):
+    """합성 작성자 6명, 종류당 예 5개(5일치)로 학습한 분류기가 다른 날짜의 쪽에서 0.95 이상. torch ↔ OpenCV 출력 차이 1e-3 미만이고
+    고른 종류가 같다. 카드·학습 로그·표준 출력에 이름이 없다. 학습에 없던 사람이 쓴 쪽은 자동 적재되지 않는다."""
+    synth_meta.write_meta_crops(tmp_path / "c", ("operator",), 5, seed=0)
+    capsys.readouterr()
+    card = train_meta(tmp_path / "c", tmp_path / "m", MetaTrainArgs(name="op", keys=("operator",), steps=600, eval_every=300,
+                                                                     val_share=0.0))
+    io = capsys.readouterr()
+    m = MetaModel(tmp_path / "m")
+    assert m.reader == "choice" and m.values("operator") == sorted(synth_meta.ROSTER)
+    assert card["meta"]["classes"]["n"] == 6 and card["meta"]["classes"]["per_class"] == {"min": 5, "median": 5.0, "max": 5}
+    ec = card["validation"]["export_check"]
+    assert ec["max_abs_diff"] < 1e-3 and ec["same_answers"] and ec["cells"] > 30
+    text = "".join((tmp_path / "m" / f).read_text(encoding="utf-8") for f in ("card.json", "train-log.jsonl")) + io.out + io.err
+    for name in synth_meta.ROSTER + synth_meta.STRANGERS:
+        assert name not in text and name.lower() not in text, name
+    synth_meta.write_meta_crops(tmp_path / "t", ("operator",), 10, seed=9, start="2031-01-01", split="test")
+    synth_meta.write_meta_crops(tmp_path / "s", ("operator",), 10, seed=10, start="2032-01-01", writers=synth_meta.STRANGERS,
+                                split="test")
+    for folder, known in ((tmp_path / "t", True), (tmp_path / "s", False)):
+        rows = [(s, m.read(s.image(), "operator", m.candidates("operator")))
+                for s in read_crops(folder, allow_test=True, meta_keys=("operator",)).samples]
+        acc = sum(c.answer == "value" and c.value == s.text for s, c in rows) / len(rows)
+        auto = sum(m.status(c) == "auto" for _s, c in rows) / len(rows)
+        print(f"{'아는' if known else '처음 보는'} 사람 {len(rows)}쪽: 정확도 {acc:.3f}, 자동 적재 {auto:.3f}")
+        if known:
+            assert acc >= 0.95
+        else:
+            assert auto <= 0.05 and acc == 0
+
+
+def test_rare_values_are_not_classes(tmp_path):
+    """학습 날짜에 예가 min_examples 미만인 값은 종류가 아니다 — "그 밖"으로 학습하고 그 수만 카드에."""
+    synth_meta.write_meta_crops(tmp_path / "c", ("operator",), 4, seed=0)
+    synth_meta.write_meta_crops(tmp_path / "c2", ("operator",), 2, seed=1, start="2030-05-01", writers=("MIKE",))
+    import shutil
+
+    for p in (tmp_path / "c2" / "train" / "meta" / "operator").iterdir():
+        shutil.copy(p, tmp_path / "c" / "train" / "meta" / "operator" / p.name)
+    with open(tmp_path / "c" / "train" / "meta" / "labels.jsonl", "a", encoding="utf-8") as f:
+        f.write((tmp_path / "c2" / "train" / "meta" / "labels.jsonl").read_text(encoding="utf-8"))
+    card = train_meta(tmp_path / "c", tmp_path / "m", MetaTrainArgs(name="op", keys=("operator",), steps=20, eval_every=20,
+                                                                     val_share=0.0))
+    cls = card["meta"]["classes"]
+    assert cls["n"] == 6 and cls["dropped_values"] == 1 and cls["dropped_examples"] == 2
+    assert "MIKE" not in json.loads((tmp_path / "m" / "classes.json").read_text(encoding="utf-8"))["classes"]

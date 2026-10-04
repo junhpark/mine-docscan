@@ -96,3 +96,43 @@ def test_recognizer_eval_and_list_for_meta_models(tmp_path, capsys):
     shutil.copytree(META_DIGITS, site / "models" / "meta-digits")
     assert main(["recognizer", "list", "--site", str(site)]) == 0
     assert "메타 vehicle_no, date.month, date.day (digits)" in capsys.readouterr().out
+
+
+META_OPERATOR = Path(__file__).resolve().parent / "fixtures" / "meta-operator"
+
+
+def test_operator_fixture_reads_known_writers_and_rejects_strangers(tmp_path):
+    """시험용 분류기(합성 작성자 6명)가 torch 없이 OpenCV 로 돈다: 아는 사람의 다른 날 쪽은 그 사람으로 자동 적재, 처음 보는 사람은
+    "그 밖"(거절)이거나 기준 미만. 이름은 classes.json 에만 — 카드에 없다."""
+    from minedocscan.recognize.digits.data import read_crops
+
+    m = MetaModel(META_OPERATOR)
+    assert m.reader == "choice" and m.keys == ["operator"] and m.values("operator") == sorted(synth_meta.ROSTER)
+    assert m.candidates("operator") == sorted(synth_meta.ROSTER)
+    text = (META_OPERATOR / "card.json").read_text(encoding="utf-8")
+    assert not any(n in text or n.lower() in text for n in synth_meta.ROSTER)
+    synth_meta.write_meta_crops(tmp_path / "k", ("operator",), 4, seed=21, start="2031-04-01", split="test")
+    synth_meta.write_meta_crops(tmp_path / "s", ("operator",), 4, seed=22, start="2031-05-01", writers=synth_meta.STRANGERS,
+                                split="test")
+    known = [(s, m.read(s.image(), "operator", [])) for s in read_crops(tmp_path / "k", allow_test=True,
+                                                                         meta_keys=("operator",)).samples]
+    strangers = [(s, m.read(s.image(), "operator", [])) for s in read_crops(tmp_path / "s", allow_test=True,
+                                                                             meta_keys=("operator",)).samples]
+    assert sum(c.value == s.text and m.status(c) == "auto" for s, c in known) >= 0.95 * len(known)
+    assert sum(m.status(c) == "auto" for _s, c in strangers) <= 0.05 * len(strangers)
+    readers = build_meta_readers(Settings(recognizer_options={"meta": {"operator": str(META_OPERATOR),
+                                                                       "vehicle_no": str(META_DIGITS)}}), None)
+    assert readers["operator"].reader == "choice" and readers["vehicle_no"].reader == "digits"
+    with pytest.raises(MetaModelError, match="vehicle_no"):
+        build_meta_readers(Settings(recognizer_options={"meta": {"vehicle_no": str(META_OPERATOR)}}), None)
+
+
+def test_recognizer_eval_on_the_classifier(tmp_path, capsys):
+    synth_meta.write_meta_crops(tmp_path / "c", ("operator",), 2, seed=31, start="2031-07-01", split="test")
+    capsys.readouterr()
+    assert main(["recognizer", "eval", "--crops", str(tmp_path / "c"), "--model", str(META_OPERATOR), "--split", "test",
+                 "--json"]) == 0
+    out = capsys.readouterr().out
+    r = json.loads(out)
+    assert r["reader"] == "choice" and r["cells"] == 12 and r["score"]["accuracy"] >= 0.9
+    assert not any(n in out for n in synth_meta.ROSTER)

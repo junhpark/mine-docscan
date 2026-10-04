@@ -1,0 +1,357 @@
+{
+ "name": "meta-operator",
+ "created_at": "2026-10-04T02:19:29Z",
+ "code_version": {
+  "minedocscan": "0.2.0",
+  "git": "a432616"
+ },
+ "spec": {
+  "res": "source",
+  "scale": 1.5,
+  "pad": 8
+ },
+ "input": {
+  "width": 128,
+  "height": 40,
+  "channels": 1,
+  "preprocess": "recognize/choice/model.py: resize_input → normalize (잉크 채널)"
+ },
+ "architecture": {
+  "layers": "conv3x3(16)-pool2-conv3x3(32)-pool2-conv3x3(64)-pool2-conv3x3(96)-maxpool(전체)-fc(7); 합성곱마다 BN+ReLU; 종류 0 = 그 밖",
+  "channels": [
+   16,
+   32,
+   64,
+   96
+  ],
+  "params": 79575,
+  "onnx_bytes": 319604,
+  "exporter": "torchscript, opset 13",
+  "batch": 1
+ },
+ "train_args": {
+  "steps": 600,
+  "batch": 64,
+  "lr": 0.003,
+  "val_share": 0.2,
+  "target_auto_error": 0.02,
+  "min_val_auto": 100,
+  "cv": null,
+  "min_examples": 3,
+  "negatives": 150,
+  "geometry": [
+   370,
+   65
+  ],
+  "sampling": "종류마다 고르게 (그 밖 포함)",
+  "augment": "이동·크기·회전·기울임·대비·밝기·흐림·잡음 (숫자 모델과 같은 것); 뒤집기 없음"
+ },
+ "seed": 0,
+ "data": {
+  "crops": {
+   "lines": 600,
+   "skipped": {},
+   "splits": [
+    "train"
+   ]
+  },
+  "train": {
+   "cells": 432,
+   "dates": 72,
+   "classes": 6,
+   "per_class": {
+    "min": 72,
+    "median": 72.0,
+    "max": 72
+   },
+   "by_verdict": {
+    "value": 432
+   }
+  },
+  "all": {
+   "cells": 600,
+   "dates": 100,
+   "classes": 6,
+   "per_class": {
+    "min": 100,
+    "median": 100.0,
+    "max": 100
+   },
+   "by_verdict": {
+    "value": 600
+   }
+  },
+  "synthetic": {
+   "cells": 150,
+   "kind": "모르는 사람 (그 밖)"
+  },
+  "val_rule": {
+   "salt": "synthetic:val",
+   "share": 0.2
+  }
+ },
+ "validation": {
+  "source": "val_dates",
+  "reads": 168,
+  "score": {
+   "n": 168,
+   "correct": 168,
+   "accuracy": 1.0,
+   "listed": {
+    "n": 168,
+    "correct": 168,
+    "accuracy": 1.0
+   },
+   "unlisted_answers": 0,
+   "truth_unlisted": {
+    "n": 0,
+    "answered_unlisted": 0,
+    "answered_value": 0
+   },
+   "rejects": 0
+  },
+  "train_seconds": 64.7,
+  "total_seconds": 70.6,
+  "export_check": {
+   "max_abs_diff": 9.5367431640625e-06,
+   "same_answers": true,
+   "cells": 200
+  },
+  "calibration": {
+   "reads": 168,
+   "nll_at_1": 0.00049,
+   "nll": 0.0
+  }
+ },
+ "temperature": 0.3,
+ "auto_accept": {
+  "target": 0.02,
+  "threshold": 0.5,
+  "met": true,
+  "reason": null,
+  "min_auto": 100,
+  "auto": 168,
+  "errors": 0,
+  "upper95": 0.0224,
+  "basis": "읽기 168번 (val_dates)",
+  "rule": "오류율이 목표 이하인 가장 낮은 임계값, 자동 적재된 읽기가 min_auto 이상 (ADR 0012, tasks/0004 4.5)",
+  "table": [
+   {
+    "threshold": 0.5,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   },
+   {
+    "threshold": 0.6,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   },
+   {
+    "threshold": 0.7,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   },
+   {
+    "threshold": 0.8,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   },
+   {
+    "threshold": 0.85,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   },
+   {
+    "threshold": 0.9,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   },
+   {
+    "threshold": 0.93,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   },
+   {
+    "threshold": 0.95,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   },
+   {
+    "threshold": 0.97,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   },
+   {
+    "threshold": 0.98,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   },
+   {
+    "threshold": 0.99,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   },
+   {
+    "threshold": 0.995,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   },
+   {
+    "threshold": 0.998,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   },
+   {
+    "threshold": 0.999,
+    "auto": 168,
+    "auto_rate": 1.0,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0224
+    ]
+   }
+  ]
+ },
+ "libraries": {
+  "python": "3.11.15",
+  "torch": "2.14.1+cu130",
+  "onnx": "1.23.1",
+  "numpy": "2.4.6",
+  "opencv": "5.0.0"
+ },
+ "model_sha256": "8a749fc5d6ebfa2b23ac06e2ccfe0dd47ba9f16992bed377b5e03a509d87e24b",
+ "meta": {
+  "reader": "choice",
+  "keys": [
+   "operator"
+  ],
+  "classes": {
+   "n": 6,
+   "per_class": {
+    "min": 72,
+    "median": 72.0,
+    "max": 72
+   },
+   "dropped_values": 0,
+   "dropped_examples": 0,
+   "min_examples": 3
+  },
+  "cv": {
+   "method": "val_dates",
+   "salt": "synthetic:val",
+   "share": 0.2,
+   "dates": [
+    "2030-03-02",
+    "2030-03-11",
+    "2030-03-12",
+    "2030-03-14",
+    "2030-03-17",
+    "2030-03-18",
+    "2030-03-19",
+    "2030-03-22",
+    "2030-03-23",
+    "2030-03-30",
+    "2030-04-02",
+    "2030-04-07",
+    "2030-04-19",
+    "2030-04-20",
+    "2030-04-28",
+    "2030-05-03",
+    "2030-05-06",
+    "2030-05-13",
+    "2030-05-16",
+    "2030-05-17",
+    "2030-05-22",
+    "2030-05-23",
+    "2030-05-24",
+    "2030-05-28",
+    "2030-05-29",
+    "2030-06-01",
+    "2030-06-06",
+    "2030-06-07"
+   ],
+   "cells": 168
+  },
+  "candidates": "classes.json 의 종류 (학습 때 본 값)"
+ }
+}

@@ -30,3 +30,15 @@ minedocscan recognizer train --meta-key vehicle_no,date.month,date.day --synthet
 ```
 
 합성 60일 × 6명. 검증 날짜(train 날짜의 20 %)를 그 날짜 없이 학습한 모델로 읽어 기준을 정한다 (자동 적재된 읽기 100 이상, 목표 2 %).
+
+## meta-operator/ — 작성자 분류기
+
+합성 작성자 6명(`tools/synth_meta.py` 의 ROSTER — 사람마다 다른 획으로 자기 이름을 쓴다)만으로 학습한 닫힌 집합 분류기 (tasks/0004 단계 4).
+처음 보는 사람(STRANGERS)이 쓴 쪽은 "그 밖"으로 거절되는지, torch 없이 OpenCV 로 도는지 시험한다.
+
+```bash
+minedocscan recognizer train --meta-key operator --synthetic-meta 100 --name meta-operator \
+    --out tests/fixtures/meta-operator --allow-in-repo
+```
+
+합성 100일 × 6명. 검증 날짜(20 %)를 읽은 168번으로 기준을 정한다.

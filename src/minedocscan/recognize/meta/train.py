@@ -187,7 +187,9 @@ def train_meta(crops_dir, out_dir, args: MetaTrainArgs, *, split_salt: str = "sy
     check_torch()
     if reader == "digits":
         return _train_digits(crops, out_dir, args, split_salt, progress)
-    raise TrainError("분류기(choice)는 아직 없습니다 — 숫자로 된 키만 학습할 수 있습니다")
+    from ..choice.train import train_choice
+
+    return train_choice(crops, out_dir, args, split_salt=split_salt, progress=progress)
 
 
 def plan_reads(samples: list[data.Sample], args: MetaTrainArgs, split_salt: str) -> tuple[list[tuple[list, list]], dict]:
