@@ -1,6 +1,6 @@
 # 작업 지시서 0005 — 장비 가동 일보: 형식 있는 값, 가동 기록, 계기의 검산
 
-상태: **완료** — 단계 1–6 (PR #8, 2026-10-04). 8절은 사람의 일. 범위나 순서를 바꾸려면 코드보다 이 파일을 먼저 고친다.
+상태: **완료** — 단계 1–6 (PR #9, 2026-10-04). 8절은 사람의 일. 범위나 순서를 바꾸려면 코드보다 이 파일을 먼저 고친다.
 관련: [ROADMAP.md](../ROADMAP.md) M1, [0004](0004-page-fields-and-checks.md),
 [ADR 0002](../decisions/0002-site-pack-outside-repo.md), [ADR 0006](../decisions/0006-show-discrepancies.md),
 [ADR 0008](../decisions/0008-review-records.md), [ADR 0013](../decisions/0013-page-fields-read-and-choose.md)
