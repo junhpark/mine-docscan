@@ -14,8 +14,9 @@ handler_options: role, region(숫자 셀이 있는 표 이름)
 """
 from __future__ import annotations
 
+from ..forms.template import DATE_PARTS
 from ..imaging.blobs import assign_blobs
-from ..review.store import page_meta
+from ..pagemeta import page_meta_of
 from ..store.db import upsert
 from ..validate.crosscheck import crosscheck_haul
 from .base import (
@@ -54,7 +55,7 @@ class HaulHandler(FormHandler):
                 area[id(cells[ci])] = a
             n_notes += sum(b.is_note for b in blobs)
 
-        numbers = [o for o in ctx.obs if o.cell.kind == "handwritten_number"]
+        numbers = [o for o in ctx.obs if _table_number(o.cell)]
         filled = [o for o in numbers if area.get(id(o), 0) >= MIN_BLOB_AREA]
         recs = dict(zip([id(o) for o in filled], recognize(ctx, filled), strict=True))
 
@@ -62,7 +63,7 @@ class HaulHandler(FormHandler):
         max_trips = trips_max(ctx.site)
         for o in ctx.obs:
             c = o.cell
-            if c.kind == "handwritten_number":
+            if _table_number(c):
                 r = recs.get(id(o))
                 trips, conf, status, raw, has = None, None, "auto", "", False
                 if r is not None:
@@ -122,6 +123,8 @@ class HaulHandler(FormHandler):
         return {"xcheck_haul": crosscheck_haul(con, exclude_materials=self._exclude(site))}
 
     def machine_final(self, row: dict) -> str | None:
+        if row["region"] == "fields":                        # 표 밖 자유 필드: 기계 값 그대로 (운반 횟수가 아니다)
+            return row["value_raw"]
         t = _as_trips(row["value_raw"])
         return None if t is None else str(t)
 
@@ -138,7 +141,7 @@ class HaulHandler(FormHandler):
             tpl = site.templates.get(frow["template_name"])
             if tpl is None or frow["field_name"] not in tpl.meta_fields() or tpl.handler_options.get("role", "log") != "log":
                 return
-            meta = page_meta(con, site, frow["source_name"], frow["page_no"], frow["page_id"], tpl)
+            meta = page_meta_of(con, frow["page_id"])      # 검수를 저장할 때 store.save 가 먼저 다시 계산해 둔 최종 값
             vehicle, operator = meta.get("vehicle_no"), meta.get("operator")
             con.execute("UPDATE prod_haul SET vehicle_no=?, operator=? WHERE page_id=? AND source_role='log'",
                         (None if vehicle is None else str(vehicle), operator, frow["page_id"]))
@@ -155,6 +158,12 @@ class HaulHandler(FormHandler):
     @staticmethod
     def _exclude(site) -> list[str]:
         return site.option("crosscheck.haul", "exclude_materials", [])
+
+
+def _table_number(c) -> bool:
+    """덩어리 배정·숫자 인식으로 다루는 숫자 칸. 날짜의 월·일 칸(표 밖, date.month·date.day)은 표의 칸이 아니라
+    덩어리 배정이 닿지 않는다 — 다른 자유 필드처럼 잉크로 값 유무를 정한다 (모델이 있으면 파이프라인이 먼저 읽는다)."""
+    return c.kind == "handwritten_number" and not (c.region == "fields" and c.col_meta.get("meta_key") in DATE_PARTS)
 
 
 def _as_trips(text: str | None) -> int | None:

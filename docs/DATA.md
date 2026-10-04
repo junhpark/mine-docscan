@@ -11,6 +11,7 @@
 | 검수 기록 (`reviews/reviews.jsonl`) | 사이트 팩 안 (= `SITE/reviews/`) | **아니오** — 사람이 입력한 값, 다시 만들 수 없다 |
 | 정합 이미지, SQLite DB, 리포트 | 각자의 로컬 디스크 (= `WORK_ROOT`) | 아니오 (언제든 다시 만든다) |
 | 숫자 인식기 모델 (`models/<이름>/`) | 사이트 팩 안 (= `SITE/models/`) — 현장 글씨로 학습한 것 | **아니오** (예외: 합성 셀만으로 만든 `tests/fixtures/digits-fixture`) |
+| 메타 필드 모델 (`models/<이름>/`, `classes.json` 에 이름·차량번호) | 사이트 팩 안 (= `SITE/models/`) | **아니오** (예외: 합성 값만으로 만든 `tests/fixtures/meta-digits`, `meta-operator`) |
 | 학습용 크롭(`export-crops`), 틀린 칸 모아 보기(`recognizer eval --errors`) | 저장소 밖 (기본 `WORK_ROOT/recognizer-errors`) | **아니오** — 현장 글씨. git 작업 트리 안이면 도구가 거절한다 |
 | 그 밖의 모델 가중치 | 로컬 또는 모델 저장소 | 아니오 |
 
@@ -67,9 +68,24 @@ mine-docscan/                 ← MINEDOCSCAN_ARCHIVE_ROOT
 - 스캔 원본과 그 일부를 잘라낸 이미지 — 검수 화면의 갈무리도 마찬가지다
 - 기준 이미지(`reference.png`)와 실제 템플릿 YAML — 행렬 양식의 머리글에 이름·차량번호가 인쇄되어 있다
 - 페이지 라벨, 정답 CSV·엑셀, 검수 기록(`reviews.jsonl` — 적힌 값과 출처가 들어 있다)
-- 학습한 모델(`models/`), 내보낸 크롭, 틀린 칸 모아 보기 — 현장의 글씨에서 나온 것. 문서·PR·이슈에도 붙이지 않는다 (수치만 옮긴다)
+- 학습한 모델(`models/`), 내보낸 크롭, 틀린 칸 모아 보기 — 현장의 글씨에서 나온 것. 문서·PR·이슈에도 붙이지 않는다 (수치만 옮긴다).
+  메타 필드 모델의 `classes.json` 은 이름·차량번호의 목록 그 자체다
 - 실제 이름·차량번호를 예시로 쓴 문서·주석·테스트·커밋 메시지
 - API 키와 비밀값 (`.env`, `minedocscan.toml`)
+
+**이름·차량번호가 들어 있는 파일** (전부 저장소 밖):
+
+| 파일 | 위치 | 무엇이 |
+|---|---|---|
+| 템플릿 YAML, 기준 이미지 | `SITE/templates/<양식>/` | 행렬 머리글의 인쇄된 이름·차량번호(`header_operator`, `header_vehicle_no`) |
+| 페이지 라벨 | `SITE/labels/pages.json` | 쪽마다 차량번호·작성자 |
+| 검수 기록 | `SITE/reviews/reviews.jsonl` | 입력한 차량번호·작성자 (`page-fields`, `meta-check`) |
+| 메타 필드 모델의 종류 목록 | `SITE/models/<이름>/classes.json` | 고를 수 있는 이름·차량번호 (카드·학습 로그에는 없다 — 종류의 수와 분포만) |
+| 내보낸 메타 크롭 | `OUT/<split>/meta/<키>/*.png`, `OUT/<split>/meta/labels.jsonl` | 글씨 그림과 그 값 |
+| 틀린 칸 모아 보기 | `WORK_ROOT/recognizer-errors/` (또는 `--errors` 의 경로) | 글씨 그림과 기계·정답 값 |
+| DB | `WORK_ROOT/minedocscan.db` | `doc_page_meta`, `prod_haul`, `eq_assignment_obs` 의 값 |
+
+`pages --meta-mismatch`, `eval --meta`, `report`, `info`, `recognizer list`·`eval` 의 출력에는 값을 찍지 않는다 (수만). 값은 검수 화면(127.0.0.1)에서만 본다.
 
 `.gitignore` 가 이미지·PDF·엑셀·CSV·DB·`sites/`·`work/` 를 기본으로 막는다(`tests/fixtures/` 만 예외).
 테스트에 이미지가 필요하면 `tools/synth.py` 로 만든다. 문서의 예시는 합성 데이터의 값(`T01`, `V-101`, `ALPHA`)을 쓴다.
@@ -195,6 +211,60 @@ minedocscan report                          # 백엔드별 칸 수·자동·대�
   (한 폴더에 규격이 섞이면 거절한다). 정답이 몇 백 셀뿐이어도 한 번 돌려 볼 수 있다 — 합성 셀(`tools/synth_cells.py`)이 반을 채운다. 수치가 거칠다는 것만 안다.
 - 범위: `site.toml` 의 `[haul] trips_max` 보다 큰 값은 신뢰도가 높아도 검수로 간다.
 - 인식기 수치는 실데이터 검증·test 날짜로만 말한다. 합성 셀의 수치는 학습·추론 경로가 맞는지의 확인이다.
+
+### 쪽 메타(차량번호·작성자): 정답에서 감사까지
+
+일보의 차량번호(네 자리)·작성자를 기계가 채우게 하는 순서다 (tasks/0004, ADR 0013·0014). 학습만 torch 가 필요하다.
+
+```bash
+minedocscan review serve --queue page-fields --reviewer jp     # 1. 날짜순으로 20일치쯤(약 200쪽). 기계 값은 보이지 않는다
+minedocscan review stats                                       #    분할별 쪽 수 — test 날짜의 쪽은 평가에만 쓰인다
+minedocscan review export-crops ~/meta --meta --split train    # 2. OUT/train/meta/<키>/ + OUT/train/meta/labels.jsonl (사람·파일명 값만)
+minedocscan recognizer train --crops ~/meta --meta-key vehicle_no --name veh-v1 --cv 5    # 숫자: 읽고 목록에서 고른다
+minedocscan recognizer train --crops ~/meta --meta-key operator   --name op-v1  --cv 5    # 이름: 분류기
+minedocscan recognizer eval  --crops ~/meta --model op-v1 --split val --errors            # 묶음 교차 읽기에서 틀린 쪽 (저장소 밖)
+minedocscan recognizer list                                    # 기준·상한은 묶음 교차 읽기 전체에서 (카드)
+# 설정: [recognize.meta] vehicle_no = "veh-v1", operator = "op-v1"   → minedocscan info 로 기준(상한) 확인
+minedocscan run DB_scans --fresh                               # 3. 기계가 빈 쪽을 채운다. 라벨·검수가 있는 쪽은 대조만
+minedocscan report                                             #    키마다 출처별 쪽 수, 일보의 자리가 어느 출처로 정해졌나
+minedocscan eval --meta --split test                           #    정확도·자동 적재 오류율·배차가 바뀐 쪽·자리
+minedocscan review serve --queue page-fields --audit 100 --reviewer jp   # 4. 표본 감사: 자동 적재된 쪽도 기계 값 없이 다시 본다
+minedocscan eval --meta
+minedocscan review serve --queue meta-check --reviewer jp      # 5. 기계와 라벨·검수가 다른 쪽. 종이를 보고 정한다
+minedocscan pages --meta-mismatch --meta-key date.day          # (월·일 필드를 넣었으면) 다른 날의 쪽이 섞인 묶음
+```
+
+- **정답은 기계 값을 보지 않고 만든다.** `page-fields` 는 기계 값을 보여 주지 않고, 기계가 채운 키는 묻지 않는다. 그래서 모델을 쓰기 시작하면
+  자동 적재된 쪽의 오류를 잴 정답이 생기지 않는다 — `--audit N` 이 날짜별로 고르게 뽑은 쪽(씨앗으로 고정)을 기계의 상태와 상관없이 다시 보여 준다.
+  기계가 채운 값은 정답이 아니다 (`eval --meta` 는 검수·라벨·파일명 값만 정답으로 센다).
+- **정답이 적다.** 쪽마다 한 칸이라 20일치가 약 200쪽이고, 검증으로 20 % 를 떼면 기준(자동 적재된 검증 읽기 100개)이 나오지 않는다.
+  `--cv 5` 는 train 날짜를 다섯 묶음으로 나눠 묶음마다 "나머지로 학습 → 그 묶음 읽기"를 하고, 모은 읽기 전체로 온도·기준을 정한다 (ADR 0014).
+  내보내는 모델은 train 날짜 전부로 학습한 것이다. 목표 오류율 기본 2 % (`--target-auto-error`).
+  묶음마다의 모델은 남기지 않으므로 `--cv` 모델의 `recognizer eval --split val` 은 학습 때 묶음 교차로 읽은 결과(모델 폴더의 `cv-reads.jsonl`,
+  값 없이)로 표를 내고, `--errors` 는 그 필드의 크롭을 `--crops` 폴더에서 찾아 그린다.
+- **목록은 학습 때 정해진다.** 새 차·새 사람은 다시 학습하기 전에는 "목록에 없는 값"이나 기준 미만으로 남아 `page-fields` 로 온다 — 그 쪽은
+  검수로 채우고, 쌓이면 다시 학습한다. 분류기는 학습 날짜에 예가 3개 미만인 사람을 종류로 두지 않는다.
+- **차량번호는 글씨체가 아니라 숫자로 읽는다.** 학습 데이터에서는 번호마다 쓰는 사람이 거의 정해져 있어서, 글씨체로 번호를 외운 모델도
+  검증 수치가 좋다. `eval --meta` 의 "배차가 바뀐 쪽"(그 작성자의 평소 차가 아닌 쪽)의 정확도를 따로 본다.
+- 라벨이 틀렸으면 기계 값과 `mismatch` 로 드러난다 (`report`, `pages --meta-mismatch`). `meta-check` 화면에서 종이를 보고 입력한다 — 입력한 값이
+  검수가 되어 라벨을 이긴다. 라벨 파일도 고친다.
+
+### ✓ 판정의 정답
+
+점검표의 이상 유/무 체크(✓)가 맞게 판정되었는지 잴 정답이다 (tasks/0004 단계 6).
+
+```bash
+minedocscan review serve --queue checks --n 300 --reviewer jp  # 장비 행 300개 (날짜별로 고르게, --seed 로 고정)
+minedocscan eval --checks [--split test]                       # 기계의 답 × 정답 표, 정확도(구간), 판정 불가, column_unused
+minedocscan review stats                                       # ✓ 검수 행 수
+```
+
+- 항목 = 장비 행 하나. 행 띠(테두리 없음)와 유·무 두 칸을 크게 보여 준다. **기계의 판정은 보여 주지 않는다** — 판정 불가였던 행, 점검을 하지 않은
+  날(`column_unused`)의 행도 표본에 들어 있다. 표시가 없다는 것도 정답이다.
+- 키: `1` 유, `2` 무, `Enter` 표시 없음, `?` 모름 — 누르면 저장하고 다음 행. `PgUp`/`PgDn` 으로 돌아가면 전에 고른 답이 보이고, 다시 고르면 고쳐 저장한다.
+- ✓ 가 경계선을 넘어 오른쪽 칸까지 그려졌으면 **시작한 칸**이 표시한 칸이다 (CLAUDE.md "실데이터에서 배운 것"). 두 칸 다 표시했거나 무엇인지 모르겠으면 `?`.
+- 저장은 새 판정 종류가 아니라 두 칸의 검수 두 건이다: 유 = 유 칸 `value`·무 칸 `empty`, 무 = 반대, 표시 없음 = 둘 다 `empty`, 모름 = 둘 다
+  `illegible`. 그래서 `insp_daily.abnormal` 이 바로 그 답을 따르고, 기계의 판정(`has_value_raw`)은 그대로 남아 `eval --checks` 가 비교한다.
 
 ### 정답 형식
 

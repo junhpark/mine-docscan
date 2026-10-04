@@ -28,14 +28,25 @@ def equipment_id(equipment_key: str) -> str:
     return str(uuid.uuid5(EQ_NAMESPACE, equipment_key))
 
 
+def layout(tpl) -> tuple[str, str, str, str]:
+    """점검표 템플릿의 (표, 유 칸, 무 칸, 점검내역 칸) 이름 — handler_options 와 기본값."""
+    opt = tpl.handler_options
+    return (opt.get("region") or tpl.regions[0]["name"], opt.get("yes_column", "abnormal_yes"),
+            opt.get("no_column", "abnormal_no"), opt.get("text_column", "remark"))
+
+
+def is_equipment_row(r: dict) -> bool:
+    """장비 행인가: 행 키가 있고 모델이나 등록번호가 있다. 아니면 양식의 여백 행 (insp_daily 로 가지 않는다)."""
+    model, reg = str(r.get("model", "") or ""), str(r.get("registration", "") or "")
+    return bool(str(r.get("key", ""))) and bool(model or reg.strip("-"))
+
+
 class InspectionHandler(FormHandler):
     name = "inspection"
 
     def load(self, ctx: PageContext) -> dict:
-        tpl, opt = ctx.template, ctx.template.handler_options
-        region = opt.get("region") or tpl.regions[0]["name"]
-        yes_col, no_col = opt.get("yes_column", "abnormal_yes"), opt.get("no_column", "abnormal_no")
-        text_col = opt.get("text_column", "remark")
+        tpl = ctx.template
+        region, yes_col, no_col, text_col = layout(tpl)
         eq = self._ensure_equipment(ctx, region)
         marks = decide_mark_pairs(ctx.aligned, [o for o in ctx.obs if o.cell.region == region], yes_col, no_col)
 
@@ -84,10 +95,10 @@ class InspectionHandler(FormHandler):
     def _ensure_equipment(self, ctx: PageContext, region: str) -> dict[str, str]:
         eq, rows = {}, []
         for r in ctx.template.region(region)["rows"]:
+            if not is_equipment_row(r):
+                continue
             key = str(r.get("key", ""))
             model, reg = str(r.get("model", "") or ""), str(r.get("registration", "") or "")
-            if not key or not (model or reg.strip("-")):
-                continue
             eid = equipment_id(key)
             cat = str(r.get("category", "") or "")
             eq[key] = eid
@@ -105,11 +116,9 @@ class InspectionHandler(FormHandler):
         if f is None or not f["work_date"] or f["template_name"] not in site.templates:
             return
         tpl = site.templates[f["template_name"]]
-        opt = tpl.handler_options
-        region = opt.get("region") or tpl.regions[0]["name"]
+        region, *cols = layout(tpl)
         if f["region"] != region:
             return
-        cols = (opt.get("yes_column", "abnormal_yes"), opt.get("no_column", "abnormal_no"), opt.get("text_column", "remark"))
         trow = next((r for r in tpl.region(region)["rows"] if r["row"] == f["row_no"]), None)
         if trow is None or not str(trow.get("key", "")):
             return
@@ -147,4 +156,4 @@ def _count(items) -> dict:
     return out
 
 
-__all__ = ["InspectionHandler", "equipment_id", "field_id"]
+__all__ = ["InspectionHandler", "equipment_id", "field_id", "is_equipment_row", "layout"]

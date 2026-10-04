@@ -33,6 +33,9 @@ class DigitsRecognizer:
                  fallback_threshold: float = 0.90):
         self.model_dir = Path(model_dir)
         self.card = load_card(self.model_dir)
+        if self.card.get("meta"):
+            raise ValueError(f"'{self.card['name']}' 은 메타 필드 모델입니다 ({', '.join(self.card['meta'].get('keys', []))}) — "
+                             "[recognize.digits] 가 아니라 [recognize.meta] 에 꽂으세요")
         self.net = OnnxNet(self.model_dir / "model.onnx")
         self.spec = CropSpec.from_dict(self.card["spec"])
         self.temperature = float(self.card["temperature"])

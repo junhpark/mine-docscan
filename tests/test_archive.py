@@ -191,9 +191,9 @@ def test_damaged_pdf_warn_policy(synth, tmp_path, capsys, monkeypatch):
     out = json.loads(capsys.readouterr().out)
     assert code == 1 and sorted(d["source_name"] for d in out["run"]["failed"]) == ["empty", "garbage"]
     assert out["report"]["documents_by_status"] == {"failed": 2} | first
-    # 잘못된 방침 값은 시작할 때 멈춘다
+    # 잘못된 방침 값은 시작할 때 멈춘다 — 트레이스백 없이 한 줄 (tasks/0004 단계 1)
     monkeypatch.setenv("MINEDOCSCAN_DAMAGED_PDF", "ignore")
-    with pytest.raises(ValueError, match="damaged_pdf"):
+    with pytest.raises(SystemExit, match="설정 오류: .*damaged_pdf"):
         main(["run"] + common)
 
 

@@ -12,7 +12,8 @@
   templates/<양식>/reference.png   기준 이미지 (빈 양식 또는 깨끗한 스캔 한 장, 200 dpi)
   labels/pages.json                사람이 붙인 페이지 메타 (선택)
   reviews/reviews.jsonl            검수 기록 — 사람이 입력한 값 (추가 전용, 도구가 쓴다)
-  models/<이름>/                   숫자 인식기 모델 (선택, `minedocscan recognizer train` 이 쓴다): model.onnx, card.json, train-log.jsonl
+  models/<이름>/                   인식기 모델 (선택, `minedocscan recognizer train` 이 쓴다): model.onnx, card.json, train-log.jsonl
+                                   (메타 필드 모델은 classes.json 도 — 이름·차량번호가 들어 있다)
   expected/regression.json         회귀 기준 수치 (선택, `minedocscan regress --update` 가 쓴다)
 ```
 
@@ -88,9 +89,21 @@ fields:                            # 표 밖의 자유 필드
   - {name: operator,   kind: handwritten_text, bbox: [920, 290, 1290, 355], meta_key: operator}
 ```
 
-`meta_key` 가 있는 자유 필드의 검수값은 그 쪽의 메타가 된다 (검수 화면 `--queue page-fields`). 쪽 메타의 우선순위는
-**검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙** 이다. `date` 는 받지 않는다 — 날짜는 파일명 규칙과 문서 라벨로 정한다.
+`meta_key` 가 있는 자유 필드의 값은 그 쪽의 메타가 된다 (검수 화면 `--queue page-fields`, 또는 메타 필드 모델 — 아래 `[recognize.meta]`).
+쪽 메타의 우선순위는 **검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙 > 기계 값** 이다. 기계 값은 위에 값이 없을 때만 쓰이고, 있으면 대조만 한다
+(DB 의 `doc_page_meta`, ARCHITECTURE §5). `date` 는 받지 않는다 — 날짜는 파일명 규칙과 문서 라벨로 정한다.
 실제 사이트 팩의 일보 템플릿에는 위 두 줄처럼 차량번호·작성자 필드에 `meta_key` 를 넣는다 (bbox 는 그 양식의 값으로).
+한 템플릿에서 같은 `meta_key` 를 두 필드에 주면 사이트 팩을 읽을 때 오류다.
+
+**손으로 쓴 월·일** (선택). 양식의 날짜 줄에 월·일을 손으로 적는 칸이 있으면 `date.month`·`date.day` 필드를 넣는다. 날짜를 정하지는 않고
+기계가 읽은 값을 쪽의 날짜(파일명·라벨)와 **대조만** 한다 — 다른 날의 쪽이 묶음에 섞인 것을 찾는다. 검수로 받지 않으므로 `page-fields` 에도 나오지 않는다.
+`date.` 뒤에는 `month`·`day` 만 된다.
+
+```yaml
+fields:
+  - {name: date_month, kind: handwritten_number, bbox: [530, 205, 670, 270], meta_key: date.month}
+  - {name: date_day,   kind: handwritten_number, bbox: [775, 205, 915, 270], meta_key: date.day}
+```
 
 ### 열의 종류 (`kind`)
 
@@ -119,7 +132,7 @@ fields:                            # 표 밖의 자유 필드
 - `handler_options`: `role`(`log` 또는 `matrix`), `region`(횟수 셀이 있는 표)
 - 행 메타: `material`, `level`
 - 열 메타: `role: log` 는 `shift`(`day`/`night`), `role: matrix` 는 `slot`, `header_vehicle_no`, `header_operator`
-- `role: log` 는 페이지마다 차량번호·작성자가 필요하다. `meta_key` 필드를 검수 화면에서 입력하거나(권장), 라벨로 준다.
+- `role: log` 는 페이지마다 차량번호·작성자가 필요하다. `meta_key` 필드를 검수 화면에서 입력하거나(권장), 라벨로 주거나, 메타 필드 모델이 읽는다.
   행렬의 `header_vehicle_no`·`header_operator` 는 그 화면의 후보 목록이 된다.
 
 ## labels/pages.json
@@ -133,8 +146,9 @@ fields:                            # 표 밖의 자유 필드
 }
 ```
 
-우선순위: 검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙. 차량번호·작성자는 이제 검수 화면(`--queue page-fields`)으로 넣는 것이 기본이고,
-라벨은 날짜를 고치거나 검수 전에 임시로 줄 때 쓴다.
+우선순위: 검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙 > 기계 값. 차량번호·작성자는 이제 검수 화면(`--queue page-fields`)으로 넣는 것이
+기본이고(메타 필드 모델이 있으면 기계가 채운다), 라벨은 날짜를 고치거나 검수 전에 임시로 줄 때 쓴다. 라벨이 있는 쪽에서 기계가 다른 값을
+읽으면 `mismatch` 로 남는다 — `review serve --queue meta-check` 에서 종이를 보고 정한다 (라벨이 틀렸으면 라벨을 고친다).
 
 ## reviews/reviews.jsonl
 
@@ -168,6 +182,28 @@ fields:                            # 표 밖의 자유 필드
 
 `minedocscan recognizer list` 가 모델과 카드 요약을 보여 준다. 고르는 법은 설정 `[recognize.by_kind] handwritten_number = "digits"` +
 `[recognize.digits] model = "<이름>"` (또는 위의 `site.toml` 항목). 모델이 없으면 `run` 이 시작할 때 멈춘다.
+
+**메타 필드 모델** (`recognizer train --meta-key …`, tasks/0004). 같은 폴더 구조에 `classes.json` 이 더 있다 — 그 모델이 고를 수 있는 값의
+목록이다. **이름과 차량번호가 들어 있으므로 사이트 팩 밖으로 내보내지 않는다.** 카드·학습 로그에는 종류의 수와 종류별 개수의 분포만 적는다.
+
+```json
+{"reader": "digits", "keys": ["vehicle_no"], "values": {"vehicle_no": ["4127", "4135", …]}}     // 숫자: 읽고 목록에서 고른다
+{"reader": "choice", "keys": ["operator"], "classes": ["ALPHA", "BRAVO", …]}                   // 이름: 분류기 (종류 0 = "그 밖")
+```
+
+고르는 법은 설정(또는 `site.toml`)의 `[recognize.meta]` — 키마다 모델 이름. 한 모델이 여러 키를 읽을 수 있다(카드의 `meta.keys`).
+카드에 없는 키에 꽂으면 `run` 이 시작할 때 멈춘다. `minedocscan info` 가 키마다 모델·읽는 법·자동 적재 기준(상한)을 보여 준다.
+
+```toml
+[recognize.meta]
+vehicle_no   = "veh-v1"
+operator     = "op-v1"
+"date.month" = "date-v1"        # 점이 든 키는 따옴표로 (date.month = … 라고 써도 된다)
+"date.day"   = "date-v1"
+```
+
+후보 목록은 `classes.json` 과 템플릿의 `header_<키>`(행렬 머리글)에서만 온다. 검수로 새 차·새 사람이 들어와도 다시 학습하기 전에는
+기계가 고르지 않는다 — 그 쪽은 "목록에 없는 값"이나 기준 미만으로 남아 검수로 간다.
 
 ## 새 양식을 추가하는 절차
 

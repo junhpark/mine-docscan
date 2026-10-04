@@ -13,7 +13,7 @@ from minedocscan.review.server import ReviewApp
 from minedocscan.review.store import Review, field_id_of, save
 from minedocscan.tools.synth import SLOTS, T_LOG, expected_xcheck, generate
 
-TABLES = ("doc_field", "prod_haul", "insp_daily", "xcheck_haul", "eq_assignment_obs", "doc_document")
+TABLES = ("doc_field", "prod_haul", "insp_daily", "xcheck_haul", "eq_assignment_obs", "doc_document", "doc_page_meta")
 
 
 def _dump(con, table):

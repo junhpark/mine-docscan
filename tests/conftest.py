@@ -118,7 +118,7 @@ def clone_db(con):
     """세션 픽스처의 DB 를 메모리로 복사한다 (검수를 넣어 볼 때)."""
     import sqlite3
 
-    out = sqlite3.connect(":memory:")
+    out = sqlite3.connect(":memory:", check_same_thread=False)          # 검수 서버 시험은 다른 스레드에서 쓴다
     con.backup(out)
     out.row_factory = sqlite3.Row
     return out
@@ -157,3 +157,79 @@ def digits_metrics(cells: list[dict]) -> dict:
             "auto": len(auto), "auto_wrong": len(wrong),
             "inked_empty": len(inked_empty),
             "inked_empty_auto": sum(c["has_value_raw"] == 0 and c["review_status"] == "auto" for c in inked_empty)}
+
+
+# ── 메타 필드 합성 (tasks/0004) ─────────────────────────────────────────────
+@pytest.fixture(scope="session")
+def meta_synth(tmp_path_factory):
+    """메타 필드가 사람마다 다른 획인 합성 4일치 (네 자리 차량번호, 월·일 필드, 차를 바꿔 탄 날·새 차·새 사람)."""
+    return generate(tmp_path_factory.mktemp("meta_synth"), days=4, seed=3, meta_fields=True)
+
+
+@pytest.fixture(scope="session")
+def meta_null(meta_synth, tmp_path_factory):
+    """meta_synth 를 라벨 그대로, 인식기 없이 돌린 것. 이 DB 에 쓰지 않는다 (쓸 시험은 clone_db 로)."""
+    root = tmp_path_factory.mktemp("meta_null")
+    settings = Settings(site=meta_synth.site, archive_root=meta_synth.scans, work_root=root / "work",
+                        reviews=root / "reviews.jsonl")
+    pipe = Pipeline(settings)
+    pipe.run([meta_synth.scans])
+    return {"root": root, "settings": settings, "pipe": pipe}
+
+
+META_FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def meta_options(digits: Path = META_FIXTURES / "meta-digits", operator: Path = META_FIXTURES / "meta-operator") -> dict:
+    """메타 필드 모델 두 개(기본: 시험용)를 네 키에 (설정 [recognize.meta] 와 같은 모양)."""
+    d, o = str(digits), str(operator)
+    return {"meta": {"vehicle_no": d, "date.month": d, "date.day": d, "operator": o}}
+
+
+def meta_run(synth, root: Path, labels: dict | None = None, options: dict | None = None, inputs: list | None = None,
+             **kw) -> dict:
+    """사이트 팩을 복사해(라벨을 labels 로 바꿔) 메타 필드 모델로 돌린다. 정합 이미지는 저장하지 않는다. inputs: 돌릴 파일 (기본 전부)."""
+    import json
+    import shutil
+
+    site = root / "site"
+    shutil.copytree(synth.site, site)
+    if labels is not None:
+        (site / "labels" / "pages.json").write_text(json.dumps(labels, ensure_ascii=False), encoding="utf-8")
+    kw.setdefault("save_aligned", False)
+    settings = Settings(site=site, archive_root=synth.scans, work_root=root / "work", reviews=root / "reviews.jsonl",
+                        recognizer_options=options or meta_options(), **kw)
+    pipe = Pipeline(settings)
+    pipe.run(inputs or [synth.scans])
+    return {"root": root, "settings": settings, "pipe": pipe}
+
+
+@pytest.fixture(scope="session")
+def meta_truth(meta_synth) -> dict:
+    import json
+
+    return json.loads((meta_synth.site / "labels" / "pages.json").read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="session")
+def meta_nolabels(meta_synth, tmp_path_factory) -> dict:
+    """meta_synth 를 라벨 없이 메타 필드 모델로 돌린 것. 이 DB 에 쓰지 않는다."""
+    return meta_run(meta_synth, tmp_path_factory.mktemp("meta_nolabels"), labels={})
+
+
+WRONG_LABELS = 2          # meta_mislabeled: 일보 쪽 앞의 둘은 차량번호 라벨이 틀렸다 ("4999")
+
+
+@pytest.fixture(scope="session")
+def meta_mislabeled(meta_synth, meta_truth, tmp_path_factory) -> dict:
+    """meta_synth 의 첫날을 라벨과 함께(앞의 두 쪽은 차량번호 라벨을 일부러 틀리게) 메타 필드 모델로 돌린 것 — 기계 값은 대조에만.
+    이 DB 에 쓰지 않는다 (쓸 시험은 clone_db 로). 돌려주는 값에 wrong: 라벨이 틀린 쪽의 "<파일명>#<쪽>"."""
+    import json
+
+    labels = json.loads(json.dumps(meta_truth))
+    wrong = sorted(k for k in labels if "#" in k)[:WRONG_LABELS]
+    for src in wrong:
+        labels[src]["vehicle_no"] = "4999"
+    first = sorted(meta_synth.scans.glob("*.pdf"))[0]                     # 첫날만 (틀린 라벨 둘이 그날의 쪽이다)
+    assert all(src.startswith(first.stem + "#") for src in wrong)
+    return meta_run(meta_synth, tmp_path_factory.mktemp("meta_mislabeled"), labels=labels, inputs=[first]) | {"wrong": wrong}

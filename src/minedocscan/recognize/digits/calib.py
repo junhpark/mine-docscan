@@ -8,10 +8,10 @@
 """
 from __future__ import annotations
 
-import math
-
 import numpy as np
 
+# 통계 함수는 평가 쪽(evaluate/stats.py)에 있다. 여기서도 calib.wilson 으로 부를 수 있게 이름을 가져온다
+from ...evaluate.stats import wilson, zero_error_cells_for  # noqa: F401
 from .model import BLANK, REJECT, answer_kind, encode, log_softmax, read_answers
 
 COARSE_GRID = tuple(round(0.5 + 0.25 * i, 2) for i in range(15))               # 0.5 – 4.0
@@ -62,17 +62,6 @@ def fit_temperature(logits: list[np.ndarray], texts: list[str]) -> tuple[float, 
     return float(best), {"cells": len(logits), "nll_at_1": round(mean_nll(1.0), 5), "nll": round(mean_nll(best), 5)}
 
 
-def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
-    """이항 비율 k/n 의 윌슨 구간 (기본 95 %). n = 0 이면 (0, 1)."""
-    if n == 0:
-        return 0.0, 1.0
-    p = k / n
-    d = 1 + z * z / n
-    c = (p + z * z / (2 * n)) / d
-    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
-    return max(0.0, c - h), min(1.0, c + h)
-
-
 def in_range(text: str, trips_max: int | None) -> bool:
     return trips_max is None or (text.isdigit() and int(text) <= int(trips_max))
 
@@ -113,11 +102,6 @@ def threshold_table(preds: list[tuple[str, float]], truths: list[str], trips_max
 # 100칸이면 3.7 %, 300칸이면 1.3 %, 380칸이면 1 %. 100 은 "기준을 정하는 것 자체가 의미 있는" 하한이고, 목표를 뒷받침하는 수가 아니다 —
 # 그래서 기준 옆에 상한을 늘 같이 적는다 (카드 auto_accept.upper95, info, recognizer list).
 MIN_AUTO = 100
-
-
-def zero_error_cells_for(target: float, z: float = 1.96) -> int:
-    """오류 0 으로 윌슨 상한이 target 이하가 되려면 필요한 칸 수."""
-    return math.ceil(z * z * (1 - target) / target)
 
 
 def choose_threshold(table: list[dict], target: float, min_auto: int = MIN_AUTO) -> dict | None:

@@ -34,6 +34,10 @@
   kbd { font: 12px ui-monospace, monospace; border:1px solid var(--line); border-bottom-width:2px; border-radius:3px; padding:0 5px; background:#fafafa; }
   .done { padding:40px 0; text-align:center; color:var(--muted); font-size:18px; }
   button { font: inherit; padding:4px 10px; border:1px solid var(--line); background:#fff; border-radius:4px; cursor:pointer; }
+  .pair img { max-height:200px; border:1px solid var(--line); }
+  .choices { display:flex; gap:10px; flex-wrap:wrap; margin-top:8px; }
+  .choices button { font-size:18px; padding:8px 16px; }
+  .choices button.on { border-color:var(--accent); background:#e8f0fc; font-weight:600; }
 </style>
 </head>
 <body>
@@ -42,7 +46,7 @@
   <span>검수자 <b id="reviewer">…</b></span>
   <span class="prog">진행 <b id="done">0</b> / <b id="total">0</b></span>
   <span id="pos" class="prog"></span>
-  <span class="hint">종이에 적힌 <b>그대로</b> 입력합니다. 두 문서의 값이 달라도 각각 적힌 대로 — 어느 쪽이 맞는지는 정하지 않습니다.
+  <span class="hint" id="ghint">종이에 적힌 <b>그대로</b> 입력합니다. 두 문서의 값이 달라도 각각 적힌 대로 — 어느 쪽이 맞는지는 정하지 않습니다.
     <kbd>Enter</kbd> 저장·다음 &nbsp; 빈 채로 <kbd>Enter</kbd> 빈 칸 &nbsp; <kbd>?</kbd><kbd>Enter</kbd> 읽을 수 없음 &nbsp;
     <kbd>PgUp</kbd>/<kbd>PgDn</kbd> 이전/다음 &nbsp; 묶음은 <kbd>Tab</kbd> 으로 이동</span>
   <span class="hint" id="qhint"></span>
@@ -55,7 +59,10 @@
 (function () {
   'use strict';
   const qs = new URLSearchParams(location.search);
-  const state = { items: [], idx: 0, done: 0, total: 0, showMachine: false, entered: {}, templates: {}, busy: false, renderedAt: 0, candidates: {} };
+  const state = { items: [], idx: 0, done: 0, total: 0, showMachine: false, entered: {}, templates: {}, busy: false, renderedAt: 0, candidates: {},
+                  queue: '', checked: {} };
+  // ✓ 행(checks)의 답: 키 → 서버의 answer, 보이는 이름 (tasks/0004 4.9 — 두 칸의 판정으로 저장된다)
+  const CHECK = { '1': ['yes', '유'], '2': ['no', '무'], 'Enter': ['none', '표시 없음'], '?': ['unknown', '모름'] };
   const $ = (id) => document.getElementById(id);
 
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -68,13 +75,26 @@
     state.items = q.items; state.done = q.done; state.total = q.total; state.showMachine = q.show_machine;
     state.templates = q.templates || {};
     state.candidates = q.candidates || {};
+    state.queue = q.name;
     $('qname').textContent = '대기열 ' + q.name + ' · ' + (q.site || '');
     // 숫자 정답을 만드는 대기열: 이 규칙이 인식기의 "빈 칸"과 "거절"의 정답이 된다 (tasks/0003 4.3, docs/DATA.md)
     $('qhint').innerHTML = (q.name === 'haul-numbers' || q.name === 'mismatch')
-      ? '<b>X 표·지운 칸·이웃 칸에서 넘어온 글씨는 비워 두고 Enter (빈 칸).</b> 숫자인데 읽을 수 없으면 <kbd>?</kbd>' : '';
+      ? '<b>X 표·지운 칸·이웃 칸에서 넘어온 글씨는 비워 두고 Enter (빈 칸).</b> 숫자인데 읽을 수 없으면 <kbd>?</kbd>'
+      : (q.name === 'meta-check'
+        ? '<b>라벨(또는 검수)의 값과 기계가 읽은 값이 다릅니다.</b> 종이에 적힌 값을 입력합니다 — <kbd>Alt</kbd>+<kbd>L</kbd> 라벨 값, <kbd>Alt</kbd>+<kbd>K</kbd> 기계 값'
+        : (q.name === 'checks'
+          ? '<b>행의 유·무 두 칸을 보고 표시된 칸을 고릅니다.</b> <kbd>1</kbd> 유 &nbsp; <kbd>2</kbd> 무 &nbsp; <kbd>Enter</kbd> 표시 없음 &nbsp; '
+            + '<kbd>?</kbd> 모름 — 누르면 바로 저장하고 다음 행. ✓ 가 경계선을 넘었으면 <b>시작한 칸</b>이 표시한 칸입니다. '
+            + '<kbd>PgUp</kbd>/<kbd>PgDn</kbd> 이전/다음 (전에 고른 답이 보이고, 다시 고르면 고쳐 저장합니다)'
+          : ''));
+    $('ghint').style.display = q.name === 'checks' ? 'none' : '';
     $('reviewer').textContent = q.reviewer;
     document.title = 'minedocscan 검수 — ' + q.name;
     state.idx = 0;
+    if (q.name === 'checks') {          // 검수한 행도 목록에 있다 (다시 열면 전에 고른 답) — 아직 안 한 첫 행부터
+      const k = state.items.findIndex(it => !it.answer);
+      state.idx = k < 0 ? state.items.length : k;
+    }
     render();
   }
 
@@ -99,6 +119,7 @@
       return;
     }
     const item = state.items[state.idx];
+    if (state.queue === 'checks') { renderCheck(v, item); return; }
     let h = '<div class="item"><h1>' + esc(titleOf(item)) + '</h1>';
     item.cells.forEach((c, i) => {
       const prev = state.entered[c.field_id] || c.review;
@@ -118,12 +139,18 @@
         const listId = cands ? ('dl-' + i) : '';
         h += '<input class="val ' + (isNum ? 'num' : 'text') + '" data-i="' + i + '" data-fid="' + esc(c.field_id) + '"'
           + (c.meta_key ? ' data-meta="' + esc(c.meta_key) + '"' : '') + (listId ? ' list="' + listId + '"' : '')
+          + (c.human ? ' data-human="' + esc(c.human.value) + '" data-machine="' + esc(c.machine ? c.machine.value_raw : '') + '"' : '')
           + (isNum ? ' inputmode="numeric"' : '') + ' value="' + esc(init) + '" autocomplete="off" spellcheck="false">';
         if (cands) {   // 후보 목록: 행렬 머리글 + 지금까지의 라벨·검수. 외부 자원 없이 <datalist> 로
           h += '<datalist id="' + listId + '">' + cands.map(v => '<option value="' + esc(v) + '"></option>').join('') + '</datalist>';
           h += '<span class="label">Alt+1–9 로 고를 수 있습니다: ' + cands.slice(0, 9).map((v, k) => (k + 1) + ' ' + esc(v)).join(' · ') + '</span>';
         }
         if (prev) h += '<span class="prev">입력했던 값: <b>' + esc(shown(prev)) + '</b></span>';
+        if (c.human && c.machine) {   // meta-check: 두 값을 같이 보여 준다 (어느 쪽이 맞는지는 종이를 보고 정한다)
+          const conf = (c.machine.confidence == null) ? '' : ' · 신뢰도 ' + Number(c.machine.confidence).toFixed(2);
+          h += '<span class="prev">라벨·검수(' + esc(c.human.source) + '): <b>' + esc(c.human.value) + '</b> · 기계: <b>'
+            + esc(c.machine.value_raw) + '</b> (' + esc(c.machine.status) + conf + ')</span>';
+        }
       }
       h += '<span class="src" data-src-of="' + i + '"></span></div></div>';
     });
@@ -141,6 +168,49 @@
     msg('');
   }
 
+  function renderCheck(v, item) {
+    // 기계의 판정은 응답에도 화면에도 없다. 두 칸을 같이 보여 준다 (✓ 는 경계선을 넘어 그려진다)
+    const yes = item.cells[0].field_id;
+    const prev = state.checked[item.item_id] || item.answer;
+    let h = '<div class="item"><h1>' + esc(titleOf(item)) + '</h1>';
+    h += '<div class="cell"><div class="label">행 전체</div>';
+    h += '<div class="row"><img data-crop="/crop?field_id=' + encodeURIComponent(yes) + '&kind=row&box=0" alt="행"></div>';
+    h += '<div class="label">이상 유 (왼쪽) · 무 (오른쪽)</div>';
+    h += '<div class="big pair"><img data-crop="/crop?field_id=' + encodeURIComponent(yes) + '&kind=pair" alt="유·무 두 칸">';
+    h += '<span class="src"></span></div>';
+    h += '<div class="choices">' + Object.entries(CHECK).map(([k, [a, name]]) =>
+      '<button data-key="' + esc(k) + '"' + (prev === name ? ' class="on"' : '') + '><kbd>' + esc(k) + '</kbd> ' + esc(name) + '</button>').join('') + '</div>';
+    if (prev) h += '<div class="prev">전에 고른 답: <b>' + esc(prev) + '</b></div>';
+    h += '</div></div>';
+    v.innerHTML = h;
+    v.querySelectorAll('img[data-crop]').forEach(loadCrop);
+    v.querySelectorAll('.choices button').forEach(b => b.addEventListener('click', () => saveCheck(b.dataset.key, true)));
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    state.renderedAt = performance.now();
+    msg('');
+  }
+
+  async function saveCheck(key, clicked) {
+    if (state.busy || !CHECK[key]) return;
+    // 새 행이 그려진 뒤 300 ms 안의 키는 앞 행을 향한 것이다 (보지 않은 행이 저장된다). 마우스는 예외
+    if (!clicked && performance.now() - state.renderedAt < 300) return;
+    const item = state.items[state.idx];
+    if (!item) return;
+    const [answer, name] = CHECK[key];
+    state.busy = true;
+    try {
+      const r = await fetch('/api/check', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ field_id: item.cells[0].field_id, answer: answer }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || ('저장 실패 ' + r.status));
+      if (!item.answer && !state.checked[item.item_id]) state.done += 1;
+      state.checked[item.item_id] = name;
+      next();
+      msg('저장했습니다: ' + name, true);
+    } catch (e) { msg(e.message); }
+    finally { state.busy = false; }
+  }
+
   async function loadCrop(img) {
     // 이미지를 fetch 로 받아야 응답 머리글(X-Crop-Source: 원본 해상도인지 정합 이미지인지)을 읽을 수 있다
     try {
@@ -149,7 +219,7 @@
       const blob = await r.blob();
       img.src = URL.createObjectURL(blob);
       const src = r.headers.get('X-Crop-Source');
-      const tag = img.closest('.cell').querySelector('.src');
+      const tag = img.closest('.cell') && img.closest('.cell').querySelector('.src');
       if (tag && src) tag.textContent = src === 'source' ? '원본 해상도' : '정합 이미지';
     } catch (e) { img.alt = '이미지를 받지 못했습니다'; }
   }
@@ -210,6 +280,9 @@
   function onKey(ev) {
     // 후보 선택은 Alt+1–9. 숫자 키만으로 고르면 차량번호처럼 숫자로 시작하는 값을 칠 수 없다.
     // ev.key 가 아니라 ev.code(물리 키)로 본다: macOS 의 Option+숫자는 ev.key 가 '™' 같은 문자로 온다
+    if (ev.target.dataset.human !== undefined && ev.altKey && (ev.code === 'KeyL' || ev.code === 'KeyK')) {   // meta-check
+      ev.preventDefault(); ev.target.value = ev.code === 'KeyL' ? ev.target.dataset.human : ev.target.dataset.machine; return;
+    }
     if (ev.target.dataset.meta && ev.altKey && /^Digit[1-9]$/.test(ev.code)) {
       const cands = state.candidates[ev.target.dataset.meta] || [];
       const v = cands[parseInt(ev.code.slice(5), 10) - 1];
@@ -232,6 +305,10 @@
     if (ev.repeat) return;
     if (ev.key === 'PageDown') { ev.preventDefault(); next(); }
     else if (ev.key === 'PageUp') { ev.preventDefault(); prev(); }
+    else if (state.queue === 'checks' && !ev.altKey && !ev.ctrlKey && !ev.metaKey && !ev.isComposing && CHECK[ev.key]) {
+      // 숫자 키는 ev.key 로 본다 (윗줄·숫자판 모두 '1'/'2'). ? 는 Shift+/ 이므로 ev.key 가 '?'
+      ev.preventDefault(); saveCheck(ev.key, false);
+    }
   });
 
   loadQueue();

@@ -5,7 +5,13 @@
   haul-numbers  운반 숫자 셀의 표본 (정답 만들기). 기계 값은 숨긴다 — 보여 주면 그 값에 끌린다
   mismatch      교차검증 불일치 칸마다 한 항목: 일보의 주간·야간 셀과 행렬 셀(여러 장이면 전부)을 묶는다. 기계 값 숨김
   pending       검수 대기 필드 전부, 쪽 순서 (운영용). 기계 값을 보여 주고 입력창에 미리 채운다
-  page-fields   쪽의 메타(차량번호·작성자)가 되는 자유 필드 중 아직 값이 없는 것. 항목 = 쪽 하나. 후보 목록을 같이 준다
+  page-fields   쪽의 메타(차량번호·작성자)가 되는 자유 필드 중 아직 값이 없는 것. 항목 = 쪽 하나. 후보 목록을 같이 준다.
+                기계가 채운 키는 나오지 않는다. audit=N 이면 기계의 상태와 상관없이 날짜별로 고르게 뽑은 쪽 N 개에서 사람·파일명의
+                값이 없는 키를 (기계 값 없이) 보여 준다 — 자동 적재된 쪽의 오류를 잴 정답 (tasks/0004 4.6)
+  meta-check    기계가 읽은 메타 값과 사람(라벨·검수)의 값이 다른 쪽 (날짜의 부분은 빼고). 두 값을 보여 주고 맞는 값을 입력받는다
+  checks        점검표의 장비 행 표본 (✓ 판정의 정답, tasks/0004 단계 6). 항목 = 행 하나(유·무 두 칸). 기계의 판정은 숨긴다.
+                판정 불가인 행, 점검을 하지 않은 날(column_unused)의 행도 모집단에 있다 — 표시가 없다는 것도 정답이다.
+                검수한 행도 목록에 남긴다 (answer) — 다시 열면 전에 고른 답이 보인다
 
 haul-numbers 의 표본 규칙 (docs/tasks/0001-review-tool.md 단계 3)
   · 모집단: prod_haul 의 셀. 값이 있다고 판단된 셀(has_value_raw=1)에서 n×(1−empty_share), 비었다고 판단된 셀에서
@@ -22,9 +28,11 @@ import hashlib
 import sqlite3
 from dataclasses import asdict, dataclass, field
 
-from .store import effective, field_id_of, meta_from_reviews
+from .store import effective, field_id_of
 
-QUEUES = ("haul-numbers", "mismatch", "pending", "page-fields")
+QUEUES = ("haul-numbers", "mismatch", "pending", "page-fields", "meta-check", "checks")
+DEFAULT_N = {"haul-numbers": 1500, "checks": 300}
+HUMAN_SOURCES = ("review", "label", "filename")
 INPUT_KINDS = ("handwritten_number", "handwritten_text")      # 이 화면이 입력받는 셀 종류
 
 _FIELD_SQL = (
@@ -42,6 +50,7 @@ class QueueCell:
     review: dict | None = None              # 기존 유효한 검수 {verdict, value, reviewer, reviewed_at}
     machine: dict | None = None             # 기계 값 — pending 대기열에서만
     meta_key: str | None = None             # page-fields: 이 셀의 값이 되는 메타 키 (후보 목록의 키)
+    human: dict | None = None               # meta-check: 사람·파일명의 값 {value, source}
 
 
 @dataclass
@@ -50,11 +59,13 @@ class QueueItem:
     title: str
     work_date: str | None
     cells: list[QueueCell] = field(default_factory=list)
+    answer: str | None = None               # checks: 검수로 정해진 행의 답 (유 / 무 / 표시 없음 / 모름)
 
 
-def build_queue(con: sqlite3.Connection, name: str, *, n: int = 1500, seed: int = 0, empty_share: float = 0.1,
-                template: str | None = None, kind: str | None = None, site=None) -> dict:
+def build_queue(con: sqlite3.Connection, name: str, *, n: int | None = None, seed: int = 0, empty_share: float = 0.1,
+                template: str | None = None, kind: str | None = None, site=None, audit: int | None = None) -> dict:
     candidates: dict = {}
+    n = DEFAULT_N.get(name, 0) if n is None else n
     if name == "haul-numbers":
         items, total, done = _haul_numbers(con, n, seed, empty_share)
     elif name == "mismatch":
@@ -64,7 +75,15 @@ def build_queue(con: sqlite3.Connection, name: str, *, n: int = 1500, seed: int 
     elif name == "page-fields":
         if site is None:
             raise ValueError("page-fields 대기열에는 사이트 팩이 필요합니다 (템플릿의 meta_key 와 라벨)")
-        items, total, done, candidates = _page_fields(con, site)
+        items, total, done, candidates = _page_fields(con, site, audit, seed)
+    elif name == "meta-check":
+        if site is None:
+            raise ValueError("meta-check 대기열에는 사이트 팩이 필요합니다")
+        items, total, done, candidates = _meta_check(con, site)
+    elif name == "checks":
+        if site is None:
+            raise ValueError("checks 대기열에는 사이트 팩이 필요합니다 (점검표 템플릿의 유·무 칸)")
+        items, total, done = _checks(con, site, n, seed)
     else:
         raise KeyError(f"알 수 없는 대기열 '{name}' (가능: {QUEUES})")
     return {"name": name, "total": total, "done": done, "items": [asdict(i) for i in items], "candidates": candidates}
@@ -178,25 +197,25 @@ def _pending(con, template: str | None, kind: str | None):
 
 
 # ── page-fields ────────────────────────────────────────────────────────────
-def _page_fields(con, site):
-    """meta_key 필드가 있는 양식의 쪽마다, 쪽 메타(검수값 > 라벨 > 파일명)에 아직 없는 키의 필드를 한 항목으로 묶는다."""
-    metas = {name: t.meta_fields() for name, t in site.templates.items() if t.meta_fields()}
+def _page_fields(con, site, audit: int | None = None, seed: int = 0):
+    """meta_key 필드가 있는 양식의 쪽마다, 쪽 메타(doc_page_meta 의 최종 값: 검수값 > 라벨 > 파일명 > 기계 값)에 아직 없는
+    키의 필드를 한 항목으로 묶는다. 기계가 채운 키는 나오지 않는다. 날짜의 부분(date.month·date.day)은 검수로 받지 않는다.
+    audit=N: 날짜별로 고르게(hash(seed, page_id) 순서로 날짜를 돌아가며) 뽑은 쪽 N 개에서 사람·파일명의 값이 없는 키 — 기계가
+    채웠든 아니든. 표본은 씨앗으로 고정되고, 검수가 진행되어도 구성이 바뀌지 않는다. 기계 값은 보여 주지 않는다 (4.6)."""
+    metas = {name: t.review_meta_fields() for name, t in site.templates.items() if t.review_meta_fields()}
     if not metas:
         return [], 0, 0, {}
     pages = con.execute(
         "SELECT p.page_id, p.page_no, p.work_date, p.template_name, d.source_name FROM doc_page p "
         f"JOIN doc_document d ON p.document_id = d.document_id WHERE p.status = 'loaded' AND p.template_name IN "
         f"({','.join('?' * len(metas))}) ORDER BY p.work_date, d.source_name, p.page_no", list(metas)).fetchall()
+    if audit:
+        pages = sorted(_stratified_pages(pages, audit, seed), key=lambda r: (r["work_date"] or "", r["source_name"],
+                                                                              r["page_no"]))
     items, done = [], 0
     for pg in pages:
-        tpl = site.templates[pg["template_name"]]
-        meta = site.page_meta(pg["source_name"], pg["page_no"])
-        for k, v in meta_from_reviews(con, pg["page_id"], tpl).items():
-            if v is None:
-                meta.pop(k, None)
-            else:
-                meta[k] = v
-        missing = {name: key for name, key in metas[pg["template_name"]].items() if not meta.get(key)}
+        meta = _human_meta(con, pg["page_id"]) if audit else _final_meta(con, pg["page_id"])
+        missing = {name: key for name, key in metas[pg["template_name"]].items() if key not in meta}
         if not missing:
             done += 1
             continue
@@ -212,6 +231,112 @@ def _page_fields(con, site):
     return items, len(pages), done, {k: _candidates(con, site, k) for k in keys}
 
 
+def _final_meta(con, page_id: str) -> dict:
+    """정해진 키: 값이 있거나, 검수에서 빈 칸이라고 답한 키 (값 NULL, 출처 review — 다시 묻지 않는다)."""
+    return {r[0]: r[1] for r in con.execute("SELECT meta_key, value FROM doc_page_meta WHERE page_id = ? "
+                                            "AND (value IS NOT NULL OR source = 'review')", (page_id,))}
+
+
+def _human_meta(con, page_id: str) -> dict:
+    """사람·파일명에서 온 값만 (기계가 채운 값은 빠진다). 검수에서 빈 칸이라고 답한 키도 정해진 것으로."""
+    return {r[0]: r[1] for r in con.execute(
+        "SELECT meta_key, value FROM doc_page_meta WHERE page_id = ? AND (value IS NOT NULL OR source = 'review') "
+        f"AND source IN ({','.join('?' * len(HUMAN_SOURCES))})", (page_id, *HUMAN_SOURCES))}
+
+
+def _stratified_pages(pages, n: int, seed: int) -> list:
+    """날짜마다 hash(seed, page_id) 순서로 줄을 세우고 날짜를 돌아가며 하나씩 — 기계의 상태와 상관없이."""
+    by_date: dict[str, list] = {}
+    for pg in pages:
+        by_date.setdefault(pg["work_date"] or "", []).append(pg)
+    queues = [sorted(v, key=lambda r: _rank(seed, r["page_id"])) for _k, v in sorted(by_date.items())]
+    out: list = []
+    while len(out) < n and any(queues):
+        for q in queues:
+            if q and len(out) < n:
+                out.append(q.pop(0))
+    return out
+
+
+def _meta_check(con, site):
+    """기계 값과 사람 값이 다른 (쪽, 키) — 날짜의 부분은 빼고 (날짜는 검수로 받지 않는다). 항목 = 쪽 하나, 셀마다 두 값.
+    입력한 값이 검수가 된다 — 기계 값이 맞았으면 그 값을, 라벨이 맞았으면 라벨 값을.
+    모집단 = 지금 mismatch 인 (쪽, 키) + 검수로 끝난 것 (그 필드에 유효한 검수가 있고, 라벨·파일명의 값이 기계 값과 달랐던 것 —
+    기계 값을 입력하면 match 가 되어 mismatch 에서 빠지므로). 유효한 검수(읽을 수 없음 포함)가 있으면 끝난 것으로 센다."""
+    from .store import effective
+
+    rows = con.execute(
+        "SELECT m.page_id, m.meta_key, m.value, m.source, m.field_id, m.machine_value, m.machine_confidence, m.machine_status, "
+        "m.check_result, p.page_no, p.work_date, p.template_name, d.source_name FROM doc_page_meta m "
+        "JOIN doc_page p ON m.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
+        "WHERE m.field_id IS NOT NULL AND m.meta_key NOT LIKE 'date%' AND m.machine_status IN ('auto', 'unlisted') "
+        "ORDER BY p.work_date, d.source_name, p.page_no, m.meta_key").fetchall()
+    reviewed = effective(con, field_ids=[r["field_id"] for r in rows])
+
+    def disagreed(r) -> bool:
+        if r["check_result"] == "mismatch":
+            return True
+        if r["field_id"] not in reviewed:
+            return False
+        before = site.page_meta(r["source_name"], r["page_no"]).get(r["meta_key"])     # 검수 전의 사람·파일명 값
+        return before not in (None, "") and str(before) != r["machine_value"]
+
+    rows = [r for r in rows if disagreed(r)]
+    by_page: dict[str, list] = {}
+    for r in rows:
+        by_page.setdefault(r["page_id"], []).append(r)
+    items, done = [], 0
+    for pid, rs in by_page.items():
+        todo = [r for r in rs if r["field_id"] not in reviewed]
+        done += len(rs) - len(todo)
+        if not todo:
+            continue
+        cells = []
+        for r in todo:
+            f = con.execute(_FIELD_SQL + "WHERE f.field_id = ?", (r["field_id"],)).fetchone()
+            if f is None:
+                continue
+            cells.append(QueueCell(r["field_id"], f"{r['meta_key']} — 라벨과 기계가 다르다", f["kind"], None,
+                                   {"has_value": f["has_value_raw"], "value_raw": r["machine_value"],
+                                    "confidence": r["machine_confidence"], "backend": f["backend"],
+                                    "status": r["machine_status"]},
+                                   meta_key=r["meta_key"], human={"value": r["value"], "source": r["source"]}))
+        if cells:
+            r0 = rs[0]
+            items.append(QueueItem(f"meta-check:{pid}", f"{r0['work_date'] or '날짜 없음'} · {r0['template_name']} · "
+                                   f"{r0['source_name']}#{r0['page_no']}", r0["work_date"], cells))
+    keys = sorted({r["meta_key"] for r in rows})
+    return items, len(rows), done, {k: _candidates(con, site, k) for k in keys}
+
+
+# ── checks ─────────────────────────────────────────────────────────────────
+def _checks(con, site, n: int, seed: int):
+    """점검표의 장비 행을 날짜별로 고르게 n 개 (hash(seed, item_id) 순서로 날짜를 돌아가며). 기계의 상태와 상관없이 뽑는다 —
+    판정 불가·column_unused 행도. 셀에는 기계 값을 싣지 않는다 (machine=None). 검수한 행은 answer 와 함께 남는다."""
+    from .checks import answers, check_rows
+
+    rows = check_rows(con, site)
+    by_date: dict[str, list] = {}
+    for c in rows:
+        by_date.setdefault(c.work_date or "", []).append(c)
+    queues = [sorted(v, key=lambda c: _rank(seed, c.item_id)) for _k, v in sorted(by_date.items())]
+    sample: list = []
+    while len(sample) < n and any(queues):
+        for q in queues:
+            if q and len(sample) < n:
+                sample.append(q.pop(0))
+    sample.sort(key=lambda c: (c.work_date or "", c.source_name, c.page_no, c.row_no))
+    done = answers(con, sample)
+    eff = effective(con, field_ids=[f for c in sample for f in (c.yes["field_id"], c.no["field_id"])])
+    items = []
+    for c in sample:
+        cells = [QueueCell(f["field_id"], label, "checkmark", _review_dict(eff.get(f["field_id"])))
+                 for f, label in ((c.yes, "유"), (c.no, "무"))]
+        title = f"{c.work_date or '날짜 없음'} · {c.template_name} · {c.row_key} · {c.source_name}#{c.page_no}"
+        items.append(QueueItem(c.item_id, title, c.work_date, cells, answer=done.get(c.item_id)))
+    return items, len(sample), len(done)
+
+
 def _candidates(con, site, key: str) -> list[str]:
     """키의 후보 값: 행렬 템플릿 머리글(header_<key>) + 라벨과 검수에 나온 값. 많이 나온 순."""
     counts: dict[str, int] = {}
@@ -225,7 +350,7 @@ def _candidates(con, site, key: str) -> list[str]:
         v = lab.get(key)
         if v not in (None, ""):
             counts[str(v)] = counts.get(str(v), 0) + 1
-    names = {(t.name, name) for t in site.templates.values() for name, k in t.meta_fields().items() if k == key}
+    names = {(t.name, name) for t in site.templates.values() for name, k in t.review_meta_fields().items() if k == key}
     for rv in effective(con).values():
         if rv.verdict == "value" and rv.region == "fields" and (rv.template, rv.field_name) in names:
             counts[rv.value] = counts.get(rv.value, 0) + 1

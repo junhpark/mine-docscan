@@ -72,6 +72,24 @@ CREATE TABLE IF NOT EXISTS doc_field (
 CREATE INDEX IF NOT EXISTS ix_doc_field_page ON doc_field(page_id);
 CREATE INDEX IF NOT EXISTS ix_doc_field_review ON doc_field(review_status);
 
+-- 쪽의 메타(날짜·차량번호·작성자 …) — 쪽 × 키마다 한 행. 값이 어디서 왔는지와 기계가 읽은 값을 같이 남긴다 (tasks/0004 4.3, 4.4).
+-- 우선순위: 검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙 > 기계가 읽은 값(자동 적재 기준을 넘은 것만).
+-- 위에 값이 있으면 기계 값은 대조에만 쓴다 (check_result). 기계 열은 검수가 건드리지 않는다.
+-- prod_haul(일보)의 차량·작성자, 자리, eq_assignment_obs 는 이 테이블의 최종 값(value)에서 만든다.
+CREATE TABLE IF NOT EXISTS doc_page_meta (
+  page_id            TEXT NOT NULL REFERENCES doc_page(page_id),
+  meta_key           TEXT NOT NULL,          -- date | vehicle_no | operator | date.month | date.day | …
+  value              TEXT,                   -- 최종 값. NULL = 모름
+  source             TEXT,                   -- review | label | filename | machine | NULL(값 없음)
+  field_id           TEXT,                   -- 이 키를 적는 자유 필드 (템플릿의 meta_key). 없으면 NULL
+  machine_value      TEXT,                   -- 기계가 읽은 값 (목록에 없는 값이면 자유롭게 읽은 문자열)
+  machine_confidence REAL,
+  machine_status     TEXT,                   -- auto | pending | unlisted | empty(잉크 없음) | NULL(읽는 모델 없음)
+  check_result       TEXT NOT NULL,          -- match | mismatch | unread(위에 값이 있는데 기계가 정하지 못함) | none(대조할 것 없음)
+  PRIMARY KEY (page_id, meta_key)
+);
+CREATE INDEX IF NOT EXISTS ix_doc_page_meta_check ON doc_page_meta(check_result);
+
 -- 사람이 입력한 값. 원본은 사이트 팩의 추가 전용 파일(reviews/reviews.jsonl)이고 이 테이블은 그 사본이다
 -- (WORK_ROOT 는 언제든 지울 수 있어야 하므로). 한 필드에 여러 건이면 reviewed_at 이 가장 늦은 것이 유효하다.
 -- field_id 에 외래 키를 걸지 않는다: 파일을 읽어 들이는 시점에 그 페이지가 아직 DB 에 없을 수 있다.

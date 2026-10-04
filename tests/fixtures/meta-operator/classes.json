@@ -1,0 +1,14 @@
+{
+ "reader": "choice",
+ "keys": [
+  "operator"
+ ],
+ "classes": [
+  "ALPHA",
+  "BRAVO",
+  "CHARLIE",
+  "DELTA",
+  "FOXTROT",
+  "KILO"
+ ]
+}

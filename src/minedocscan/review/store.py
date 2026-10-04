@@ -209,8 +209,9 @@ def field_id_of(page_id: str, name: str) -> str:
 
 
 def meta_from_reviews(con: sqlite3.Connection, page_id: str, template) -> dict:
-    """meta_key 가 있는 자유 필드의 유효한 검수 → {meta_key: 값}. empty 는 None (라벨 값을 지운다), illegible 은 무시."""
-    mf = template.meta_fields()
+    """meta_key 가 있는 자유 필드의 유효한 검수 → {meta_key: 값}. empty 는 None (라벨 값을 지운다), illegible 은 무시.
+    날짜의 부분(date.month, date.day)은 검수로 받지 않는다 — 날짜는 파일명·라벨이 정한다 (tasks/0004 4.3)."""
+    mf = template.review_meta_fields()
     if not mf:
         return {}
     reviews = effective(con, field_ids=[field_id_of(page_id, name) for name in mf])
@@ -224,7 +225,8 @@ def meta_from_reviews(con: sqlite3.Connection, page_id: str, template) -> dict:
 
 
 def page_meta(con: sqlite3.Connection, site, source_name: str, page_no: int, page_id: str, template) -> dict:
-    """쪽의 메타. 우선순위: 검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙 (tasks/0002 4.1). 날짜는 검수로 받지 않는다."""
+    """쪽의 메타 중 사람·파일명에서 온 것. 우선순위: 검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙 (tasks/0002 4.1).
+    날짜는 검수로 받지 않는다. 기계가 읽은 값까지 넣은 최종 값과 출처는 doc_page_meta (pagemeta.py)."""
     meta = site.page_meta(source_name, page_no)
     for k, v in meta_from_reviews(con, page_id, template).items():
         if v is None:
@@ -263,6 +265,10 @@ def save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
             frow.update(has_value=frow["has_value_raw"], value_final=handler.machine_final(frow))
         eff = effective(con, field_ids=[review.field_id]).get(review.field_id, review)
         upsert(con, "doc_field", apply_verdict(frow, eff))
+        if row["region"] == "fields" and tpl is not None and row["field_name"] in tpl.meta_fields():
+            from ..pagemeta import refresh_page
+
+            refresh_page(con, site, row["page_id"])          # 쪽 메타(doc_page_meta)부터 — 핸들러는 그 최종 값을 읽는다
         handler.on_review(con, site, settings, review.field_id)
         update_document_status(con, row["document_id"])
         applied = True
@@ -272,15 +278,17 @@ def save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
 
 # ── 현황 ───────────────────────────────────────────────────────────────────
 def stats(con: sqlite3.Connection, site=None) -> dict:
-    """얼마나 했는지: 유효한 검수의 판정별·양식별·날짜별 건수, 검수자별 기록 수, bbox 가 달라진 기록 수,
-    (site 가 있으면) 분할별 건수와 날짜 수."""
+    """얼마나 했는지: 유효한 검수의 판정별·양식별·날짜별 건수, 검수자별 기록 수, bbox 가 달라진 기록 수, ✓ 검수(체크 칸 수와
+    행 수 — 행 하나 = 유·무 두 칸), (site 가 있으면) 분할별 건수와 날짜 수."""
     eff = effective(con)
     by_verdict: dict[str, int] = {}
     by_template: dict[str, int] = {}
     by_date: dict[str, int] = {}
     bbox_changed = not_in_db = 0
     dates = dict(con.execute("SELECT page_id, work_date FROM doc_page"))
-    fields = {r["field_id"]: r for r in con.execute("SELECT field_id, x0, y0, x1, y1 FROM doc_field")}
+    fields = {r["field_id"]: r for r in con.execute("SELECT field_id, kind, x0, y0, x1, y1 FROM doc_field")}
+    check_rows: set[tuple] = set()
+    check_fields = 0
     for fid, rv in eff.items():
         by_verdict[rv.verdict] = by_verdict.get(rv.verdict, 0) + 1
         by_template[rv.template or "unknown"] = by_template.get(rv.template or "unknown", 0) + 1
@@ -291,6 +299,9 @@ def stats(con: sqlite3.Connection, site=None) -> dict:
             not_in_db += 1
         elif rv.bbox and list(rv.bbox) != [f["x0"], f["y0"], f["x1"], f["y1"]]:
             bbox_changed += 1
+        if f is not None and f["kind"] == "checkmark":
+            check_fields += 1
+            check_rows.add((rv.page_id, rv.region, rv.row_no))
     by_reviewer = dict(con.execute("SELECT reviewer, COUNT(*) FROM doc_review GROUP BY 1 ORDER BY 1"))
     by_split: dict[str, dict] = {}
     if site is not None:
@@ -304,7 +315,8 @@ def stats(con: sqlite3.Connection, site=None) -> dict:
     return {"records": con.execute("SELECT COUNT(*) FROM doc_review").fetchone()[0], "fields": len(eff),
             "by_verdict": dict(sorted(by_verdict.items())), "by_template": dict(sorted(by_template.items())),
             "by_date": dict(sorted(by_date.items())), "by_reviewer": by_reviewer,
-            "bbox_changed": bbox_changed, "fields_not_in_db": not_in_db, "by_split": by_split}
+            "bbox_changed": bbox_changed, "fields_not_in_db": not_in_db, "by_split": by_split,
+            "checks": {"fields": check_fields, "rows": len(check_rows)}}
 
 
 def effective_with_split(con: sqlite3.Connection, site) -> list[tuple[Review, str, str | None]]:

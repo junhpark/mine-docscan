@@ -1,6 +1,6 @@
 # 작업 지시서 0003 — 숫자 인식기 (운반 횟수)
 
-상태: **단계 1–6 완료** (2026-10-03, 브랜치 `feat/digit-recognizer` — PR 로 검토 중). 8절은 사람의 일이다. 달라진 점은 12절.
+상태: **단계 1–6 완료** (2026-10-04, PR #5). 8절은 사람의 일이다. 달라진 점은 12절.
 범위나 순서를 바꾸려면 코드보다 이 파일을 먼저 고친다.
 관련: [ROADMAP.md](../ROADMAP.md) M3, [0002](0002-full-archive-and-evalset.md),
 [ADR 0003](../decisions/0003-pluggable-recognizer.md), [ADR 0006](../decisions/0006-show-discrepancies.md),

@@ -27,6 +27,14 @@ backend = "null"             # 등록된 인식 백엔드 이름 (minedocscan in
 # model = "digits-v1"        # 이름 또는 모델 폴더 경로. 없으면 run 이 시작할 때 멈춘다
 # auto_accept_conf = 0.97    # (선택) 모델 카드의 자동 적재 기준 대신. 우선순위: 이것 > 카드 > [pipeline] auto_accept_conf
 
+# 표 밖 필드(쪽 메타)의 모델 (docs/SITE_PACK.md "메타 필드 모델"). 키마다 models/<이름> — 모델 카드의 meta.keys 에 있는 키만.
+# 없는 키는 지금처럼 라벨·검수로만 정한다. 기계 값은 메타의 맨 아래: 라벨·검수가 있으면 대조만 한다
+# [recognize.meta]
+# vehicle_no   = "veh-v1"
+# operator     = "op-v1"
+# "date.month" = "date-v1"   # 손으로 쓴 월·일 — 쪽의 날짜와 대조만 한다
+# "date.day"   = "date-v1"
+
 [correct]
 backend = "none"
 

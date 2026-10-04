@@ -27,8 +27,13 @@ class SitePack:
         cfg_path = self.root / "site.toml"
         self.config: dict = {}
         if cfg_path.exists():
-            with open(cfg_path, "rb") as f:
-                self.config = tomllib.load(f)
+            try:
+                with open(cfg_path, "rb") as f:
+                    self.config = tomllib.load(f)
+            except tomllib.TOMLDecodeError as e:
+                from ..config import ConfigError
+
+                raise ConfigError(f"site.toml 을 읽을 수 없습니다 ({cfg_path}): {e}") from e
         self.name: str = self.config.get("site", {}).get("name", self.root.name)
         self.templates: dict[str, Template] = {}
         for p in sorted((self.root / "templates").glob("*/template.yaml")):

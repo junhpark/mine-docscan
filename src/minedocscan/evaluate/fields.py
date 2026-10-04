@@ -23,6 +23,7 @@ from __future__ import annotations
 import sqlite3
 
 from .metrics import auto_rate, corpus_cer, field_accuracy, normalize
+from .stats import wilson
 
 TARGETS = ("final", "raw")
 
@@ -82,8 +83,6 @@ def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final
 
 def auto_error(machine: list[tuple]) -> dict:
     """machine: [(status_raw, backend, 기계의 답, 정답)]. 인식기가 자동 적재한 칸 중 정답과 다른 것."""
-    from ..recognize.digits.calib import wilson
-
     auto = [(a, t) for st, b, a, t in machine if st == "auto" and b not in ("ink", "template")]
     wrong = sum(normalize(a) != normalize(t) for a, t in auto)
     lo, hi = wilson(wrong, len(auto))
