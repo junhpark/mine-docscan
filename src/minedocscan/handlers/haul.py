@@ -23,10 +23,10 @@ from .base import (
     FormHandler,
     PageContext,
     apply_reviews,
-    auto_threshold,
+    as_int,
     field_id,
     field_row,
-    number_status,
+    number_row,
     recognize,
     trips_max,
 )
@@ -64,22 +64,8 @@ class HaulHandler(FormHandler):
         for o in ctx.obs:
             c = o.cell
             if _table_number(c):
-                r = recs.get(id(o))
-                trips, conf, status, raw, has = None, None, "auto", "", False
-                if r is not None:
-                    raw, conf = r.text, r.confidence
-                    trips = _as_trips(r.text)
-                    if r.answer is not None:                     # 숫자 인식기: 4.4 의 표 (빈 칸 자동 적재, 범위, 거절)
-                        # 범위([haul] trips_max)는 운반 횟수 칸만 — 같은 쪽의 다른 숫자 칸(곁표)에는 대지 않는다
-                        has, status = number_status(r, ctx.settings, max_trips if c.region == haul_region else None)
-                    else:                                        # 예전 규칙 (null·oracle): 숫자로 읽혔고 신뢰도가 높으면
-                        has = True
-                        ok = trips is not None and r.confidence >= auto_threshold(r, ctx.settings)
-                        status = "auto" if ok else "pending"
-                rows.append(field_row(ctx, o, has_value=has, value_raw=raw,
-                                      value_final=None if trips is None else str(trips), confidence=conf,
-                                      candidates=r.candidates if r else None,
-                                      backend=r.backend if r else "ink", review_status=status))
+                # 범위([haul] trips_max)는 운반 횟수 칸만 — 같은 쪽의 다른 숫자 칸(곁표)에는 대지 않는다
+                rows.append(number_row(ctx, o, recs.get(id(o)), max_trips if c.region == haul_region else None))
                 if c.region == haul_region:
                     haul_cells.append((o, rows[-1]["field_id"]))
             elif c.kind == "printed":
@@ -167,8 +153,7 @@ def _table_number(c) -> bool:
             and not (c.region == "fields" and c.col_meta.get("meta_key") in DATE_PARTS))
 
 
-def _as_trips(text: str | None) -> int | None:
-    return int(text) if text is not None and text.strip().isdigit() else None
+_as_trips = as_int
 
 
 def haul_values(frow: dict) -> dict:

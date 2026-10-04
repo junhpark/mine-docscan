@@ -128,6 +128,28 @@ def number_status(r: Recognition, settings: Settings, max_value: int | None = No
     return True, "pending"
 
 
+def as_int(text: str | None) -> int | None:
+    """숫자 칸의 값 → 정수. 숫자열이 아니면 None."""
+    return int(text) if text is not None and text.strip().isdigit() else None
+
+
+def number_row(ctx: PageContext, o: CellObs, r: Recognition | None, max_value: int | None = None) -> dict:
+    """덩어리 배정으로 값 유무를 정하는 정수 칸(운반 횟수, 작업량)의 doc_field 행. r 이 None 이면 잉크가 없는 칸 — 빈 칸으로 확정.
+    value_final 은 읽은 숫자열을 정수로 (앞의 0 을 뗀다), 숫자가 아니면 None. max_value: 범위 검사 (운반 횟수 칸만 — trips_max)."""
+    val, conf, status, raw, has = None, None, "auto", "", False
+    if r is not None:
+        raw, conf = r.text, r.confidence
+        val = as_int(r.text)
+        if r.answer is not None:                     # 숫자 인식기: tasks/0003 4.4 의 표 (빈 칸 자동 적재, 범위, 거절)
+            has, status = number_status(r, ctx.settings, max_value)
+        else:                                        # 예전 규칙 (null·oracle): 숫자로 읽혔고 신뢰도가 높으면
+            has = True
+            ok = val is not None and r.confidence >= auto_threshold(r, ctx.settings)
+            status = "auto" if ok else "pending"
+    return field_row(ctx, o, has_value=has, value_raw=raw, value_final=None if val is None else str(val), confidence=conf,
+                     candidates=r.candidates if r else None, backend=r.backend if r else "ink", review_status=status)
+
+
 class FormHandler:
     """기본 핸들러: 모든 셀을 doc_field 에만 적재한다 (업무 테이블 없음)."""
 

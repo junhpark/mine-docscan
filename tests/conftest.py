@@ -233,3 +233,46 @@ def meta_mislabeled(meta_synth, meta_truth, tmp_path_factory) -> dict:
     first = sorted(meta_synth.scans.glob("*.pdf"))[0]                     # 첫날만 (틀린 라벨 둘이 그날의 쪽이다)
     assert all(src.startswith(first.stem + "#") for src in wrong)
     return meta_run(meta_synth, tmp_path_factory.mktemp("meta_mislabeled"), labels=labels, inputs=[first]) | {"wrong": wrong}
+
+
+# ── 장비 가동 일보 (tasks/0005) ─────────────────────────────────────────────
+@pytest.fixture(scope="session")
+def usage_synth(tmp_path_factory):
+    """합성 가동 일보 두 종만의 3일치 (점검표·운반 쪽 없이 — tools/synth_usage.py)."""
+    return generate(tmp_path_factory.mktemp("usage_synth"), days=3, seed=0, usage_only=True)
+
+
+@pytest.fixture(scope="session")
+def usage_run(usage_synth, tmp_path_factory) -> dict:
+    """usage_synth 를 정답 인식기(oracle)로 돌린 것: 정수 칸(작업량)·글자 칸은 읽고, 소수·시각 칸(계기·근무 시각)은 읽지 않는다
+    (잉크가 있으면 검수 대기). 이 DB 에 쓰지 않는다 (쓸 시험은 clone_db 와 다른 검수 파일로)."""
+    root = tmp_path_factory.mktemp("usage_run")
+    answers = load_answers_json(usage_synth.answers_path)
+    settings = Settings(site=usage_synth.site, archive_root=usage_synth.scans, work_root=root / "work",
+                        reviews=root / "reviews.jsonl", save_aligned=False)
+    pipe = Pipeline(settings, recognizer=OracleRecognizer(answers))
+    pipe.run([usage_synth.scans])
+    return {"root": root, "settings": settings, "pipe": pipe, "answers": answers}
+
+
+def usage_fields(con) -> list:
+    """가동 일보 쪽의 손으로 쓰는 칸·필드 전부: (field_id, 정답 키)."""
+    from minedocscan.tools.synth_usage import T_LOADER, T_USAGE
+
+    return con.execute(
+        "SELECT f.field_id, d.source_name || '#' || p.page_no AS source, p.template_name, f.region, f.field_name, f.row_key "
+        "FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
+        "WHERE p.template_name IN (?, ?) AND f.kind LIKE 'handwritten%' ORDER BY f.field_id", (T_USAGE, T_LOADER)).fetchall()
+
+
+def review_usage(con, site, settings, answers, regions=None) -> int:
+    """가동 일보의 칸·필드를 정답대로 검수한다 (값이 있으면 value, 없으면 empty). regions: 이 표(와 "fields")만."""
+    n = 0
+    for f in usage_fields(con):
+        if regions is not None and f["region"] not in regions:
+            continue
+        text = answers.get((f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"] or ""))
+        rv = Review(f["field_id"], "value", text, "jp") if text else Review(f["field_id"], "empty", reviewer="jp")
+        save(con, site, settings, rv)
+        n += 1
+    return n

@@ -35,6 +35,8 @@ PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "insp_daily": ("inspection_id",),
     "prod_haul": ("haul_id",),
     "xcheck_haul": ("work_date", "slot", "material", "level"),
+    "eq_usage_daily": ("page_id",),
+    "prod_tally": ("tally_id",),
 }
 
 

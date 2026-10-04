@@ -20,6 +20,7 @@ import json
 import re
 import sqlite3
 import sys
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -126,9 +127,11 @@ class ReviewApp:
             raise ApiError(400, "같은 칸이 두 번 들어 있습니다")
         at = now_iso()
         saved = []
-        for r in reviews:
-            r.reviewed_at = at
-            out = save(self.con, self.site, self.settings, r)
+        for r in (replace(r, reviewed_at=at, review_id="") for r in reviews):     # review_id 는 저장 시각에서 다시 만든다
+            try:
+                out = save(self.con, self.site, self.settings, r)
+            except FormatError as e:                                   # 위에서 검사했으므로 오지 않는다 — 와도 500 이 아니라 400
+                raise ApiError(400, str(e)) from e
             saved.append({"field_id": r.field_id, "verdict": r.verdict, "value": r.value, "review_id": out["review_id"],
                           "applied": out["applied"]})
         return {"ok": True, "saved": saved, "reviewed_at": at}

@@ -4,11 +4,13 @@ from __future__ import annotations
 from .base import FormHandler, PageContext
 from .haul import HaulHandler
 from .inspection import InspectionHandler
+from .usage import UsageHandler
 
 REGISTRY: dict[str, type[FormHandler]] = {
     "generic": FormHandler,
     "inspection": InspectionHandler,
     "haul": HaulHandler,
+    "usage": UsageHandler,
 }
 
 

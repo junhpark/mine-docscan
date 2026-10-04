@@ -16,6 +16,8 @@ import re
 import tomllib
 from pathlib import Path
 
+from .equipment import META_KEY as EQUIPMENT_KEY
+from .equipment import equipment_id, master_keys
 from .template import Template, TemplateError
 
 
@@ -40,6 +42,7 @@ class SitePack:
             t = Template(p)
             self.templates[t.name] = t
         _check_families(self.templates)
+        self.equipment_aliases: dict[str, str] = _equipment_aliases(self.config, self.templates)
         self._labels: dict | None = None
         pat = self.config.get("ingest", {}).get("date_from_filename")
         self._date_re = re.compile(pat) if pat else None
@@ -97,6 +100,22 @@ class SitePack:
         """현장의 장비 구분 → ISO 23725 Table 11 장비 유형. 대응이 없으면 None."""
         return self.config.get("equipment", {}).get("iso_type", {}).get(site_category) or None
 
+    def equipment_id_of(self, name: str | None) -> str | None:
+        """적힌 장비명 → 장비 ID. 대응표([equipment.aliases])에 그대로 있는 이름만 — 비슷한 이름으로 맞추지 않는다 (tasks/0005 4.5)."""
+        if name is None:
+            return None
+        key = self.equipment_aliases.get(str(name).strip())
+        return None if key is None else equipment_id(key)
+
+    def known_values(self, key: str) -> list[str]:
+        """사이트 팩이 아는 그 키의 값: 템플릿에 인쇄된 값(행렬 머리글의 header_<키> — 나온 만큼) + 장비명이면 대응표의 이름.
+        검수 화면의 후보 목록이 쓴다 (나온 횟수 순으로 세고, 라벨·검수에 나온 값은 거기서 더한다)."""
+        out = [str(c[f"header_{key}"]) for t in self.templates.values() for reg in t.regions for c in reg["columns"]
+               if c.get(f"header_{key}") not in (None, "")]
+        if key == EQUIPMENT_KEY:
+            out += list(self.equipment_aliases)
+        return out
+
     def option(self, section: str, key: str, default=None):
         cur = self.config
         for part in section.split("."):
@@ -118,3 +137,23 @@ def _check_families(templates: dict[str, Template]) -> None:
                 if a0 <= b1 and b0 <= a1:
                     raise TemplateError(f"계열 '{fam}' 의 {a.name} 과 {b.name} 의 유효 기간이 겹칩니다 "
                                         f"({a0}~{a1}, {b0}~{b1}). 옛 판에 valid_to, 새 판에 valid_from 을 적으세요")
+
+
+def _equipment_aliases(config: dict, templates: dict[str, Template]) -> dict[str, str]:
+    """site.toml 의 [equipment.aliases]: 적힌 이름 → 장비 키. 키는 마스터(점검표 템플릿의 장비 행)에 있어야 한다 — 없으면 오류.
+    오류 메시지에 이름·장비 키를 찍지 않는다 (몇 번째 항목인지만)."""
+    from ..config import ConfigError
+
+    raw = (config.get("equipment") or {}).get("aliases") or {}
+    if not isinstance(raw, dict):
+        raise ConfigError("site.toml 의 [equipment.aliases] 는 표(이름 = \"장비 키\")여야 합니다")
+    master = master_keys(templates.values())
+    out: dict[str, str] = {}
+    for i, (name, key) in enumerate(raw.items(), 1):
+        if not isinstance(key, str) or not key.strip():
+            raise ConfigError(f"site.toml 의 [equipment.aliases] {i}번째 항목: 장비 키는 문자열이어야 합니다")
+        if key not in master:
+            raise ConfigError(f"site.toml 의 [equipment.aliases] {i}번째 항목이 마스터에 없는 장비 키를 가리킵니다 "
+                              f"(마스터 = 점검표 템플릿의 장비 행 {len(master)}개)")
+        out[str(name).strip()] = key
+    return out

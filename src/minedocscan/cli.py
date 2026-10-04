@@ -730,7 +730,10 @@ def _recognizer_train_meta(a, s: Settings) -> int:
             if a.synthetic_meta:
                 from .tools.synth_meta import write_meta_crops
 
-                write_meta_crops(tmp, keys, a.synthetic_meta, seed=a.seed)
+                try:
+                    write_meta_crops(tmp, keys, a.synthetic_meta, seed=a.seed)
+                except ValueError as e:                         # 합성 값이 없는 키
+                    raise SystemExit(f"--synthetic-meta: {e}") from e
                 crops = tmp
             card = train_meta(crops, out, args, split_salt=site.split_salt if site else "synthetic",
                               allow_in_repo=a.allow_in_repo)

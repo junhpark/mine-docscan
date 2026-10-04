@@ -245,9 +245,12 @@ def field_format(site, template_name: str | None, region: str, field_name: str) 
 
 
 def normalized_value(site, row, review: Review) -> str:
-    """verdict=value 의 값을 그 칸의 형식으로 정규화한다 (tasks/0005 4.1). 맞지 않으면 FormatError — 파일에 쓰기 전에."""
-    if review.verdict != "value" or row is None:
+    """verdict=value 의 값을 그 칸의 형식으로 정규화한다 (tasks/0005 4.1). 맞지 않으면 FormatError — 파일에 쓰기 전에.
+    칸이 아직 DB 에 없으면(그 쪽이 아직 적재되지 않았다) 검수에 적힌 문맥(양식·표·칸)으로 형식을 찾는다."""
+    if review.verdict != "value":
         return review.value
+    if row is None:
+        return normalize(field_format(site, review.template or None, review.region, review.field_name), review.value)
     return normalize(field_format(site, row["template_name"], row["region"], row["field_name"]), review.value)
 
 

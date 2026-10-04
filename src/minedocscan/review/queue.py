@@ -271,7 +271,8 @@ def _meta_check(con, site):
         "SELECT m.page_id, m.meta_key, m.value, m.source, m.field_id, m.machine_value, m.machine_confidence, m.machine_status, "
         "m.check_result, p.page_no, p.work_date, p.template_name, d.source_name FROM doc_page_meta m "
         "JOIN doc_page p ON m.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
-        "WHERE m.field_id IS NOT NULL AND m.meta_key NOT LIKE 'date%' AND m.machine_status IN ('auto', 'unlisted') "
+        "WHERE m.field_id IS NOT NULL AND m.meta_key NOT IN ('date', 'date.month', 'date.day') "
+        "AND m.machine_status IN ('auto', 'unlisted') "
         "ORDER BY p.work_date, d.source_name, p.page_no, m.meta_key").fetchall()
     reviewed = effective(con, field_ids=[r["field_id"] for r in rows])
 
@@ -341,14 +342,11 @@ def _checks(con, site, n: int, seed: int):
 
 
 def _candidates(con, site, key: str) -> list[str]:
-    """키의 후보 값: 행렬 템플릿 머리글(header_<key>) + 라벨과 검수에 나온 값. 많이 나온 순."""
+    """키의 후보 값: 사이트 팩이 아는 값(행렬 머리글 header_<key>, 장비명이면 [equipment.aliases] 의 이름 — SitePack.known_values)
+    + 라벨과 검수에 나온 값. 많이 나온 순."""
     counts: dict[str, int] = {}
-    for t in site.templates.values():
-        for reg in t.regions:
-            for c in reg["columns"]:
-                v = c.get(f"header_{key}")
-                if v not in (None, ""):
-                    counts[str(v)] = counts.get(str(v), 0) + 1
+    for v in site.known_values(key):
+        counts[v] = counts.get(v, 0) + 1
     for lab in site.labels.values():
         v = lab.get(key)
         if v not in (None, ""):

@@ -6,8 +6,8 @@
 키마다:
   · 기계 값의 정확도 (기계가 읽은 쪽 중 — 잉크가 없어 읽지 않은 쪽은 틀린 것으로 센다)
   · 자동 적재율, 자동 적재 오류율 (분자·분모·윌슨 구간), 목록에 없는 값으로 답한 수
-  · 배차가 바뀐 쪽만의 정확도 — 그 작성자의 가장 흔한 차가 아닌 차를 탄 쪽 (사람 값으로 정한다). 차량번호를 글씨체로 외운
-    모델은 여기서 틀린다
+  · 배차가 바뀐 쪽만의 정확도 — 그 작성자의 가장 흔한 차(장비)가 아닌 차를 탄 쪽 (사람 값으로 정한다). 차량번호를 글씨체로
+    외운 모델은 여기서 틀린다
 그리고 일보에서: 기계 값만으로 정한 자리가 사람 값으로 정한 자리와 같은 쪽의 비율 (validate/crosscheck.assign_slots 그대로).
 값(이름·차량번호)은 내지 않는다 — 수만.
 """
@@ -52,15 +52,23 @@ def evaluate_meta(con: sqlite3.Connection, split: str = "all", site=None) -> dic
     return {"split": split, "keys": keys, "slots": slot_agreement(con, split, site)}
 
 
+WRITER = "operator"                       # 쪽을 쓰는 사람의 키 — 다른 키(차량번호·장비명 …)의 "평소 값"을 이 사람마다 센다
+NOT_PAIRED = ("date", "date.month", "date.day")
+
+
 def _changed_pages(human: dict) -> set[str]:
-    """배차가 바뀐 쪽: 사람 값으로 본 그 작성자의 가장 흔한 차가 아닌 차를 탄 쪽."""
-    pages = {p for (p, k) in human if k in ("operator", "vehicle_no")}
-    pairs = {p: (human.get((p, "operator")), human.get((p, "vehicle_no"))) for p in pages}
-    usual: dict[str, Counter] = {}
-    for op, veh in pairs.values():
-        if op and veh:
-            usual.setdefault(op, Counter())[veh] += 1
-    return {p for p, (op, veh) in pairs.items() if op and veh and usual[op].most_common(1)[0][0] != veh}
+    """배차가 바뀐 쪽: 사람 값으로 본 그 작성자의 가장 흔한 값이 아닌 값을 적은 쪽 — 작성자와 짝이 되는 키(차량번호, 장비명 …)마다.
+    한 키라도 평소와 다르면 바뀐 쪽이다. 키 이름을 고르지 않는다: 작성자·날짜가 아닌 키는 전부 짝이다."""
+    writer = {p: v for (p, k), v in human.items() if k == WRITER and v}
+    keys = {k for (_p, k) in human if k != WRITER and k not in NOT_PAIRED}
+    changed: set[str] = set()
+    for key in sorted(keys):
+        pairs = {p: (writer[p], v) for (p, k), v in human.items() if k == key and v and p in writer}
+        usual: dict[str, Counter] = {}
+        for op, val in pairs.values():
+            usual.setdefault(op, Counter())[val] += 1
+        changed |= {p for p, (op, val) in pairs.items() if usual[op].most_common(1)[0][0] != val}
+    return changed
 
 
 def slot_agreement(con: sqlite3.Connection, split: str = "all", site=None) -> dict:

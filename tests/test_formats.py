@@ -24,7 +24,7 @@ from minedocscan.recognize import OracleRecognizer, load_answers_json
 from minedocscan.recognize.digits.data import read_crops
 from minedocscan.review.export import export_crops
 from minedocscan.review.server import ApiError, ReviewApp
-from minedocscan.review.store import Review, export_answers, load, save
+from minedocscan.review.store import Review, export_answers, load, make_review_id, save
 from minedocscan.tools.synth import T_LOG, generate
 from test_review_store import TABLES, _dump
 
@@ -155,6 +155,15 @@ def test_bad_values_never_reach_the_review_file(decimal_day, tmp_path):
     assert [s["value"] for s in out["saved"]] == ["3.5", ""]
     recs = [rv for _seq, rv in load(settings.reviews)[0]]
     assert [(rv.field_id, rv.value) for rv in recs] == [(a, "3.5"), (b, "")] and recs[0].reviewed_at == recs[1].reviewed_at
+    assert all(rv.review_id == make_review_id(rv.field_id, rv.reviewed_at, rv.reviewer) for rv in recs)
+    # 아직 적재되지 않은 쪽의 칸(DB 에 없다): 검수에 적힌 문맥(양식·표·칸)으로 형식을 찾아 거절한다
+    ghost = Review("0000000000000000-p9:haul:trips_night:0", "value", "3,5", "jp", template=T_LOG, region="haul",
+                   field_name="trips_night")
+    with pytest.raises(FormatError):
+        save(con, site, settings, ghost)
+    assert len(load(settings.reviews)[0]) == 2
+    assert save(con, site, settings, replace(ghost, value="03.50", review_id=""))["applied"] is False
+    assert load(settings.reviews)[0][-1][1].value == "3.50"
     q = app.queue_json({})
     assert q["formats"]["decimal"]["chars"] == "0-9." and "1234.5" in q["formats"]["reading"]["hint"]
     assert {c["format"] for it in q["items"] for c in it["cells"] if c["field_id"] in (a, b)} <= {"decimal"}
