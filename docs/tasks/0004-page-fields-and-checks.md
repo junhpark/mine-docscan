@@ -1,6 +1,6 @@
 # 작업 지시서 0004 — 표 밖 필드 읽기와 ✓ 판정의 정답
 
-상태: **진행 중** (2026-10-04 작성, 브랜치 `feat/page-fields`). 범위나 순서를 바꾸려면 코드보다 이 파일을 먼저 고친다.
+상태: **완료** (PR #7, 브랜치 `feat/page-fields`). 8절은 사람의 일. 범위나 순서를 바꾸려면 코드보다 이 파일을 먼저 고친다.
 관련: [ROADMAP.md](../ROADMAP.md) M2·M3, [0002](0002-full-archive-and-evalset.md), [0003](0003-digit-recognizer.md),
 [ADR 0004](../decisions/0004-slot-as-join-key.md), [ADR 0006](../decisions/0006-show-discrepancies.md),
 [ADR 0008](../decisions/0008-review-records.md), [ADR 0011](../decisions/0011-recognizer-input-and-runtime.md),
@@ -362,3 +362,13 @@ PR 이 합쳐진 뒤, 순서대로.
   같다 — 시험은 그렇게 비교한다.
 - 서버: 화면이 응답을 기다리지 않고 넘어가 끊긴 연결(BrokenPipe)은 조용히 넘긴다 (빠르게 넘기면 traceback 을 찍었다 — 브라우저 확인 중 발견).
 - 시험용 모델 두 개(`meta-digits`, `meta-operator`)를 README 의 명령으로 다시 만들어도 단계 5 의 문턱을 넘는지 `train` 시험이 확인한다.
+- **날짜 대조**(4.3 보충): 자동 적재된 부분 하나라도 쪽의 날짜와 다르면 `mismatch`, 읽은 부분이 전부 자동 적재이고 같으면 `match`, 그 밖은
+  `unread`. 처음에는 전부 자동 적재일 때만 대조했는데, 섞인 쪽의 월 "1" 이 괘선 제거에 지워져 읽히지 않자 그 쪽이 드러나지 않았다.
+- **검수에서 빈 칸**이라고 답한 메타 키는 (값 없음, 출처 `review`) — 기계 값이 그 자리를 채우지 못하고 `page-fields` 도 다시 묻지 않는다
+  (4.3 의 우선순위를 지키려고 — 적대적 검토에서 나왔다).
+- `regress` 는 설정의 `[recognize.meta]` 를 쓰지 않는다 — 기준은 `recognizer` 하나로 정해진다.
+- **메타 필드 합성에는 점검표 쪽·템플릿이 없다** (6절의 시험 시간 — 메타 시험에 쓰지 않는 쪽). 난수는 같은 만큼 써서 나머지 쪽의 글씨는 그대로다.
+- 시험 시간(6절): 같은 기계에서 main 179.8 s → 232.5 s (시험별 시간 합 1.29배, 벽시계 1.30–1.32배) — 경계다. 새 시험은 세션의 실행
+  (`meta_null`, `meta_nolabels`, `meta_mislabeled`, `null_run`, `reviewed_day`)을 복사해서 쓴다.
+- `pytest -m train` 의 0003 시험 "CPU 에서 2분 안에"는 이 PR 을 만든 컨테이너에서 main 도 147 s 로 떨어진다 (기계가 그때보다 느리다).
+  CI 는 이 확인을 건너뛴다. 기준은 바꾸지 않았다.

@@ -112,7 +112,8 @@ DB             운영에서는 PostgreSQL (예정). 지금은 WORK_ROOT 의 SQLi
 일보의 차량·작성자, 자리, `eq_assignment_obs` 는 이 테이블의 최종 값에서 만든다.
 
 - 날짜는 검수로 받지 않는다 (파일명·라벨이 정한다). 대신 `date.month`·`date.day` 필드(손으로 쓴 월·일)를 두면 기계가 읽어 쪽의 날짜와
-  **대조만** 한다 — 읽은 부분이 전부 자동 적재일 때만. 다른 날의 쪽이 묶음에 섞인 것을 찾는 데 쓴다 (`pages --meta-mismatch --meta-key date.day`).
+  **대조만** 한다 — 자동 적재된 부분 하나라도 다르면 `mismatch`(월 "1" 처럼 획이 괘선과 함께 지워져 한 부분을 못 읽어도), 전부 자동 적재이고
+  같으면 `match`, 그 밖은 `unread`. 다른 날의 쪽이 묶음에 섞인 것을 찾는 데 쓴다 (`pages --meta-mismatch --meta-key date.day`).
 - 메타 필드를 검수하면 `review/store.save()` 가 그 쪽의 `doc_page_meta` 를 먼저 다시 정하고(`pagemeta.refresh_page`), 핸들러는 그 최종 값을 읽는다.
 
 ### 양식의 판
