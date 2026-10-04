@@ -117,7 +117,7 @@ def test_reviews_take_over_from_empty_labels(meta_synth, meta_null, tmp_path):
     # 검수에서 빈 칸이면 값이 없어진다 (라벨이 있어도 지운다)
     save(con, live.site, settings, Review(field_id_of(pid0, "operator"), "empty", reviewer="jp", reviewed_at="2030-03-01T00:02:00Z"))
     row = _meta(con, pid0)[(pid0, "operator")]
-    assert row["value"] is None and row["source"] is None
+    assert row["value"] is None and row["source"] == "review"
     assert {r[0] for r in con.execute("SELECT DISTINCT operator FROM prod_haul WHERE page_id=?", (pid0,))} == {None}
 
 

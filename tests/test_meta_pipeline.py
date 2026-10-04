@@ -101,7 +101,7 @@ def test_labels_win_and_a_wrong_label_shows_as_mismatch(meta_synth, meta_truth, 
     row = _meta(con)[(pid, "vehicle_no")]
     assert (row["source"], row["check_result"]) == ("review", "match")
     q2 = build_queue(con, "meta-check", site=run["pipe"].site)
-    assert q2["items"] == [] and q2["total"] == 0
+    assert q2["items"] == [] and (q2["total"], q2["done"]) == (1, 1)          # 끝난 것으로 센다 (분모가 줄지 않는다)
     # 명령줄: 값은 찍지 않는다
     out = run["settings"]
     assert main(["pages", "--meta-mismatch", "--site", str(out.site), "--work-root", str(out.work_root)]) == 0
@@ -158,6 +158,47 @@ def test_invariant_with_meta_models(meta_synth, meta_nolabels, tmp_path):
     after_m = {(r["page_id"], r["meta_key"]): (r["machine_value"], r["machine_confidence"], r["machine_status"])
                for r in con.execute("SELECT * FROM doc_page_meta")}
     assert after_f == before_f and after_m == before_m
+    # 검수에서 빈 칸이라고 답한 키는 비어 있다 — 기계 값이 채우지 않는다 (사람의 답이 이긴다)
+    for rv in plan:
+        if rv.verdict == "empty":
+            pid, key = rv.field_id.split(":fields:")[0], rv.field_id.split(":")[-2]
+            row = con.execute("SELECT * FROM doc_page_meta WHERE page_id = ? AND meta_key = ?", (pid, key)).fetchone()
+            assert (row["value"], row["source"]) == (None, "review"), key
+            items = build_queue(con, "page-fields", site=base.site)["items"]
+            assert not any(c["field_id"] == rv.field_id for it in items for c in it["cells"])     # 다시 묻지 않는다
+
+
+def test_meta_check_progress_and_label_date_and_regress(meta_synth, meta_truth, tmp_path):
+    """meta-check: 기계 값을 입력해 match 가 되어도 끝난 것으로 센다 (분모가 줄지 않는다), 읽을 수 없음도 끝. ISO 가 아닌 라벨 날짜는
+    쪽을 오류로 만들지 않는다 (월·일 대조만 하지 않는다). regress 는 [recognize.meta] 를 쓰지 않는다."""
+    labels = json.loads(json.dumps(meta_truth))
+    srcs = sorted(k for k in labels if "#" in k)
+    for src in srcs[:3]:
+        labels[src]["vehicle_no"] = "4999"                                 # 기계와 다른 라벨 셋
+    run = meta_run(meta_synth, tmp_path / "mc", labels=labels)
+    con, site = run["pipe"].con, run["pipe"].site
+    q = build_queue(con, "meta-check", site=site)
+    total = q["total"]
+    cells = [c for it in q["items"] for c in it["cells"] if c["meta_key"] == "vehicle_no"]
+    assert total >= 3 and len(cells) >= 3 and q["done"] == 0
+    settings = replace(run["settings"], reviews=tmp_path / "r.jsonl")
+    save(con, site, settings, Review(cells[0]["field_id"], "value", cells[0]["machine"]["value_raw"], "jp"))
+    save(con, site, settings, Review(cells[1]["field_id"], "illegible", reviewer="jp"))
+    q2 = build_queue(con, "meta-check", site=site)
+    assert (q2["total"], q2["done"]) == (total, 2)
+    assert not any(c["field_id"] in (cells[0]["field_id"], cells[1]["field_id"]) for it in q2["items"] for c in it["cells"])
+    # ISO 가 아닌 라벨 날짜
+    bad = json.loads(json.dumps(meta_truth))
+    doc = sorted(meta_synth.scans.glob("*.pdf"))[0].stem
+    bad[doc] = {"date": "2030.01.07"}
+    r2 = meta_run(meta_synth, tmp_path / "bad", labels=bad)
+    assert r2["pipe"].con.execute("SELECT COUNT(*) FROM doc_page WHERE status = 'error'").fetchone()[0] == 0
+    # regress: 메타 모델을 설정에 두어도 기준 실행은 메타 필드를 읽지 않는다
+    from minedocscan.evaluate.regression import run_regression
+
+    res = run_regression(run["settings"], site, update=True, inputs=[sorted(meta_synth.scans.glob("*.pdf"))[0].name])
+    pm = res["report"]["page_meta"]["vehicle_no"]
+    assert "machine" not in pm["by_source"] and pm["machine"] == {}
 
 
 def test_crop_level_answers_equal_pipeline_values(meta_labeled, tmp_path):

@@ -15,12 +15,15 @@
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 
 from .forms.template import DATE_PARTS, Template
 from .review.store import meta_from_reviews
 from .store.db import upsert
+
+ISO_DATE = re.compile(r"^(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})$")
 
 HUMAN_SOURCES = ("review", "label", "filename")
 MACHINE_STATUSES = ("auto", "pending", "unlisted", "empty")
@@ -49,7 +52,8 @@ def _clean(v) -> str | None:
 
 def human_values(con: sqlite3.Connection, site, source_name: str, page_no: int, page_id: str,
                  template: Template | None) -> dict[str, tuple[str, str]]:
-    """사람·파일명에서 온 값: {키: (값, 출처)}. 출처는 review | label | filename. 날짜의 부분은 날짜에서 만든다."""
+    """사람·파일명에서 온 값: {키: (값, 출처)}. 출처는 review | label | filename. 날짜의 부분은 날짜에서 만든다.
+    검수에서 빈 칸이면 (None, "review") — 라벨의 값을 지우고, 기계 값이 그 자리를 채우지도 못한다 (사람의 답이 이긴다)."""
     out: dict[str, tuple[str, str]] = {}
     d = site.date_from_filename(source_name)
     if d:
@@ -60,18 +64,18 @@ def human_values(con: sqlite3.Connection, site, source_name: str, page_no: int, 
                 out[k] = (_clean(v), "label")
     if template is not None:
         for k, v in meta_from_reviews(con, page_id, template).items():
-            if v is None:                                   # 검수에서 빈 칸: 라벨의 값을 지운다
-                out.pop(k, None)
+            if v is None:                                   # 검수에서 빈 칸: 라벨의 값을 지우고 기계 값도 막는다
+                out[k] = (None, "review")
             elif _clean(v) is not None:
                 out[k] = (_clean(v), "review")
-    if "date" in out and template is not None:
-        y, m, dd = out["date"][0].split("-")
+    keys = set(template.meta_fields().values()) if template is not None else set()
+    parts = ISO_DATE.match(out["date"][0] or "") if "date" in out and keys & set(DATE_PARTS) else None
+    if parts:                                               # ISO 가 아닌 날짜(라벨의 오타 등)면 월·일은 대조하지 않는다
         src = out["date"][1]
-        keys = set(template.meta_fields().values())
         if "date.month" in keys:
-            out["date.month"] = (str(int(m)), src)
+            out["date.month"] = (str(int(parts["m"])), src)
         if "date.day" in keys:
-            out["date.day"] = (str(int(dd)), src)
+            out["date.day"] = (str(int(parts["d"])), src)
     return out
 
 
@@ -95,7 +99,7 @@ def _check(human: tuple[str, str] | None, m: MachineRead | None) -> str:
 def _date_check(human: dict, machine: dict[str, MachineRead], keys: list[str]) -> str:
     """읽은 날짜의 부분이 전부 기준을 넘었을 때만 쪽의 날짜와 비교한다 (하나라도 못 넘으면 unread)."""
     parts = [k for k in DATE_PARTS if k in keys and k in machine]
-    if not parts or "date" not in human:
+    if not parts or "date" not in human or not all(k in human for k in parts):     # 날짜가 ISO 가 아니면 부분이 없다
         return "none"
     if not all(machine[k].status == "auto" for k in parts):
         return "unread"

@@ -98,8 +98,8 @@ def test_full_truth_review_makes_the_eval_table_of_the_hand_count(run, tmp_path)
     decided = sum(n for (m, _t), n in hand.items() if m != "판정 불가")
     assert (r["decided_accuracy"]["k"], r["decided_accuracy"]["n"]) == (right, decided)
     cu = r["column_unused"]
-    assert cu["pages"] == len(run["synth"].truth["days"]) and cu["agree"] == cu["pages"]
-    assert [p["machine_unused"] for p in cu["by_page"]] == ["inspection_column_unused" in d["scenarios"]
+    assert cu["dates"] == len(run["synth"].truth["days"]) and cu["agree"] == cu["dates"]
+    assert [p["machine_unused"] for p in cu["by_date"]] == ["inspection_column_unused" in d["scenarios"]
                                                             for d in run["synth"].truth["days"]]
     # 다시 열면: 전부 끝났고 행마다 전에 고른 답
     q = app.queue_json({})

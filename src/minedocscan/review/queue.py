@@ -215,7 +215,7 @@ def _page_fields(con, site, audit: int | None = None, seed: int = 0):
     items, done = [], 0
     for pg in pages:
         meta = _human_meta(con, pg["page_id"]) if audit else _final_meta(con, pg["page_id"])
-        missing = {name: key for name, key in metas[pg["template_name"]].items() if not meta.get(key)}
+        missing = {name: key for name, key in metas[pg["template_name"]].items() if key not in meta}
         if not missing:
             done += 1
             continue
@@ -232,14 +232,15 @@ def _page_fields(con, site, audit: int | None = None, seed: int = 0):
 
 
 def _final_meta(con, page_id: str) -> dict:
+    """정해진 키: 값이 있거나, 검수에서 빈 칸이라고 답한 키 (값 NULL, 출처 review — 다시 묻지 않는다)."""
     return {r[0]: r[1] for r in con.execute("SELECT meta_key, value FROM doc_page_meta WHERE page_id = ? "
-                                            "AND value IS NOT NULL", (page_id,))}
+                                            "AND (value IS NOT NULL OR source = 'review')", (page_id,))}
 
 
 def _human_meta(con, page_id: str) -> dict:
-    """사람·파일명에서 온 값만 (기계가 채운 값은 빠진다)."""
+    """사람·파일명에서 온 값만 (기계가 채운 값은 빠진다). 검수에서 빈 칸이라고 답한 키도 정해진 것으로."""
     return {r[0]: r[1] for r in con.execute(
-        "SELECT meta_key, value FROM doc_page_meta WHERE page_id = ? AND value IS NOT NULL "
+        "SELECT meta_key, value FROM doc_page_meta WHERE page_id = ? AND (value IS NOT NULL OR source = 'review') "
         f"AND source IN ({','.join('?' * len(HUMAN_SOURCES))})", (page_id, *HUMAN_SOURCES))}
 
 
@@ -259,18 +260,34 @@ def _stratified_pages(pages, n: int, seed: int) -> list:
 
 def _meta_check(con, site):
     """기계 값과 사람 값이 다른 (쪽, 키) — 날짜의 부분은 빼고 (날짜는 검수로 받지 않는다). 항목 = 쪽 하나, 셀마다 두 값.
-    이미 검수한 키(출처 review)는 끝난 것으로 센다. 입력한 값이 검수가 된다 — 기계 값이 맞았으면 그 값을, 라벨이 맞았으면 라벨 값을."""
+    입력한 값이 검수가 된다 — 기계 값이 맞았으면 그 값을, 라벨이 맞았으면 라벨 값을.
+    모집단 = 지금 mismatch 인 (쪽, 키) + 검수로 끝난 것 (그 필드에 유효한 검수가 있고, 라벨·파일명의 값이 기계 값과 달랐던 것 —
+    기계 값을 입력하면 match 가 되어 mismatch 에서 빠지므로). 유효한 검수(읽을 수 없음 포함)가 있으면 끝난 것으로 센다."""
+    from .store import effective
+
     rows = con.execute(
         "SELECT m.page_id, m.meta_key, m.value, m.source, m.field_id, m.machine_value, m.machine_confidence, m.machine_status, "
-        "p.page_no, p.work_date, p.template_name, d.source_name FROM doc_page_meta m JOIN doc_page p ON m.page_id = p.page_id "
-        "JOIN doc_document d ON p.document_id = d.document_id WHERE m.check_result = 'mismatch' AND m.field_id IS NOT NULL "
-        "AND m.meta_key NOT LIKE 'date%' ORDER BY p.work_date, d.source_name, p.page_no, m.meta_key").fetchall()
+        "m.check_result, p.page_no, p.work_date, p.template_name, d.source_name FROM doc_page_meta m "
+        "JOIN doc_page p ON m.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
+        "WHERE m.field_id IS NOT NULL AND m.meta_key NOT LIKE 'date%' AND m.machine_status IN ('auto', 'unlisted') "
+        "ORDER BY p.work_date, d.source_name, p.page_no, m.meta_key").fetchall()
+    reviewed = effective(con, field_ids=[r["field_id"] for r in rows])
+
+    def disagreed(r) -> bool:
+        if r["check_result"] == "mismatch":
+            return True
+        if r["field_id"] not in reviewed:
+            return False
+        before = site.page_meta(r["source_name"], r["page_no"]).get(r["meta_key"])     # 검수 전의 사람·파일명 값
+        return before not in (None, "") and str(before) != r["machine_value"]
+
+    rows = [r for r in rows if disagreed(r)]
     by_page: dict[str, list] = {}
     for r in rows:
         by_page.setdefault(r["page_id"], []).append(r)
     items, done = [], 0
     for pid, rs in by_page.items():
-        todo = [r for r in rs if r["source"] != "review"]
+        todo = [r for r in rs if r["field_id"] not in reviewed]
         done += len(rs) - len(todo)
         if not todo:
             continue
