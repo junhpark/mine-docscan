@@ -78,6 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--inspection-csv", metavar="DIR", help="점검표 정답 CSV 폴더 (YYMMDD.csv)")
     g.add_argument("--meta", action="store_true",
                    help="쪽 메타: 기계가 읽은 값 대 사람·파일명의 값 — 키마다 정확도·자동 적재율·자동 적재 오류율, 배차가 바뀐 쪽, 자리")
+    g.add_argument("--checks", action="store_true",
+                   help="✓ 판정: 기계의 답 대 검수(review serve --queue checks)로 정한 행의 답 — 표, 정확도, 판정 불가, column_unused")
     p.add_argument("--template", help="--inspection-csv 가 가리키는 템플릿 (기본: 핸들러가 inspection 인 유일한 템플릿)")
     p.add_argument("--target", choices=["final", "raw"], default="final",
                    help="final = 최종값(교정·검수 후), raw = 기계가 읽은 값. 검수값과 비교할 때는 raw")
@@ -114,10 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
     r = rsub.add_parser("serve", parents=[common], help="로컬 검수 화면 (127.0.0.1)")
-    r.add_argument("--queue", default="haul-numbers", choices=["haul-numbers", "mismatch", "pending", "page-fields", "meta-check"])
+    r.add_argument("--queue", default="haul-numbers",
+                   choices=["haul-numbers", "mismatch", "pending", "page-fields", "meta-check", "checks"])
     r.add_argument("--audit", type=int, metavar="N",
                    help="page-fields: 기계의 상태와 상관없이 날짜별로 고르게 뽑은 쪽 N 개 (기계 값 없이) — 자동 적재된 쪽의 정답")
-    r.add_argument("--n", type=int, default=1500, help="haul-numbers 표본 크기 (기본 1500)")
+    r.add_argument("--n", type=int, help="표본 크기: haul-numbers 기본 1500, checks(점검표 행) 기본 300")
     r.add_argument("--seed", type=int, default=0, help="표본의 순서를 정하는 씨앗. 같은 값이면 같은 표본")
     r.add_argument("--empty-share", type=float, default=0.1, help="표본 중 빈 칸 비율 (기본 0.1)")
     r.add_argument("--template", help="pending: 이 템플릿만")
@@ -412,6 +415,13 @@ def cmd_eval(a) -> int:
         raise SystemExit("--split 에는 사이트 팩이 필요합니다: --site 또는 MINEDOCSCAN_SITE")
     if a.meta:
         return _eval_meta(a, con, kw["site"])
+    if a.checks:
+        from .evaluate.checks import evaluate_checks, format_checks
+
+        site = kw["site"] or _need_site(s)
+        r = evaluate_checks(con, site, split=a.split)
+        _emit(a, {"checks": r}, format_checks(r))
+        return 0
     if a.answers:
         data = {"fields": evaluate_fields(con, load_answers_json(a.answers), **kw)}
     else:
@@ -568,6 +578,7 @@ def cmd_review(a) -> int:
                  "검수자별(기록): " + kv(st["by_reviewer"]),
                  "분할별(value·empty): " + (", ".join(f"{k} {v['fields']}셀/{v['dates']}일" for k, v in st["by_split"].items()) or "-")
                  + f"  (소금값 {site.split_salt}, test 비율 {site.test_share})",
+                 f"✓ 검수: 점검표 행 {st['checks']['rows']}개 (체크 칸 {st['checks']['fields']}개)",
                  f"템플릿 좌표가 달라진 기록 {st['bbox_changed']}개, 이 DB 에 없는 필드 {st['fields_not_in_db']}개"]
         _emit(a, {"reviews": imported, "stats": st}, "\n".join(lines))
         return 0

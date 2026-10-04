@@ -120,9 +120,9 @@ def cell_png(con: sqlite3.Connection, settings, field_id: str, pad: int | None =
 
 
 def row_crop(con: sqlite3.Connection, settings, field_id: str, pad: int | None = None,
-             res: str = "auto") -> tuple[bytes, str]:
+             res: str = "auto", box: bool = True) -> tuple[bytes, str]:
     """그 행 전체(같은 표·같은 행의 모든 셀)를 자르고 대상 셀에 테두리를 친다 — 인쇄된 광종·편이 같이 보여야 한다.
-    표 밖 자유 필드(row_no = -1)는 그 필드 주변을 넓게 자른다."""
+    표 밖 자유 필드(row_no = -1)는 그 필드 주변을 넓게 자른다. box=False 면 테두리 없이 (✓ 행: 두 칸을 같이 본다)."""
     r = field_info(con, field_id)
     if r is None:
         raise KeyError(field_id)
@@ -136,8 +136,23 @@ def row_crop(con: sqlite3.Connection, settings, field_id: str, pad: int | None =
     x0, y0 = max(0, x0 - pad), max(0, y0 - pad)
     gray, src = crop_region(settings, r, (x0, y0, x1 + pad, y1 + pad), 1.0, res)
     crop = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-    cv2.rectangle(crop, (r["x0"] - x0 - 2, r["y0"] - y0 - 2), (r["x1"] - x0 + 2, r["y1"] - y0 + 2), (0, 0, 220), 3)
+    if box:
+        cv2.rectangle(crop, (r["x0"] - x0 - 2, r["y0"] - y0 - 2), (r["x1"] - x0 + 2, r["y1"] - y0 + 2), (0, 0, 220), 3)
     return _png(crop), src
+
+
+def pair_crop(con: sqlite3.Connection, settings, first_id: str, second_id: str, scale: float = 3,
+              res: str = "auto") -> tuple[bytes, str]:
+    """나란한 두 칸(✓ 의 유·무)을 한 띠로, 행 높이의 절반만큼 여유를 두고 scale 배로. ✓ 는 경계선을 넘어 그려지므로 두 칸을 같이 본다.
+    표시를 하지 않는다 — 기계의 판정이 드러나지 않게."""
+    a, b = field_info(con, first_id), field_info(con, second_id)
+    if a is None or b is None:
+        raise KeyError(first_id if a is None else second_id)
+    x0, y0 = min(a["x0"], b["x0"]), min(a["y0"], b["y0"])
+    x1, y1 = max(a["x1"], b["x1"]), max(a["y1"], b["y1"])
+    pad = auto_pad((x0, y0, x1, y1))
+    gray, src = crop_region(settings, a, (max(0, x0 - pad), max(0, y0 - pad), x1 + pad, y1 + pad), scale, res)
+    return _png(gray), src
 
 
 def row_png(con: sqlite3.Connection, settings, field_id: str, pad: int | None = None) -> bytes:

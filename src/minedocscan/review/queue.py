@@ -9,6 +9,9 @@
                 기계가 채운 키는 나오지 않는다. audit=N 이면 기계의 상태와 상관없이 날짜별로 고르게 뽑은 쪽 N 개에서 사람·파일명의
                 값이 없는 키를 (기계 값 없이) 보여 준다 — 자동 적재된 쪽의 오류를 잴 정답 (tasks/0004 4.6)
   meta-check    기계가 읽은 메타 값과 사람(라벨·검수)의 값이 다른 쪽 (날짜의 부분은 빼고). 두 값을 보여 주고 맞는 값을 입력받는다
+  checks        점검표의 장비 행 표본 (✓ 판정의 정답, tasks/0004 단계 6). 항목 = 행 하나(유·무 두 칸). 기계의 판정은 숨긴다.
+                판정 불가인 행, 점검을 하지 않은 날(column_unused)의 행도 모집단에 있다 — 표시가 없다는 것도 정답이다.
+                검수한 행도 목록에 남긴다 (answer) — 다시 열면 전에 고른 답이 보인다
 
 haul-numbers 의 표본 규칙 (docs/tasks/0001-review-tool.md 단계 3)
   · 모집단: prod_haul 의 셀. 값이 있다고 판단된 셀(has_value_raw=1)에서 n×(1−empty_share), 비었다고 판단된 셀에서
@@ -27,7 +30,8 @@ from dataclasses import asdict, dataclass, field
 
 from .store import effective, field_id_of
 
-QUEUES = ("haul-numbers", "mismatch", "pending", "page-fields", "meta-check")
+QUEUES = ("haul-numbers", "mismatch", "pending", "page-fields", "meta-check", "checks")
+DEFAULT_N = {"haul-numbers": 1500, "checks": 300}
 HUMAN_SOURCES = ("review", "label", "filename")
 INPUT_KINDS = ("handwritten_number", "handwritten_text")      # 이 화면이 입력받는 셀 종류
 
@@ -55,11 +59,13 @@ class QueueItem:
     title: str
     work_date: str | None
     cells: list[QueueCell] = field(default_factory=list)
+    answer: str | None = None               # checks: 검수로 정해진 행의 답 (유 / 무 / 표시 없음 / 모름)
 
 
-def build_queue(con: sqlite3.Connection, name: str, *, n: int = 1500, seed: int = 0, empty_share: float = 0.1,
+def build_queue(con: sqlite3.Connection, name: str, *, n: int | None = None, seed: int = 0, empty_share: float = 0.1,
                 template: str | None = None, kind: str | None = None, site=None, audit: int | None = None) -> dict:
     candidates: dict = {}
+    n = DEFAULT_N.get(name, 0) if n is None else n
     if name == "haul-numbers":
         items, total, done = _haul_numbers(con, n, seed, empty_share)
     elif name == "mismatch":
@@ -74,6 +80,10 @@ def build_queue(con: sqlite3.Connection, name: str, *, n: int = 1500, seed: int 
         if site is None:
             raise ValueError("meta-check 대기열에는 사이트 팩이 필요합니다")
         items, total, done, candidates = _meta_check(con, site)
+    elif name == "checks":
+        if site is None:
+            raise ValueError("checks 대기열에는 사이트 팩이 필요합니다 (점검표 템플릿의 유·무 칸)")
+        items, total, done = _checks(con, site, n, seed)
     else:
         raise KeyError(f"알 수 없는 대기열 '{name}' (가능: {QUEUES})")
     return {"name": name, "total": total, "done": done, "items": [asdict(i) for i in items], "candidates": candidates}
@@ -280,6 +290,34 @@ def _meta_check(con, site):
                                    f"{r0['source_name']}#{r0['page_no']}", r0["work_date"], cells))
     keys = sorted({r["meta_key"] for r in rows})
     return items, len(rows), done, {k: _candidates(con, site, k) for k in keys}
+
+
+# ── checks ─────────────────────────────────────────────────────────────────
+def _checks(con, site, n: int, seed: int):
+    """점검표의 장비 행을 날짜별로 고르게 n 개 (hash(seed, item_id) 순서로 날짜를 돌아가며). 기계의 상태와 상관없이 뽑는다 —
+    판정 불가·column_unused 행도. 셀에는 기계 값을 싣지 않는다 (machine=None). 검수한 행은 answer 와 함께 남는다."""
+    from .checks import answers, check_rows
+
+    rows = check_rows(con, site)
+    by_date: dict[str, list] = {}
+    for c in rows:
+        by_date.setdefault(c.work_date or "", []).append(c)
+    queues = [sorted(v, key=lambda c: _rank(seed, c.item_id)) for _k, v in sorted(by_date.items())]
+    sample: list = []
+    while len(sample) < n and any(queues):
+        for q in queues:
+            if q and len(sample) < n:
+                sample.append(q.pop(0))
+    sample.sort(key=lambda c: (c.work_date or "", c.source_name, c.page_no, c.row_no))
+    done = answers(con, sample)
+    eff = effective(con, field_ids=[f for c in sample for f in (c.yes["field_id"], c.no["field_id"])])
+    items = []
+    for c in sample:
+        cells = [QueueCell(f["field_id"], label, "checkmark", _review_dict(eff.get(f["field_id"])))
+                 for f, label in ((c.yes, "유"), (c.no, "무"))]
+        title = f"{c.work_date or '날짜 없음'} · {c.template_name} · {c.row_key} · {c.source_name}#{c.page_no}"
+        items.append(QueueItem(c.item_id, title, c.work_date, cells, answer=done.get(c.item_id)))
+    return items, len(sample), len(done)
 
 
 def _candidates(con, site, key: str) -> list[str]:

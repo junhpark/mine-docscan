@@ -2,8 +2,10 @@
 
   GET  /                                   화면 (static/index.html)
   GET  /api/queue?name=&n=&seed=&empty_share=&template=&kind=   항목 목록과 진행 수
-  GET  /crop?field_id=&kind=cell|row[&scale=]                   PNG. 응답 머리글 X-Crop-Source: source | aligned
+  GET  /crop?field_id=&kind=cell|row|pair[&scale=][&box=0]      PNG. 응답 머리글 X-Crop-Source: source | aligned
+                                           (pair: 점검표 행의 유·무 두 칸을 같이, box=0: 행 띠에 대상 칸 테두리 없이)
   POST /api/review  {field_id, verdict, value, note}            저장 (검수자는 서버를 띄울 때 정한다)
+  POST /api/check   {field_id, answer: yes|no|none|unknown}     ✓ 행의 답 → 두 칸의 검수 두 건 (review/checks.py)
   GET  /api/stats                          진행 현황
 
 127.0.0.1 에만 바인딩한다 — 화면에 실제 이름과 차량번호가 보인다. 단일 스레드(SQLite 연결 하나).
@@ -20,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .crops import CropError, cell_crop, field_info, row_crop
+from .crops import CropError, cell_crop, field_info, pair_crop, row_crop
 from .queue import INPUT_KINDS, QUEUES, build_queue
 from .store import VERDICTS, review_from_field, save, stats
 
@@ -76,7 +78,14 @@ class ReviewApp:
         fid, kind = params.get("field_id", ""), params.get("kind", "cell")
         try:
             if kind == "row":
-                return row_crop(self.con, self.settings, fid)
+                return row_crop(self.con, self.settings, fid, box=params.get("box") != "0")
+            if kind == "pair":
+                from .checks import row_of
+
+                row = row_of(self.con, self.site, fid)
+                if row is None:
+                    raise ApiError(400, "점검표 장비 행의 체크 칸이 아닙니다")
+                return pair_crop(self.con, self.settings, row.yes["field_id"], row.no["field_id"])
             if kind == "cell":
                 scale = _int_param(params, "scale", 3)
                 if not 1 <= scale <= 6:
@@ -86,7 +95,7 @@ class ReviewApp:
             raise ApiError(404, f"없는 필드: {fid}") from e
         except CropError as e:
             raise ApiError(409, str(e)) from e
-        raise ApiError(400, f"kind 는 cell 또는 row: {kind}")
+        raise ApiError(400, f"kind 는 cell, row, pair 중 하나: {kind}")
 
     def post_review(self, body: dict) -> dict:
         if not isinstance(body, dict):
@@ -111,6 +120,23 @@ class ReviewApp:
         out = save(self.con, self.site, self.settings, review)
         return {"ok": True, **out, "field_id": fid, "verdict": verdict, "value": review.value,
                 "reviewed_at": review.reviewed_at}
+
+    def post_check(self, body: dict) -> dict:
+        """✓ 행의 답 하나 → 유·무 두 칸의 검수 두 건 (tasks/0004 4.9). 둘 다 저장한 뒤 insp_daily 가 그 답을 따른다."""
+        from .checks import ANSWERS, check_reviews, row_of
+
+        if not isinstance(body, dict):
+            raise ApiError(400, "본문은 JSON 객체여야 합니다")
+        fid, answer = str(body.get("field_id", "")), str(body.get("answer", ""))
+        if answer not in ANSWERS:
+            raise ApiError(400, f"answer 는 {tuple(ANSWERS)} 중 하나: {answer}")
+        row = row_of(self.con, self.site, fid)
+        if row is None:
+            raise ApiError(404 if field_info(self.con, fid) is None else 400, f"점검표 장비 행의 체크 칸이 아닙니다: {fid}")
+        reviews = check_reviews(self.con, row, ANSWERS[answer], self.reviewer, note=str(body.get("note", "") or ""))
+        outs = [save(self.con, self.site, self.settings, rv) for rv in reviews]
+        return {"ok": True, "item_id": row.item_id, "answer": ANSWERS[answer], "review_ids": [o["review_id"] for o in outs],
+                "applied": all(o["applied"] for o in outs), "reviewed_at": reviews[0].reviewed_at}
 
     def stats_json(self) -> dict:
         return stats(self.con)
@@ -174,6 +200,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(204, b"", "image/x-icon")
             else:
                 self._json(404, {"error": "없는 경로"})
+        except (BrokenPipeError, ConnectionResetError):        # 화면이 응답을 기다리지 않고 넘어갔다 (빠르게 다음 항목으로)
+            return
         except ApiError as e:
             self._json(e.status, {"error": str(e)})
         except Exception as e:                                 # noqa: BLE001 — 연결을 끊지 않고 500 으로 답한다
@@ -182,7 +210,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         try:
-            if u.path != "/api/review":
+            if u.path not in ("/api/review", "/api/check"):
                 raise ApiError(404, "없는 경로")
             self._check_local(need_json=True)
             try:
@@ -190,7 +218,9 @@ class _Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
             except (ValueError, UnicodeDecodeError) as e:
                 raise ApiError(400, "본문이 JSON 이 아닙니다") from e
-            self._json(200, self.app.post_review(body))
+            self._json(200, self.app.post_review(body) if u.path == "/api/review" else self.app.post_check(body))
+        except (BrokenPipeError, ConnectionResetError):
+            return
         except ApiError as e:
             self._json(e.status, {"error": str(e)})
         except Exception as e:                                 # noqa: BLE001
