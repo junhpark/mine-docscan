@@ -19,6 +19,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import date
 
+from ..forms.formats import default_format
 from ..forms.template import Template
 from ..store.db import upsert
 
@@ -81,7 +82,7 @@ def subtotal_pairs(reg: dict) -> list[tuple[tuple[int, str], list[tuple[int, str
     """작업량 표(role tally)의 소계 칸마다 (소계 칸, 더할 칸들) — 칸은 (행 번호, 열 이름). 소계 열은 같은 행의 소계가 아닌 열,
     소계 행은 같은 열의 소계가 아닌 행. 둘 다 소계인 칸(합계의 합계)은 소계 행의 소계가 아닌 열."""
     cols = [c for c in reg["columns"] if c.get("kind", "").startswith("handwritten")
-            and (c.get("format") or "integer") == "integer"]
+            and (c.get("format") or default_format(c.get("kind", ""))) == "integer"]      # 글자 칸(비고 …)은 더하지 않는다
     sub_cols = [c["name"] for c in cols if c.get("subtotal")]
     val_cols = [c["name"] for c in cols if not c.get("subtotal")]
     sub_rows = [r["row"] for r in reg["rows"] if r.get("subtotal")]

@@ -17,7 +17,8 @@
   usage-check   가동 일보의 검산이 어긋난 것 (xcheck_usage 의 gap·overlap·mismatch). 항목 = 검산 하나: 비교한 칸들(다른 쪽이면
                 두 쪽)과 지금 값, 차이. 고칠 칸만 고쳐 저장한다 — 고쳐서 맞으면 끝, 여전히 어긋나면 남는다. 아무것도 고치지 않고
                 저장하면 "종이에 적힌 대로"를 확인한 것이고 끝난다 (어긋남은 xcheck_usage 와 리포트에 그대로 남는다 — ADR 0006).
-                이 대기열의 검수는 note 에 검산 id 를 남긴다 (USAGE_CHECK_NOTE)
+                이 대기열의 검수는 note 에 검산 id 를 남긴다 (USAGE_CHECK_NOTE). 확인 = 비교한 칸 전부가 그 검산의 항목에서 저장되었고
+                지금 값이 그때와 같다 — 한 칸이 두 검산에 걸쳐 있어도(종료 칸) 둘 다 끝낼 수 있다
 
 haul-numbers 의 표본 규칙 (docs/tasks/0001-review-tool.md 단계 3)
   · 모집단: prod_haul 의 셀. 값이 있다고 판단된 셀(has_value_raw=1)에서 n×(1−empty_share), 비었다고 판단된 셀에서
@@ -429,8 +430,13 @@ def _usage_check(con, site):
     항목의 셀에는 지금의 최종 값을 싣는다 (기계 값이 아니다 — 계기 칸은 기계가 읽지 않는다)."""
     from ..validate.usage import check_cells
 
-    noted = {r[0][len(USAGE_CHECK_NOTE):] for r in con.execute(
-        "SELECT DISTINCT note FROM doc_review WHERE note LIKE ?", (USAGE_CHECK_NOTE + "%",))}
+    # 이 대기열에서 저장한 검수: (칸, 검산) → 그때의 (판정, 값)들. 한 칸이 두 검산에 들어 있을 수 있다 (종료 칸 = 그 쪽의 총 검산과 다음 기록의
+    # 연속성) — 다른 검산을 확인하느라 그 칸을 다시 저장해도, 값이 그대로면 앞의 확인은 살아 있다
+    confirms: dict[tuple[str, str], set] = {}
+    for fid, note, verdict, value in con.execute(
+            "SELECT field_id, note, verdict, value FROM doc_review WHERE note LIKE ?", (USAGE_CHECK_NOTE + "%",)):
+        confirms.setdefault((fid, note[len(USAGE_CHECK_NOTE):]), set()).add((verdict, value or ""))
+    noted = {cid for _f, cid in confirms}
     checks = [c for c in con.execute(
         "SELECT x.*, p.page_no, p.template_name, d.source_name FROM xcheck_usage x JOIN doc_page p ON x.page_id = p.page_id "
         "JOIN doc_document d ON p.document_id = d.document_id ORDER BY x.work_date, d.source_name, p.page_no, x.check_kind, "
@@ -441,7 +447,9 @@ def _usage_check(con, site):
     names = {"total": "총 = 종료 − 시작", "subtotal": "소계 = 합", "continuity": "계기의 연속성"}
     for c in checks:
         cid, fids = check_id(c), cells_of[check_id(c)]
-        confirmed = bool(fids) and all(f in reviews and reviews[f].note == USAGE_CHECK_NOTE + cid for f in fids)
+        # 확인됨: 비교한 칸 전부가 이 검산의 항목에서 저장되었고, 지금 값(유효한 검수)이 그때와 같다
+        confirmed = bool(fids) and all(f in reviews and (reviews[f].verdict, reviews[f].value or "") in confirms.get((f, cid), ())
+                                       for f in fids)
         if c["result"] not in BAD_RESULTS or confirmed:
             done += 1
             continue
@@ -475,6 +483,8 @@ def queue_progress(con: sqlite3.Connection, site) -> dict:
     """대기열마다 (기본 설정으로) 끝난 수 / 모집단 — review stats 가 쓴다."""
     out = {}
     for name in QUEUES:
+        if name == "pending":                  # 남은 것만 세는 대기열 (끝난 것은 빠진다) — 끝남/모집단의 뜻이 없다
+            continue
         try:
             q = build_queue(con, name, site=site)
         except ValueError:

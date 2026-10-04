@@ -122,7 +122,13 @@ def reviewed(usage_run, usage_synth, tmp_path_factory) -> dict:
     post(gap, {c["field_id"]: c["current"]["value"] for c in gap["cells"]})    # 고치지 않고 확인 → 끝난다 (gap 은 그대로)
     states["uc"].append(uc.queue_json({}))
     states["uc_ids"] = {"overlap": over["item_id"], "total": total["item_id"], "gap": gap["item_id"]}
-    n += 4 + len(gap["cells"])
+    # 한 칸이 두 검산에 걸쳐 있다 (그 쪽의 종료 칸 = 총 검산 + 다음 기록의 연속성): 차례로 확인하면 둘 다 끝난다 (같은 초에 저장해도)
+    shared = {c["field_id"] for c in total["cells"]} & {c["field_id"] for c in over["cells"]}
+    post(total, {c["field_id"]: c["current"]["value"] for c in total["cells"]})
+    post(over, {c["field_id"]: c["current"]["value"] for c in over["cells"]})
+    states["uc"].append(uc.queue_json({}))
+    states["uc_shared"] = shared
+    n += 4 + len(gap["cells"]) + len(total["cells"]) + len(over["cells"])
     return {"con": con, "settings": settings, "site": site, "n": n, "root": root, "page_id": pid, "states": states,
             "tally_id": cell["tally_id"], "loader": (first["source"], second["source"]), "drill": drill["source"]}
 
@@ -467,7 +473,7 @@ def test_readings_audit_samples_pages_whatever_the_ink(usage_run):
 
 
 def test_usage_check_fix_leaves_still_wrong_stays_confirm_finishes(reviewed):
-    q0, fixed, restored, still, confirmed = reviewed["states"]["uc"]
+    q0, fixed, restored, still, confirmed, both = reviewed["states"]["uc"]
     ids = reviewed["states"]["uc_ids"]
     item_ids = lambda q: {it["item_id"] for it in q["items"]}                              # noqa: E731
     bad = len(q0["items"])
@@ -477,6 +483,8 @@ def test_usage_check_fix_leaves_still_wrong_stays_confirm_finishes(reviewed):
     assert ids["total"] in item_ids(still) and still["done"] == 0                           # 한 칸만 고쳤고 여전히 어긋난다
     assert ids["gap"] not in item_ids(confirmed) and confirmed["done"] == 1                 # 고치지 않고 확인했다
     assert ids["overlap"] in item_ids(confirmed) and ids["total"] in item_ids(confirmed)
+    assert len(reviewed["states"]["uc_shared"]) == 1                                       # 종료 칸 하나를 같이 쓴다
+    assert ids["overlap"] not in item_ids(both) and ids["total"] not in item_ids(both) and both["done"] == 3
     # 확인했어도 검산은 그대로 gap — 값을 맞춰 넣지 않는다
     con = reviewed["con"]
     pid = ids["gap"].split(":")[1]

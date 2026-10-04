@@ -229,3 +229,19 @@ def test_extra_digits_go_into_training_and_an_orphan_staging_folder_does_not_blo
     assert card["validation"]["reads"] == plain["validation"]["reads"]          # 읽기(기준의 근거)에는 들어가지 않는다
     classes = json.loads((models / "veh" / "classes.json").read_text(encoding="utf-8"))["values"]["vehicle_no"]
     assert set(classes) == set(synth_meta.VEHICLES)                              # 후보 목록에도 (운반 횟수는 차량번호가 아니다)
+
+
+def test_equipment_key_trains_without_code_for_the_key(tmp_path, capsys):
+    """tasks/0005 단계 3: equipment 는 새 키일 뿐이다 — `recognizer train --meta-key equipment` 가 코드 변경 없이 분류기(choice)를
+    만들고, 카드·출력에 장비명이 없다."""
+    out = tmp_path / "m"
+    assert main(["recognizer", "train", "--meta-key", "equipment", "--synthetic-meta", "6", "--steps", "40",
+                 "--name", "eq-x", "--out", str(out), "--json"]) == 0
+    io = capsys.readouterr()
+    card = json.loads(io.out)["card"]
+    assert card["meta"]["keys"] == ["equipment"] and card["meta"]["reader"] == "choice"
+    m = MetaModel(out)
+    assert set(m.values("equipment")) <= set(synth_meta.EQUIPMENT) and m.values("equipment")
+    text = (out / "card.json").read_text(encoding="utf-8") + io.out + io.err
+    for name in synth_meta.EQUIPMENT:
+        assert name not in text and name.lower() not in text, name

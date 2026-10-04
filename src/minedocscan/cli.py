@@ -268,8 +268,13 @@ def cmd_info(a) -> int:
                  "cells": len(t.cells()) + len(t.fields), "status": "cells" if t.has_cells else "classify_only",
                  "family": t.family, "valid_from": t.valid_from, "valid_to": t.valid_to}
                 for t in site.templates.values()]
-        data["site"] = {"name": site.name, "templates": tpls, "labels": len(site.labels)}
-        lines.append(f"사이트 팩: {site.name} — 템플릿 {len(tpls)}종, 페이지 라벨 {len(site.labels)}개")
+        from .forms.equipment import master_keys
+
+        n_master = len(master_keys(site.templates.values()))
+        data["site"] = {"name": site.name, "templates": tpls, "labels": len(site.labels),
+                        "equipment_aliases": len(site.equipment_aliases), "equipment_master": n_master}
+        lines.append(f"사이트 팩: {site.name} — 템플릿 {len(tpls)}종, 페이지 라벨 {len(site.labels)}개, "
+                     f"장비명 대응표 {len(site.equipment_aliases)}개 (마스터 {n_master}대)")
         for t in tpls:
             valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}" if t["family"] else "")
             lines.append(f"  {t['name']:<24} handler={t['handler']:<11} 표 {t['regions']}개, 셀 {t['cells']}개"

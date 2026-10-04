@@ -182,10 +182,10 @@
     const inputs = v.querySelectorAll('input.val');
     inputs.forEach(inp => {
       inp.addEventListener('keydown', onKey);
-      if (inp.classList.contains('num')) inp.addEventListener('input', () => { inp.value = inp.value.replace(/[^0-9?]/g, ''); });
+      if (inp.classList.contains('num')) inp.addEventListener('input', () => { inp.value = ascii(inp.value).replace(/[^0-9?]/g, ''); });
       if (inp.classList.contains('fmt')) {   // 형식마다 받는 글자만 (서버가 형식을 다시 검사한다 — 맞지 않으면 아무것도 저장하지 않는다)
         const f = state.formats[inp.dataset.fmt];
-        if (f) { const bad = new RegExp('[^' + f.chars + '?]', 'g'); inp.addEventListener('input', () => { inp.value = inp.value.replace(bad, ''); }); }
+        if (f) { const bad = new RegExp('[^' + f.chars + '?]', 'g'); inp.addEventListener('input', () => { inp.value = ascii(inp.value).replace(bad, ''); }); }
       }
     });
     if (inputs.length) { inputs[0].focus(); inputs[0].select(); }
@@ -257,6 +257,9 @@
     if (raw === '') return { verdict: 'empty', value: '' };
     return { verdict: 'value', value: raw };
   }
+
+  // 한글 입력기의 전각 숫자·기호(８：００, ～)를 ASCII 로 바꾼 뒤에 거른다 — 그냥 거르면 지워져 빈 칸으로 저장된다 (forms/formats.py 와 같은 대응)
+  function ascii(v) { return v.normalize('NFKC').replace(/[〜–—]/g, m => (m === '〜' ? '~' : '-')); }
 
   function fmtOf(c) { return c.format || (c.kind === 'handwritten_number' ? 'integer' : null); }
 

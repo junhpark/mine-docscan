@@ -60,7 +60,7 @@ class Review:
         if not self.reviewed_at:
             self.reviewed_at = now_iso()
         if not self.review_id:
-            self.review_id = make_review_id(self.field_id, self.reviewed_at, self.reviewer)
+            self.review_id = make_review_id(self.field_id, self.reviewed_at, self.reviewer, self.note)
 
     @property
     def page_id(self) -> str:
@@ -105,8 +105,11 @@ def now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def make_review_id(field_id: str, reviewed_at: str, reviewer: str) -> str:
-    return hashlib.sha256(f"{field_id}|{reviewed_at}|{reviewer}".encode()).hexdigest()[:16]
+def make_review_id(field_id: str, reviewed_at: str, reviewer: str, note: str = "") -> str:
+    """note 가 있으면 id 에 넣는다 — 같은 초에 같은 칸을 다른 검산의 확인(usage-check 의 note)으로 두 번 저장해도 두 기록이 남게.
+    note 가 없으면 예전과 같은 id 다."""
+    key = f"{field_id}|{reviewed_at}|{reviewer}" + (f"|{note}" if note else "")
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
 # ── 파일 ───────────────────────────────────────────────────────────────────

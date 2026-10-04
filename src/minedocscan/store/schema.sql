@@ -95,7 +95,7 @@ CREATE INDEX IF NOT EXISTS ix_doc_page_meta_check ON doc_page_meta(check_result)
 -- (WORK_ROOT 는 언제든 지울 수 있어야 하므로). 한 필드에 여러 건이면 reviewed_at 이 가장 늦은 것이 유효하다.
 -- field_id 에 외래 키를 걸지 않는다: 파일을 읽어 들이는 시점에 그 페이지가 아직 DB 에 없을 수 있다.
 CREATE TABLE IF NOT EXISTS doc_review (
-  review_id       TEXT PRIMARY KEY,          -- field_id, reviewed_at, reviewer 에서 결정된다
+  review_id       TEXT PRIMARY KEY,          -- field_id, reviewed_at, reviewer (note 가 있으면 note 도) 에서 결정된다
   field_id        TEXT NOT NULL,
   page_id         TEXT NOT NULL,             -- field_id 의 앞부분 (조회용)
   seq             INTEGER NOT NULL,          -- 파일에서의 줄 번호. 같은 시각이면 뒤의 것이 유효
