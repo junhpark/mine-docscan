@@ -51,6 +51,22 @@ minedocscan recognizer list                                         # 사이트 
 # 설정: [recognize.by_kind] handwritten_number = "digits"   [recognize.digits] model = "digits-v1"   → minedocscan info 로 확인
 minedocscan synth out/low --low-cells       # 낮은 칸·거친 숫자·X 표의 합성 양식 (숫자 인식기 시험용)
 
+# 표 밖 필드(쪽 메타: 차량번호·작성자·월·일) — docs/DATA.md "쪽 메타", ADR 0013·0014
+minedocscan review export-crops ~/meta --meta --split train --site … --archive-root … --work-root …   # 사람·파일명 값이 있는 필드만
+minedocscan recognizer train --crops ~/meta --meta-key vehicle_no --name veh-v1 --cv 5    # 숫자: 읽고 닫힌 목록에서 고른다
+minedocscan recognizer train --crops ~/meta --meta-key operator   --name op-v1  --cv 5    # 이름: 닫힌 집합 분류기
+minedocscan recognizer eval  --crops ~/meta --model op-v1 --split val --errors            # --cv 모델은 묶음 교차 읽기(cv-reads.jsonl)로
+# 설정: [recognize.meta] vehicle_no = "veh-v1"  operator = "op-v1"   → minedocscan info
+minedocscan eval --meta --split test        # 키마다 정확도·자동 적재 오류율·배차가 바뀐 쪽·자리
+minedocscan pages --meta-mismatch [--meta-key date.day]   # 기계 값이 사람·파일명 값과 다른 쪽 (값은 찍지 않는다)
+minedocscan review serve … --queue page-fields --audit 100 --reviewer jp   # 표본 감사 (기계 값 없이)
+minedocscan review serve … --queue meta-check --reviewer jp               # 기계 값 ≠ 라벨·검수
+minedocscan synth out/meta --meta-fields [--mix-pages]   # 사람마다 다른 획의 메타 필드 합성 (새 차·새 사람·바꿔 탄 날)
+
+# ✓ 판정의 정답
+minedocscan review serve … --queue checks --n 300 --reviewer jp   # 1 유 / 2 무 / Enter 표시 없음 / ? 모름 → 두 칸의 검수 두 건
+minedocscan eval --checks [--split test]    # 기계의 답 × 정답 표, 정확도(구간), 판정 불가, column_unused
+
 minedocscan run DB_scans --skip-existing    # 전체 묶음: 깨진 파일은 failed 로 격리, 한 것은 건너뜀 (템플릿·인식기를 바꾼 뒤엔 --fresh)
 minedocscan report --by-month               # 양식 × 월 진단 (개정판의 흔적)
 minedocscan pages --status unknown_form --thumbs   # 양식을 못 찾은 쪽 + 미리보기 (WORK_ROOT/thumbs)
@@ -89,16 +105,20 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 | `forms/sitepack.py` | 사이트 팩 (템플릿·현장 옵션·페이지 라벨·평가셋 소금값), `templates_for(date)` |
 | `forms/classify.py` | 페이지가 어느 양식인지 (그날 유효한 판만 후보) |
 | `recognize/` | 인식 백엔드 인터페이스와 등록소 (`null`, `oracle`, `digits`), 칸 종류별 백엔드(`ByKindRecognizer`, `[recognize.by_kind]`) |
+| `pagemeta.py` | 쪽 메타(`doc_page_meta`): 키마다 최종 값과 출처(검수 > 라벨 > 파일명 > 기계 값), 기계 값의 대조, 날짜의 월·일 대조 |
 | `recognize/digits/` | 숫자 인식기: `model.py`(전처리·CTC 빔 탐색·ONNX 를 cv2.dnn 으로, torch 없음), `backend.py`(카드의 규격·온도·기준), `data.py`(크롭 폴더, test 거절, 검증 날짜), `calib.py`(온도·임계값표·윌슨 구간), `train.py`(학습 — torch 는 여기서만), `evaluate.py`(크롭 단위 평가) |
+| `recognize/meta/` | 메타 필드 모델 (ADR 0013): `model.py`(카드·`classes.json`·후보 목록, `[recognize.meta]` → `build_meta_readers`), `choose.py`(CTC 우도로 닫힌 목록에서 고르기, 목록에 없는 값), `calib.py`(온도·기준·묶음 교차 읽기 `cv-reads.jsonl`), `train.py`(`--cv K`, 숫자 모델), `evaluate.py` |
+| `recognize/choice/` | 이름 필드의 닫힌 집합 분류기 (종류 0 = "그 밖"): `model.py`(OpenCV 추론), `train.py`(torch) |
 | `correct/` | 교정 백엔드 인터페이스와 등록소 (`none`) |
 | `handlers/` | 양식의 의미: 셀 → `doc_field` → 업무 테이블 (`generic`, `inspection`, `haul`). 숫자 칸의 자동 적재 표는 `base.number_status` (ADR 0012) |
 | `validate/crosscheck.py` | 양식 간 교차검증, 그날의 실제 배차 관측 (날짜 지정 재계산 가능) |
-| `review/` | 검수: `store.py`(추가 전용 `reviews.jsonl` ↔ `doc_review`, `save()`, 쪽 메타 우선순위), `queue.py`(대기열 4종), `crops.py`(원본/정합), `export.py`(크롭 내보내기), `server.py` + `static/index.html`(표준 라이브러리, 127.0.0.1) |
+| `review/` | 검수: `store.py`(추가 전용 `reviews.jsonl` ↔ `doc_review`, `save()`), `queue.py`(대기열 6종: `haul-numbers`·`mismatch`·`pending`·`page-fields`(`--audit`)·`meta-check`·`checks`), `checks.py`(✓ 행의 답 ↔ 두 칸의 판정), `crops.py`(원본/정합, 두 칸 띠), `export.py`(크롭 내보내기, `--meta`), `server.py` + `static/index.html`(표준 라이브러리, 127.0.0.1) |
 | `store/` | `schema.sql`, `upsert()`, 스키마 버전 |
 | `pipeline/runner.py` | 단계 순서와 상태 기록만 안다. 오류 격리(`failed`/`error`), `--skip-existing` |
-| `evaluate/` | CER·필드 정확도·자동 적재율·자동 적재 오류율(`status_raw`), 값 유무 정밀도·재현율, 날짜 분할(`split.py`), 실데이터 회귀(검수 없이, 기준에 없던 묶음은 따로 알림) |
+| `evaluate/` | CER·필드 정확도·자동 적재율·자동 적재 오류율(`status_raw`), 값 유무 정밀도·재현율, 날짜 분할(`split.py`), 비율의 구간(`stats.py`), 쪽 메타(`meta.py`), ✓ 판정(`checks.py`), 실데이터 회귀(검수 없이, 기준에 없던 묶음은 따로 알림) |
 | `report.py` | DB 현황 요약 (회귀 테스트가 비교하는 수치), `by_month`, `list_pages` |
 | `tools/synth.py` | 합성 양식·스캔·정답 생성기 (같은 seed 면 바이트까지 같다, 행렬 개정판 선택, `low_cells` 낮은 칸 양식) |
+| `tools/synth_meta.py` | 메타 필드 합성: 사람마다 다른 획(기울기·굵기·크기·간격)의 네 자리 차량번호·이름·월·일, 크롭 폴더 (메타 모델의 학습·시험용) |
 | `tools/synth_cells.py` | 어려운 합성 숫자 칸: 값·X 표·덧칠·메모·이웃 칸 글씨를 크롭 규격대로 (숫자 인식기의 학습·시험용) |
 | `tools/handfont.py` | 합성 손글씨의 획 정의 (숫자 꼴 몇 가지, 메모용 이어 쓴 글자). OpenCV 내장 글꼴을 쓰지 않는다 |
 | `tools/thumbs.py` | 쪽 미리보기 (1/4, WORK_ROOT/thumbs) |
@@ -117,7 +137,9 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 - 스캔 원본, 기준 이미지, 템플릿 YAML(머리글에 이름·차량번호가 들어 있다), 페이지 라벨, 정답 CSV·엑셀, 검수 기록(`reviews.jsonl`)은 전부 저장소 밖(사이트 팩·아카이브)에 둔다.
 - 검수 화면의 갈무리(실제 값이 보인다)를 문서·PR·이슈에 붙이지 않는다. 서버 로그에 입력값을 찍지 않는다.
 - 테스트에 필요한 이미지는 `tools/synth.py` 로 만든다. 실제 문서를 `tests/fixtures/` 에 넣지 않는다.
-- 학습한 모델(`<site>/models/`), 내보낸 크롭, 틀린 칸 모아 보기는 현장 글씨다 — 저장소 밖에. 예외는 합성 셀만으로 만든 `tests/fixtures/digits-fixture` 하나.
+- 학습한 모델(`<site>/models/` — 메타 필드 모델의 `classes.json` 은 이름·차량번호 목록이다), 내보낸 크롭, 틀린 칸 모아 보기는 현장 글씨다 — 저장소 밖에.
+  예외는 합성 데이터만으로 만든 시험용 모델 셋: `tests/fixtures/digits-fixture`, `meta-digits`, `meta-operator` (다시 만드는 명령은 `tests/fixtures/README.md`).
+- 카드·로그·오류 메시지·리포트에 이름·차량번호를 찍지 않는다 — 종류의 수와 분포만. 값은 검수 화면(127.0.0.1)에서만 본다.
 - 문서·코드·커밋 메시지·이슈에 실제 이름이나 차량번호를 예시로 쓰지 않는다. 합성 데이터의 값(`T01`, `V-101`, `ALPHA`)을 쓴다.
 - API 키·비밀값은 환경변수로만 받는다. `.env`, `minedocscan.toml` 은 커밋되지 않는다.
 
@@ -169,6 +191,14 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 - 회귀 검사는 검수 파일을 읽지 않는다. 검수가 쌓이면 코드 변경 없이도 `pending`·`with_trips` 가 달라진다.
 - 한 묶음 안에서 양식이 개정되면 모양으로는 못 가린다(분류 여유 ≈ 1). 날짜로 가린다 (ADR 0010).
 - 주간만 검수하고 야간은 아직인 칸은 합을 모르는 것으로 둔다. 아니면 일부 검수 중에 가짜 불일치가 생긴다.
+- 일보의 **차량번호는 전부 네 자리 숫자**(11종)이고 "차량번호:" 뒤에 크게, 띄엄띄엄 쓴다. 여러 번호가 앞 두 자리가 같다.
+  한 차의 번호는 거의 늘 같은 사람이 쓴다 — 분류기로 풀면 숫자가 아니라 글씨체를 외워, 다른 차를 탄 날에 평소의 차로 읽는다. 숫자를 읽고 목록에서 고른다 (ADR 0013).
+- **작성자는 10명**이고 날마다 같은 사람이 자기 이름을 같은 글씨로 쓴다 — 이름은 글자보다 모양으로 고른다 (닫힌 집합 분류기).
+- 날짜 줄은 "20__년 __월 __일 __요일" 이 인쇄되어 있고 월·일·요일만 손으로 쓴다. 연도는 인쇄된 값이고 묵은 양식에서는 틀려 있다(위에 덧쓴다).
+  날짜는 파일명·라벨이 정하고, 손으로 쓴 월·일은 대조에만 쓴다.
+- 메타 필드는 쪽마다 한 칸이라 정답이 적다 (20일치 ≈ 200쪽). 검증 날짜 20 % 로는 기준이 안 나온다 → 날짜 묶음 교차(`--cv 5`), 자동 적재된 쪽은 표본 감사 (ADR 0014).
+- 괘선 제거가 세로획 하나짜리 "1" 을 거의 다 지운다 (잉크 비율이 0 에 가깝다). 모델이 있는 메타 필드는 잉크가 전혀 없을 때만 건너뛴다.
+- `cv2.HOGDescriptor` 는 OpenCV 5.0 에 없다. OpenCV 의 부가 기능에 기대지 않는다.
 
 ## 하지 말 것
 

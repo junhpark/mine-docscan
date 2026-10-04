@@ -47,7 +47,7 @@ flowchart LR
 | classify | `forms/classify.py` | 각 템플릿 기준 이미지와 ORB 정합을 시도해 인라이어가 가장 많은 양식을 고른다. 1위/2위 비율이 낮으면 표시 | 아니오 |
 | align | `imaging/align.py` | ORB → 비율 검정 → RANSAC 호모그래피. 정합 뒤 표마다 괘선을 다시 검출해 템플릿과의 오차(px, 중앙값)를 잰다. 기준 미달이면 `align_failed` | 아니오 |
 | extract | `imaging/cells.py`, `marks.py`, `blobs.py` | 셀 크롭과 잉크 비율, ✓ 판정, 괘선 제거 + RLSA 로 글씨 덩어리를 셀에 배정(여러 칸에 걸친 메모 구분) | 아니오 |
-| recognize | `recognize/` | 셀 크롭 + 문맥 → 텍스트·신뢰도·후보 | **예 (플러그인)** |
+| recognize | `recognize/` | 셀 크롭 + 문맥 → 텍스트·신뢰도·후보. 쪽 메타가 되는 표 밖 필드(`meta_key`)는 먼저, 메타 필드 모델로 (§8) | **예 (플러그인)** |
 | correct | `correct/` | 후보(문구 DB, 마스터)에서 고르거나 편집거리 제한 안에서만 수정 | 선택 (플러그인) |
 | validate + load | `handlers/` | 양식의 의미를 적용해 `doc_field` 와 업무 테이블에 적재, 행 단위 검수 여부 결정 | 아니오 |
 | finalize | `validate/crosscheck.py` | 모든 문서를 처리한 뒤 양식 간 교차검증, 그날의 실제 배차 관측 | 아니오 |
@@ -104,8 +104,16 @@ DB             운영에서는 PostgreSQL (예정). 지금은 WORK_ROOT 의 SQLi
 
 열의 종류(`kind`): `printed`(템플릿 값 사용) · `handwritten_text` · `handwritten_number` · `checkmark` · `signature`.
 
-표 밖 자유 필드에 `meta_key`(`vehicle_no`, `operator` …)를 주면 그 필드의 검수값이 쪽의 메타가 된다 (날짜는 안 된다).
-쪽 메타의 우선순위는 **검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙** 이다 (`review/store.page_meta`).
+표 밖 자유 필드에 `meta_key`(`vehicle_no`, `operator` …)를 주면 그 필드의 값이 쪽의 메타가 된다.
+
+**쪽 메타** (`pagemeta.py`, 테이블 `doc_page_meta`, ADR 0013). 쪽 × 키마다 최종 값과 그 출처를 하나의 행으로 둔다.
+우선순위는 **검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙 > 기계 값** 이다. 기계 값(메타 필드 모델이 읽은 값)은 맨 아래이고 자동 적재된
+것만 쓴다 — 위에 값이 있으면 기계 값은 **대조**만 한다(`check_result`: `match` | `mismatch` | `unread`(기계가 정하지 못함) | `none`).
+일보의 차량·작성자, 자리, `eq_assignment_obs` 는 이 테이블의 최종 값에서 만든다.
+
+- 날짜는 검수로 받지 않는다 (파일명·라벨이 정한다). 대신 `date.month`·`date.day` 필드(손으로 쓴 월·일)를 두면 기계가 읽어 쪽의 날짜와
+  **대조만** 한다 — 읽은 부분이 전부 자동 적재일 때만. 다른 날의 쪽이 묶음에 섞인 것을 찾는 데 쓴다 (`pages --meta-mismatch --meta-key date.day`).
+- 메타 필드를 검수하면 `review/store.save()` 가 그 쪽의 `doc_page_meta` 를 먼저 다시 정하고(`pagemeta.refresh_page`), 핸들러는 그 최종 값을 읽는다.
 
 ### 양식의 판
 
@@ -122,6 +130,7 @@ DB             운영에서는 PostgreSQL (예정). 지금은 WORK_ROOT 의 SQLi
 erDiagram
   doc_document ||--o{ doc_page : has
   doc_page ||--o{ doc_field : has
+  doc_page ||--o{ doc_page_meta : "page_id, meta_key"
   doc_field ||--o| insp_daily : source_field_id
   doc_field ||--o| prod_haul : source_field_id
   eq_equipment ||--o{ insp_daily : equipment_id
@@ -134,6 +143,7 @@ erDiagram
 | 문서 | `doc_document` | 원본 파일. ID = SHA-256 앞 16자리 → 같은 스캔의 중복 접수 차단. `source_rel`(archive_root 기준)로 다른 컴퓨터에서도 원본을 찾는다. 상태·오류·경고(`warning` — 복구해서 연 PDF, `[pipeline] damaged_pdf = "warn"`) |
 | | `doc_page` | 페이지별 양식, 분류 여유, 정합 품질, 정합 이미지 경로, 호모그래피(렌더링한 쪽 픽셀 → 템플릿 픽셀)와 렌더링 dpi, 상태, 오류 |
 | | `doc_field` | 셀 하나. 좌표(bbox), 잉크, 값 유무(기계 `has_value_raw` / 최종 `has_value`), 원문 `value_raw`, 최종값 `value_final`, 신뢰도, 후보, 값을 만든 주체, 검수 상태(`review_status`)와 기계가 정한 상태(`status_raw` — 자동 적재 오류율의 분모) |
+| | `doc_page_meta` | 쪽 × 메타 키(`vehicle_no`, `operator`, `date`, `date.month`, `date.day` …): 최종 값과 출처(`review`·`label`·`filename`·`machine`), 그 키를 적는 필드, 기계가 읽은 값·신뢰도·상태(`auto`·`pending`·`unlisted`·`empty`), 대조 결과 (§5, 스키마 5) |
 | | `doc_review` | 사람이 입력한 값 한 건. 원본은 사이트 팩의 `reviews/reviews.jsonl` 이고 이 테이블은 사본이다 (ADR 0008) |
 | | `meta_schema` | 스키마 버전. 버전이 다른 DB 파일은 열지 않는다 (`run --fresh` 로 다시 만든다) |
 | 마스터 | `eq_equipment` | 장비. ISO 23725 의 FleetDefinition 구조(식별자 UUID, HID, 장비 유형)를 따른다. 같은 키는 항상 같은 UUID |
@@ -191,7 +201,14 @@ minedocscan review serve --queue haul-numbers --reviewer jp      # 127.0.0.1:876
 
 - 대기열(`review/queue.py`): `haul-numbers`(운반 숫자 표본, 기계 값 숨김), `mismatch`(교차검증 불일치 칸의 일보·행렬 셀 묶음, 기계 값 숨김),
   `pending`(검수 대기 필드 전부, 기계 값을 미리 채움), `page-fields`(차량번호·작성자 같은 쪽 메타 — 항목 = 쪽 하나, 행렬 머리글과 지금까지의
-  값이 후보 목록으로 붙는다). 정답을 만드는 대기열에서 기계 값을 숨기는 이유는 보여 주면 그 값에 끌리기 때문이다.
+  값이 후보 목록으로 붙는다. 기계가 채운 키는 묻지 않는다), `meta-check`(기계 값과 라벨·검수 값이 다른 쪽 — 두 값을 같이 보여 준다),
+  `checks`(점검표의 장비 행 표본 — 항목 = 유·무 두 칸, 기계 판정 숨김). 정답을 만드는 대기열에서 기계 값을 숨기는 이유는 보여 주면
+  그 값에 끌리기 때문이다.
+- `page-fields --audit N`: 모델이 메타를 채우기 시작하면 사람은 기계가 못 정한 쪽만 보게 되고, 자동 적재된 쪽의 오류를 잴 정답이 생기지 않는다.
+  그래서 기계의 상태와 상관없이 날짜별로 고르게 뽑은 쪽 N 개를 기계 값 없이 다시 보여 준다 (씨앗으로 고정, ADR 0014).
+- ✓ 정답(`checks`): 행의 답(유 / 무 / 표시 없음 / 모름)을 새 판정 종류로 만들지 않고 **두 체크 칸의 기존 판정**으로 적는다 —
+  유 = 유 칸 `value`·무 칸 `empty`, 무 = 반대, 표시 없음 = 둘 다 `empty`, 모름 = 둘 다 `illegible`. `POST /api/check` 한 번이 검수 두 건이다
+  (`review/checks.py`). 화면 키: `1` 유, `2` 무, `Enter` 표시 없음, `?` 모름.
 - 페이지 필드를 저장하면 그 쪽의 `prod_haul` 차량·작성자와 그 날짜의 교차검증·배차 관측이 바로 갱신된다 — 수동 라벨(`labels/pages.json`)을 대신한다.
 - 셀 이미지는 원본에 닿으면(아카이브가 연결된 컴퓨터) 쪽의 호모그래피로 원본을 300 dpi 로 렌더링해 그 셀만 정합한 것이고(`imaging/hires.py`),
   아니면 200 dpi 정합 이미지다. 응답 머리글 `X-Crop-Source` 로 어느 쪽인지 알린다. 좌표계는 그대로 템플릿 좌표 하나다.
@@ -258,6 +275,22 @@ class Corrector(Protocol):
   고른 기준에는 검증 오류율의 윌슨 95 % 상한을 같이 적는다(`auto_accept.upper95`, `info`·`recognizer list` 에도). ADR 0012.
   합성 숫자는 자체 획 정의(`tools/handfont.py`)로 그린다 — OpenCV 내장 글꼴은 판마다 모양이 달라 시험이 판에 따라 갈렸다.
 
+### 메타 필드 (표 밖 필드) — 숫자는 읽고 이름은 고른다
+
+쪽 메타가 되는 표 밖 필드(차량번호, 작성자, 월·일)는 운반 숫자보다 먼저 읽는다 (`pipeline/runner._read_meta`) — 그래야 그 쪽의 일보가 자리를
+찾는다. 설정 `[recognize.meta]` 가 키마다 모델 폴더를 정한다(`recognize/meta/model.py`). 모델이 없는 키는 지금처럼 라벨·검수만 쓴다. ADR 0013.
+
+| 읽는 법 | 키 | 방법 |
+|---|---|---|
+| `digits` | 차량번호(네 자리), 월, 일 | 숫자 인식기와 같은 CTC 망(위치 채널 없이 — 쓰는 자리가 사람마다 다르다)으로 **숫자를 읽고**, 닫힌 목록(모델 폴더의 `classes.json` + 템플릿의 `header_<키>`, 날짜는 고정 범위)의 후보마다 CTC 우도를 계산해 고른다. 가장 나은 후보보다 자유롭게 읽은 답이 훨씬(10배) 그럴듯하면 "목록에 없는 값"(`unlisted`) — 처음 보는 차는 자동 적재되지 않는다 |
+| `choice` | 작성자 | 닫힌 집합 분류기(`recognize/choice/`, 종류 0 = "그 밖"). 이름은 글자를 읽기보다 사람마다의 모양으로 고른다. 학습 날짜에 예가 3개 미만인 사람은 "그 밖" |
+
+- 후보 목록은 모델 폴더와 템플릿에서만 온다 — 검수가 쌓여도 기계의 목록은 바뀌지 않는다 (다시 학습할 때만).
+- 신뢰도 = 온도로 보정한 확률, 자동 적재 기준은 숫자 인식기와 같은 규칙(ADR 0012)에 목표 오류율 2 %. 정답이 적어 `--cv K`(날짜 묶음 교차)로
+  기준을 정할 수 있다 (ADR 0014). 이름·차량번호는 `classes.json` 에만 — 카드·로그·출력에는 종류의 수와 분포만.
+- 잉크가 전혀 없는 필드만 읽지 않는다(`empty`) — 괘선 제거가 세로획 하나짜리 "1"을 지워 잉크가 0 에 가깝게 나오는 일이 있어서.
+- 기계 값은 `doc_field`(백엔드 `meta-digits`·`meta-choice`, 후보)와 `doc_page_meta` 의 기계 열에 남는다.
+
 ### 참조한 특허 세 건이 놓이는 자리
 
 | 특허의 핵심 | 이 구조에서의 자리 | 상태 |
@@ -286,6 +319,14 @@ class Corrector(Protocol):
 값별 표, 많이 틀린 쌍, 신뢰도 구간별 정확도, 임계값별 자동 적재율·오류율, `illegible` 칸 중 자동 적재될 것, `--errors` 틀린 칸 모아 보기.
 같은 칸이면 이 평가의 답과 파이프라인의 `value_raw` 가 같다 (크롭 규격이 하나라서 — 시험으로 고정). `val` 은 카드의 검증 규칙으로 고른 train 날짜다.
 
+**쪽 메타 평가** (`eval --meta [--split]`): 정답 = `doc_page_meta` 에서 출처가 검수·라벨·파일명인 값. 키마다 기계 값의 정확도, 자동 적재율,
+자동 적재 오류율(윌슨), 목록에 없는 값의 수, **배차가 바뀐 쪽**(그 작성자의 가장 흔한 차가 아닌 차를 탄 쪽)만의 정확도 — 글씨체로 번호를
+외운 모델은 여기서 틀린다 — 그리고 기계 값만으로 정한 일보의 자리가 사람 값으로 정한 자리와 같은 비율.
+
+**✓ 판정 평가** (`eval --checks [--split]`): 기계의 답(유 / 무 / 표시 없음 / 판정 불가) × 검수로 정한 답의 표, 기계가 판정한 행 중 맞은 비율(윌슨),
+판정 불가의 비율과 그 행들의 정답 분포, 쪽(날짜) 단위로 `column_unused` 가 맞았는지. 기계의 답은 `doc_field` 의 기계 열에서 읽는다
+(쪽의 체크 칸이 전부 NULL ⇔ `column_unused`).
+
 **평가셋 분할**: 날짜 단위로 `test` / `train` 을 나누고, 어느 날짜가 `test` 인지는 날짜와 사이트 팩의 소금값(`[eval] split_salt`, `test_share`)만으로 정한다
 (`evaluate/split.py`, ADR 0009). `review export-answers --split`, `eval --split`, `review export-crops --split` 이 둘을 섞지 않는다.
 `test` 는 학습·문구 사전·임계값 조정에 쓰지 않는다. 내보낸 크롭(`OUT/<split>/<kind>/<이름>.png` + `labels.jsonl` — 이름은 field_id 에서 파일 이름에
@@ -309,6 +350,7 @@ class Corrector(Protocol):
 | 새 종류의 업무 기록 | `handlers/` + `store/schema.sql` + `tools/synth.py` + 테스트 | 있음 |
 | 새 인식 백엔드 | `recognize/<이름>.py` + `register()`, 원하는 크롭 규격은 `crop_spec`/`crop_spec_for` 로 선언 | 있음 (파이프라인은 그대로) |
 | 숫자 모델을 새로 학습 | `recognizer train` → 사이트 팩의 `models/<이름>/`, 설정 `[recognize.digits] model` | 없음 |
+| 메타 필드 모델을 새로 학습 | `review export-crops --meta` → `recognizer train --meta-key … [--cv 5]` → `models/<이름>/`, 설정 `[recognize.meta]` | 없음 |
 | 새 교정 백엔드 | `correct/<이름>.py` + `register()` | 있음 (파이프라인은 그대로) |
 | 새 교차검증 | `validate/` + 해당 핸들러의 `finalize()` | 있음 |
 | 운영 DB | `store/db.py` 의 연결·자리표시자 | 있음 (스키마는 그대로) |

@@ -17,3 +17,5 @@
 | [0010](0010-template-versions-by-date.md) | 양식의 판은 템플릿을 따로 두고 날짜로 가린다 | 채택 |
 | [0011](0011-recognizer-input-and-runtime.md) | 인식기 입력 규격은 하나, 학습은 torch·추론은 ONNX + OpenCV, 모델은 사이트 팩에 | 채택 |
 | [0012](0012-empty-reject-and-auto-accept.md) | 숫자 인식기의 답은 셋(숫자열·빈 칸·거절), 자동 적재 기준은 검증 날짜에서 | 채택 |
+| [0013](0013-page-fields-read-and-choose.md) | 표 밖 필드: 숫자는 읽고 이름은 고른다, 닫힌 목록은 검수와 무관, 기계 값은 메타의 맨 아래 | 채택 |
+| [0014](0014-small-truth-cv-and-audit.md) | 정답이 적을 때: 기준은 날짜 묶음 교차로, 자동 적재된 쪽은 표본으로 다시 본다 | 채택 |
