@@ -63,7 +63,43 @@ def build_report(con: sqlite3.Connection) -> dict:
         "equipment": one("SELECT COUNT(*) FROM eq_equipment"),
         # 수기 칸을 값으로 만든 주체별: 칸 수, 기계가 자동 적재한 수(status_raw), 지금 검수 대기·검수된 수
         "fields_by_backend": _by_backend(con),
+        # 쪽 메타 (tasks/0004): 키마다 출처별·대조 결과별 쪽 수, 기계의 상태별 수. 일보 중 자리가 정해진 쪽과 그 출처
+        "page_meta": page_meta_summary(con),
+        "log_slots": log_slots(con),
     }
+
+
+def page_meta_summary(con: sqlite3.Connection) -> dict:
+    """키마다: 쪽 수, 출처별(review | label | filename | machine | none), 대조 결과별, 기계의 상태별 (읽지 않았으면 빠진다)."""
+    out: dict = {}
+    for k, src, chk, ms, n in con.execute(
+            "SELECT meta_key, COALESCE(source, 'none'), check_result, machine_status, COUNT(*) FROM doc_page_meta "
+            "GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4"):
+        d = out.setdefault(k, {"pages": 0, "by_source": {}, "by_check": {}, "machine": {}})
+        d["pages"] += n
+        d["by_source"][src] = d["by_source"].get(src, 0) + n
+        d["by_check"][chk] = d["by_check"].get(chk, 0) + n
+        if ms is not None:
+            d["machine"][ms] = d["machine"].get(ms, 0) + n
+    return out
+
+
+def log_slots(con: sqlite3.Connection) -> dict:
+    """일보(prod_haul 의 log) 쪽 중 행렬의 자리가 정해진 쪽의 수와, 자리를 정한 키(작성자·차량번호)의 출처별 수."""
+    pages = con.execute("SELECT page_id, MAX(work_date), MAX(slot) FROM prod_haul WHERE source_role = 'log' GROUP BY 1").fetchall()
+    how = {(r[0], r[1]): r[2] for r in con.execute("SELECT work_date, slot, matched_by FROM eq_assignment_obs")}
+    src = {(r[0], r[1]): r[2] for r in con.execute(
+        "SELECT page_id, meta_key, COALESCE(source, 'none') FROM doc_page_meta WHERE meta_key IN ('operator', 'vehicle_no')")}
+    by_source: dict[str, int] = {}
+    resolved = 0
+    for pid, date, slot in pages:
+        if slot is None:
+            continue
+        resolved += 1
+        key = "operator" if how.get((date, slot)) == "operator" else "vehicle_no"
+        s = src.get((pid, key), "none")
+        by_source[s] = by_source.get(s, 0) + 1
+    return {"log_pages": len(pages), "resolved": resolved, "by_source": dict(sorted(by_source.items()))}
 
 
 def _by_backend(con: sqlite3.Connection) -> dict:
@@ -116,6 +152,29 @@ def format_by_month(rows: list[dict]) -> str:
         lines.append(f"{g['month']:<8} {g['template']:<24} {g['pages']:>5} {g['loaded']:>5} {g['align_failed']:>8} "
                      f"{g['error']:>4} {v(g['min_inliers']):>10} {v(g['grid_err_median']):>8} "
                      f"{v(g['grid_err_max']):>8} {g['low_margin']:>8}")
+    return "\n".join(lines)
+
+
+def meta_mismatch_pages(con: sqlite3.Connection, meta_key: str | None = None) -> list[dict]:
+    """기계가 읽은 값이 사람·파일명의 값과 다른 쪽 (doc_page_meta.check_result = mismatch). 값은 내지 않는다 — 화면에서 본다."""
+    sql = ("SELECT d.source_name || '#' || p.page_no AS source, p.page_id, p.work_date, p.template_name, m.meta_key, "
+           "m.source AS value_source, m.machine_status, m.machine_confidence FROM doc_page_meta m "
+           "JOIN doc_page p ON m.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
+           "WHERE m.check_result = 'mismatch'")
+    args: list = []
+    if meta_key:
+        sql += " AND m.meta_key = ?"
+        args.append(meta_key)
+    sql += " ORDER BY p.work_date, d.source_name, p.page_no, m.meta_key"
+    return [dict(r) for r in con.execute(sql, args)]
+
+
+def format_meta_mismatch(rows: list[dict]) -> str:
+    lines = [f"{'출처':<28} {'날짜':<10} {'양식':<24} {'키':<11} {'값의 출처':<9} 기계"]
+    for r in rows:
+        conf = "-" if r["machine_confidence"] is None else f"{r['machine_confidence']:.2f}"
+        lines.append(f"{r['source']:<28} {r['work_date'] or '-':<10} {r['template_name'] or '-':<24} {r['meta_key']:<11} "
+                     f"{r['value_source'] or '-':<9} {r['machine_status']} ({conf})")
     return "\n".join(lines)
 
 
@@ -185,8 +244,15 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
             for k, a in rep["xcheck_agreement"].items()),
         f"검수: 필드 {rep['reviews']['fields']}개 검수 기록, reviewed 상태 {rep['reviews']['fields_reviewed']}개",
         f"배차 관측 {rep['assignments']['n']}건 — 인쇄된 머리글과 다름 {rep['assignments']['header_mismatch']}건",
+        f"일보 {rep['log_slots']['log_pages']}쪽 중 자리가 정해진 쪽 {rep['log_slots']['resolved']} (정한 키의 출처: "
+        f"{kv(rep['log_slots']['by_source'])})",
         f"장비 마스터 {rep['equipment']}대",
     ]
+    for k, d in rep["page_meta"].items():
+        if k == "date" and not d["machine"]:
+            continue
+        lines.append(f"쪽 메타 {k}: {d['pages']}쪽 — 출처 {kv(d['by_source'])}; 대조 {kv(d['by_check'])}"
+                     + (f"; 기계 {kv(d['machine'])}" if d["machine"] else ""))
     if by_date:
         lines.append("날짜별 교차검증:")
         for d in by_date:

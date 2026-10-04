@@ -34,19 +34,23 @@ from ..correct import Corrector, get_corrector
 from ..forms.classify import FormClassifier
 from ..forms.sitepack import SitePack
 from ..handlers import PageContext, get_handler
+from ..handlers.base import apply_reviews, field_row
 from ..imaging.align import align_to_template
 from ..imaging.cells import observe_cells
-from ..imaging.cropspec import PageImages
+from ..imaging.cropspec import PageImages, crop_cell
 from ..imaging.io import IMAGE_EXT, SUPPORTED_EXT, imwrite, load_pages
 from ..recognize import Recognizer, build_recognizer
+from ..recognize.meta.model import build_meta_readers
 from ..review.store import import_into
 from ..store.db import open_db, upsert
 
 
 class Pipeline:
     def __init__(self, settings: Settings, site: SitePack | None = None, recognizer: Recognizer | None = None,
-                 corrector: Corrector | None = None, con: sqlite3.Connection | None = None, load_reviews: bool = True):
-        """load_reviews=False 면 검수 파일을 읽어 들이지 않는다 — 회귀 검사처럼 기계 값만 봐야 할 때."""
+                 corrector: Corrector | None = None, con: sqlite3.Connection | None = None, load_reviews: bool = True,
+                 meta_readers: dict | None = None):
+        """load_reviews=False 면 검수 파일을 읽어 들이지 않는다 — 회귀 검사처럼 기계 값만 봐야 할 때.
+        meta_readers: 메타 필드 모델 {키: MetaModel}. None 이면 설정([recognize.meta])에서 만든다."""
         self.settings = settings
         if site is None:
             if settings.site is None:
@@ -55,6 +59,9 @@ class Pipeline:
         self.site = site
         self.recognizer = recognizer or build_recognizer(settings, site)
         self.corrector = corrector or get_corrector(settings.corrector)
+        # 표 밖 메타 필드(차량번호·작성자·날짜의 월·일)의 모델 — [recognize.meta]. 없으면 지금처럼 읽지 않는다 (tasks/0004 단계 5)
+        self.meta_readers = build_meta_readers(settings, site) if meta_readers is None else meta_readers
+        self._meta_candidates: dict[str, list[str]] = {}
         self.con = con or open_db(settings.resolved_db_url)
         self.classifier = FormClassifier(list(site.templates.values()))
         self._handlers: dict[str, object] = {}
@@ -212,20 +219,25 @@ class Pipeline:
 
         # extract → (recognize → correct → validate → load: 핸들러)
         upsert(self.con, "doc_page", page)      # doc_field 가 참조하므로 먼저 적는다
-        # 쪽 메타: 검수값 > 라벨 > 파일명 (> 기계 값) — 출처와 함께 doc_page_meta 에. 핸들러는 그 최종 값을 쓴다
-        human = pagemeta.human_values(self.con, self.site, source_name, page_no, page_id, tpl)
-        meta_rows = pagemeta.resolve(page_id, tpl, human)
-        pagemeta.write(self.con, page_id, meta_rows)
-        meta = pagemeta.final_meta(meta_rows)
         handler = self._handler(tpl.handler)
         # 원본 쪽은 인식기가 원본 해상도 규격을 원할 때만, 쪽마다 한 번 렌더링한다 (PageImages)
         is_image = source_path is not None and Path(source_path).suffix.lower() in IMAGE_EXT
         images = PageImages(aligned=ar.warped, source=source_path, page_no=page_no, homography=ar.homography,
                             render_dpi=self.settings.dpi, source_dpi=self.settings.source_dpi,
                             damaged=self.settings.damaged_pdf, source_image=gray if is_image else None)
+        obs = observe_cells(ar.warped, tpl)
+        # 메타 필드를 핸들러보다 먼저 읽는다 — 쪽 메타가 핸들러가 행을 만들기 전에 정해져 있어야 한다 (tasks/0004 단계 5)
+        meta_obs, machine, reads = self._read_meta(tpl, obs, images)
+        # 쪽 메타: 검수값 > 라벨 > 파일명 > 기계 값 — 출처·대조와 함께 doc_page_meta 에. 핸들러는 그 최종 값을 쓴다
+        human = pagemeta.human_values(self.con, self.site, source_name, page_no, page_id, tpl)
+        meta_rows = pagemeta.resolve(page_id, tpl, human, machine)
+        pagemeta.write(self.con, page_id, meta_rows)
+        meta = pagemeta.final_meta(meta_rows)
         ctx = PageContext(self.con, self.settings, self.site, tpl, document_id, page_id, page_no, source_name,
-                          meta, ar.warped, observe_cells(ar.warped, tpl), self.recognizer, self.corrector,
+                          meta, ar.warped, [o for o in obs if id(o) not in meta_obs], self.recognizer, self.corrector,
                           images=images)
+        if reads:                                   # 읽은 메타 필드의 doc_field 행 (기계 값 + 검수)
+            upsert(self.con, "doc_field", apply_reviews(ctx, [_meta_field_row(ctx, o, r) for o, r in reads]))
         result = handler.load(ctx)
         page["status"] = "loaded"
         hs = s["handlers"].setdefault(tpl.handler, {})
@@ -235,6 +247,33 @@ class Pipeline:
         out = self._close_page(page)
         out.update(result)
         return out
+
+    def _read_meta(self, tpl, obs, images: PageImages) -> tuple[set, dict, list]:
+        """모델이 있는 메타 필드를 읽는다. 돌려주는 값: (읽은 칸의 id — 핸들러에 넘기지 않는다, {키: MachineRead},
+        [(칸, (Choice | None, 상태, 모델))]). 잉크가 전혀 없을 때만 읽지 않고 empty.
+        잉크 비율로 거르지 않는다: 큰 필드에 쓴 "1" 하나는 세로 획이라 괘선 지우기(cells.remove_rules)가 지워 잉크가 0.0004 까지
+        내려갔다 (합성 월 필드, 다른 필드는 0.03 이상) — 칸의 잉크 문턱(0.006–0.008)이면 쓴 날짜를 빈 칸으로 잘못 친다.
+        빈 필드는 모델이 거절하고(검수 대기) 끝난다."""
+        if not self.meta_readers:
+            return set(), {}, []
+        used, machine, reads = set(), {}, []
+        for o in obs:
+            key = o.cell.col_meta.get("meta_key") if o.cell.region == "fields" else None
+            reader = self.meta_readers.get(key) if key else None
+            if reader is None:
+                continue
+            used.add(id(o))
+            if o.ink <= 0.0:
+                machine[key] = pagemeta.MachineRead(None, None, "empty")
+                reads.append((o, (None, "empty", reader)))
+                continue
+            if key not in self._meta_candidates:
+                self._meta_candidates[key] = reader.candidates(key, self.site)
+            c = reader.read(crop_cell(images, o.cell.bbox, reader.spec), key, self._meta_candidates[key])
+            status = reader.status(c)
+            machine[key] = pagemeta.MachineRead(c.value, float(c.confidence), status)
+            reads.append((o, (c, status, reader)))
+        return used, machine, reads
 
     def _close_page(self, page: dict) -> dict:
         upsert(self.con, "doc_page", page)
@@ -258,6 +297,18 @@ class Pipeline:
                 self.summary.setdefault("finalize", {})[name] = extra
         self.con.commit()
         return self.summary
+
+
+def _meta_field_row(ctx: PageContext, o, read) -> dict:
+    """읽은 메타 필드 하나의 doc_field 행. 기계 값은 value_raw·confidence·candidates·backend·status_raw 에 — 검수가 건드리지 않는다.
+    backend = "meta-<읽는 법>" (meta-digits | meta-choice). 자동 적재가 아니면 검수 대기 (목록에 없는 값·거절 포함)."""
+    c, status, reader = read
+    if c is None:                                              # 잉크 없음: 빈 필드로 확정
+        return field_row(ctx, o, has_value=False, value_raw="", value_final="", confidence=1.0, candidates=None,
+                         backend="ink", review_status="auto")
+    return field_row(ctx, o, has_value=True, value_raw=c.value, value_final=c.value, confidence=float(c.confidence),
+                     candidates=c.candidates, backend=f"meta-{reader.reader}",
+                     review_status="auto" if status == "auto" else "pending")
 
 
 def update_document_status(con: sqlite3.Connection, document_id: str) -> str:

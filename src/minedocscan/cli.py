@@ -68,11 +68,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--low-margin", action="store_true", help="분류 여유가 classify_min_margin 아래인 쪽만")
     p.add_argument("--thumbs", nargs="?", const="", metavar="DIR",
                    help="목록의 쪽을 1/4 로 줄인 PNG 로 쓴다 (기본 WORK_ROOT/thumbs/<상태>/). 저장소 밖에만")
+    p.add_argument("--meta-mismatch", action="store_true",
+                   help="기계가 읽은 메타 값이 사람·파일명의 값과 다른 쪽 (날짜 포함). 값은 찍지 않는다 — 검수 화면 meta-check 에서 본다")
+    p.add_argument("--meta-key", help="--meta-mismatch: 이 키만 (vehicle_no, operator, date.day …)")
 
     p = sub.add_parser("eval", parents=[common], help="정답과 비교")
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--answers", help="정답 JSON (synth 가 만드는 answers.json 형식)")
     g.add_argument("--inspection-csv", metavar="DIR", help="점검표 정답 CSV 폴더 (YYMMDD.csv)")
+    g.add_argument("--meta", action="store_true",
+                   help="쪽 메타: 기계가 읽은 값 대 사람·파일명의 값 — 키마다 정확도·자동 적재율·자동 적재 오류율, 배차가 바뀐 쪽, 자리")
     p.add_argument("--template", help="--inspection-csv 가 가리키는 템플릿 (기본: 핸들러가 inspection 인 유일한 템플릿)")
     p.add_argument("--target", choices=["final", "raw"], default="final",
                    help="final = 최종값(교정·검수 후), raw = 기계가 읽은 값. 검수값과 비교할 때는 raw")
@@ -109,7 +114,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
     r = rsub.add_parser("serve", parents=[common], help="로컬 검수 화면 (127.0.0.1)")
-    r.add_argument("--queue", default="haul-numbers", choices=["haul-numbers", "mismatch", "pending", "page-fields"])
+    r.add_argument("--queue", default="haul-numbers", choices=["haul-numbers", "mismatch", "pending", "page-fields", "meta-check"])
+    r.add_argument("--audit", type=int, metavar="N",
+                   help="page-fields: 기계의 상태와 상관없이 날짜별로 고르게 뽑은 쪽 N 개 (기계 값 없이) — 자동 적재된 쪽의 정답")
     r.add_argument("--n", type=int, default=1500, help="haul-numbers 표본 크기 (기본 1500)")
     r.add_argument("--seed", type=int, default=0, help="표본의 순서를 정하는 씨앗. 같은 값이면 같은 표본")
     r.add_argument("--empty-share", type=float, default=0.1, help="표본 중 빈 칸 비율 (기본 0.1)")
@@ -216,6 +223,7 @@ def cmd_info(a) -> int:
     lines.append("백엔드: " + ", ".join(f"{k}={v}" for k, v in data["backends"].items()))
     site = _need_site(s) if s.site and Path(s.site).is_dir() else None
     data["recognizer"] = _describe_recognizer(s, site)
+    data["meta_readers"] = _describe_meta(s, site)
     rec = data["recognizer"]
     if "error" in rec:
         lines.append(f"인식기: 준비할 수 없습니다 — {rec['error']}")
@@ -227,6 +235,14 @@ def cmd_info(a) -> int:
                  + "), "
                  f"학습 셀 {d['train_cells']} + 합성 {d['synthetic_cells']}") if "model" in d else ""
             lines.append(f"인식기 [{kind}]: {d['backend']}{m}")
+    mr = data["meta_readers"]
+    if "error" in mr:
+        lines.append(f"메타 필드: 준비할 수 없습니다 — {mr['error']}")
+    for k, d in mr.get("by_key", {}).items():
+        lines.append(f"메타 필드 [{k}]: 모델 {d['model']} ({d['reader']}, {d['path']}), 규격 {d['spec']}, 자동 적재 기준 "
+                     f"{d['auto_accept_conf'] if d['auto_accept_conf'] is not None else '없음'}"
+                     + (f" (검증 오류율 95 % 상한 {d['auto_accept_upper95']:.1%}, {d['method']})"
+                        if d.get("auto_accept_upper95") is not None else f" ({d['method']})"))
     if site is not None:
         tpls = [{"name": t.name, "title": t.title, "handler": t.handler, "regions": len(t.regions),
                  "cells": len(t.cells()) + len(t.fields), "status": "cells" if t.has_cells else "classify_only",
@@ -263,6 +279,17 @@ def _describe_recognizer(s: Settings, site) -> dict:
     return {"by_kind": {k: one(backend_for(k)) for k in KINDS}}
 
 
+def _describe_meta(s: Settings, site) -> dict:
+    """info: 메타 필드 키마다 모델·읽는 법·기준(상한 포함). 값(이름·차량번호)은 내지 않는다."""
+    from .recognize.meta.model import MetaModelError, build_meta_readers
+
+    try:
+        readers = build_meta_readers(s, site)
+    except MetaModelError as e:
+        return {"error": str(e)}
+    return {"by_key": {k: m.describe() for k, m in sorted(readers.items())}}
+
+
 def cmd_run(a) -> int:
     from .pipeline import Pipeline
     from .recognize import OracleRecognizer, build_recognizer, load_answers_json
@@ -287,9 +314,15 @@ def cmd_run(a) -> int:
             recognizer = build_recognizer(s, site)
         except (KeyError, ValueError, FileNotFoundError) as e:
             raise SystemExit(f"인식 백엔드를 준비할 수 없습니다: {e}") from e
+    from .recognize.meta.model import MetaModelError, build_meta_readers
+
+    try:
+        meta_readers = build_meta_readers(s, site)
+    except MetaModelError as e:
+        raise SystemExit(f"메타 필드 모델을 준비할 수 없습니다: {e}") from e
     if a.fresh and s.resolved_db_url.startswith("sqlite:///"):   # 인식기(모델)를 준비한 뒤에 지운다 — 모델이 없으면 DB 는 그대로
         Path(s.resolved_db_url[len("sqlite:///"):]).unlink(missing_ok=True)
-    pipe = Pipeline(s, site=site, recognizer=recognizer)
+    pipe = Pipeline(s, site=site, recognizer=recognizer, meta_readers=meta_readers)
     files = pipe.expand(paths)
     if not files:
         raise SystemExit(f"처리할 파일이 없습니다: {[str(p) for p in paths]}")
@@ -344,6 +377,13 @@ def cmd_pages(a) -> int:
 
     s = _settings(a)
     con = open_db(s.resolved_db_url)
+    if a.meta_mismatch or a.meta_key:
+        from .report import format_meta_mismatch, meta_mismatch_pages
+
+        mm = meta_mismatch_pages(con, a.meta_key)
+        _emit(a, {"meta_mismatch": mm}, format_meta_mismatch(mm) + f"\n대조가 어긋난 (쪽, 키) {len(mm)}개 — "
+              "검수 화면: minedocscan review serve --queue meta-check")
+        return 0
     rows = list_pages(con, status=a.status, template=a.template,
                       low_margin=s.classify_min_margin if a.low_margin else None)
     written = []
@@ -370,6 +410,8 @@ def cmd_eval(a) -> int:
           "site": _need_site(s) if (a.split != "all" or s.site) and s.site and Path(s.site).is_dir() else None}
     if a.split != "all" and kw["site"] is None:
         raise SystemExit("--split 에는 사이트 팩이 필요합니다: --site 또는 MINEDOCSCAN_SITE")
+    if a.meta:
+        return _eval_meta(a, con, kw["site"])
     if a.answers:
         data = {"fields": evaluate_fields(con, load_answers_json(a.answers), **kw)}
     else:
@@ -399,6 +441,23 @@ def cmd_eval(a) -> int:
         lines.append(f"점검 행 {d['rows']}개: 점검내역 CER {d['remark_corpus_cer']}, "
                      f"정확도 {d['remark_field_accuracy']}, 행 자동 적재율 {d['auto_rate']}")
     _emit(a, data, "\n".join(lines))
+    return 0
+
+
+def _eval_meta(a, con, site) -> int:
+    from .evaluate.meta import evaluate_meta
+
+    r = evaluate_meta(con, split=a.split, site=site)
+    lines = [f"쪽 메타 (분할 {a.split}) — 정답은 사람·파일명의 값 (기계가 채운 값은 정답이 아니다)"]
+    for k, d in r["keys"].items():
+        e = d["auto_error"]
+        lines.append(f"  {k}: 정답이 있는 쪽 {d['n']} — 기계 값 정확도 {d['accuracy']}, 자동 적재율 {d['auto_rate']}, "
+                     f"자동 적재 오류 {e['wrong']}/{e['auto']} (95% {e['ci95'][0]}–{e['ci95'][1]}), 목록에 없는 값 {d['unlisted']}, "
+                     f"배차가 바뀐 쪽 {d['changed']['n']}에서 정확도 {d['changed']['accuracy']} · 정답 없이 읽은 쪽 {d['read_without_truth']}")
+    s = r["slots"]
+    lines.append(f"일보의 자리: 사람 값으로 정한 {s['pages']}쪽 중 기계 값만으로 같은 자리 {s['same']} ({s['rate']}), "
+                 f"기계 값만으로 자리가 정해진 쪽 {s['machine_resolved']}")
+    _emit(a, {"meta": r}, "\n".join(lines))
     return 0
 
 
@@ -491,7 +550,8 @@ def cmd_review(a) -> int:
         if imported["skipped"]:
             print(f"주의: 검수 파일에서 깨진 줄 {imported['skipped']}개를 건너뛰었습니다 ({imported['path']})", file=sys.stderr)
         app = ReviewApp(con, site, s, a.reviewer, a.queue,
-                        {"n": a.n, "seed": a.seed, "empty_share": a.empty_share, "template": a.template, "kind": a.kind})
+                        {"n": a.n, "seed": a.seed, "empty_share": a.empty_share, "template": a.template, "kind": a.kind,
+                         "audit": a.audit})
         try:
             serve(app, port=a.port)
         except OSError as e:

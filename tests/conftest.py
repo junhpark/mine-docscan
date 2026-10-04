@@ -175,3 +175,48 @@ def meta_null(meta_synth, tmp_path_factory):
     pipe = Pipeline(settings)
     pipe.run([meta_synth.scans])
     return {"root": root, "settings": settings, "pipe": pipe}
+
+
+META_FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def meta_options() -> dict:
+    """시험용 메타 필드 모델 두 개를 네 키에 (설정 [recognize.meta] 와 같은 모양)."""
+    d, o = str(META_FIXTURES / "meta-digits"), str(META_FIXTURES / "meta-operator")
+    return {"meta": {"vehicle_no": d, "date.month": d, "date.day": d, "operator": o}}
+
+
+def meta_run(synth, root: Path, labels: dict | None = None, **kw) -> dict:
+    """사이트 팩을 복사해(라벨을 labels 로 바꿔) 메타 필드 모델로 돌린다. 정합 이미지는 저장하지 않는다."""
+    import json
+    import shutil
+
+    site = root / "site"
+    shutil.copytree(synth.site, site)
+    if labels is not None:
+        (site / "labels" / "pages.json").write_text(json.dumps(labels, ensure_ascii=False), encoding="utf-8")
+    kw.setdefault("save_aligned", False)
+    settings = Settings(site=site, archive_root=synth.scans, work_root=root / "work", reviews=root / "reviews.jsonl",
+                        recognizer_options=meta_options(), **kw)
+    pipe = Pipeline(settings)
+    pipe.run([synth.scans])
+    return {"root": root, "settings": settings, "pipe": pipe}
+
+
+@pytest.fixture(scope="session")
+def meta_truth(meta_synth) -> dict:
+    import json
+
+    return json.loads((meta_synth.site / "labels" / "pages.json").read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="session")
+def meta_nolabels(meta_synth, tmp_path_factory) -> dict:
+    """meta_synth 를 라벨 없이 메타 필드 모델로 돌린 것. 이 DB 에 쓰지 않는다."""
+    return meta_run(meta_synth, tmp_path_factory.mktemp("meta_nolabels"), labels={})
+
+
+@pytest.fixture(scope="session")
+def meta_labeled(meta_synth, tmp_path_factory) -> dict:
+    """meta_synth 를 라벨 그대로 메타 필드 모델로 돌린 것 (기계 값은 대조에만). 이 DB 에 쓰지 않는다."""
+    return meta_run(meta_synth, tmp_path_factory.mktemp("meta_labeled"))

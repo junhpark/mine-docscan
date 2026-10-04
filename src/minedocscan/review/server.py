@@ -56,7 +56,7 @@ class ReviewApp:
 
     def queue_json(self, params: dict) -> dict:
         opts = dict(self.queue_opts)
-        for k, cast in (("n", int), ("seed", int), ("empty_share", float), ("template", str), ("kind", str)):
+        for k, cast in (("n", int), ("seed", int), ("empty_share", float), ("template", str), ("kind", str), ("audit", int)):
             if params.get(k):
                 try:
                     opts[k] = cast(params[k])
@@ -66,7 +66,7 @@ class ReviewApp:
         if name not in QUEUES:
             raise ApiError(400, f"알 수 없는 대기열: {name}")
         q = build_queue(self.con, name, site=self.site,
-                        **{k: v for k, v in opts.items() if k in ("n", "seed", "empty_share", "template", "kind")})
+                        **{k: v for k, v in opts.items() if k in ("n", "seed", "empty_share", "template", "kind", "audit")})
         q.update(reviewer=self.reviewer, site=self.site.name, show_machine=(name == "pending"),
                  templates={t.name: t.title for t in self.site.templates.values()})
         return q
