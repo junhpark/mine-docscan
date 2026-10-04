@@ -178,7 +178,7 @@ class ReviewApp:
                 "applied": all(o["applied"] for o in outs), "reviewed_at": reviews[0].reviewed_at}
 
     def stats_json(self) -> dict:
-        return stats(self.con)
+        return stats(self.con, self.site)
 
 
 def index_html() -> bytes:

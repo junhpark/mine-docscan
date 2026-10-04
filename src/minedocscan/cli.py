@@ -117,9 +117,11 @@ def build_parser() -> argparse.ArgumentParser:
     rsub = p.add_subparsers(dest="review_command", required=True)
     r = rsub.add_parser("serve", parents=[common], help="로컬 검수 화면 (127.0.0.1)")
     r.add_argument("--queue", default="haul-numbers",
-                   choices=["haul-numbers", "mismatch", "pending", "page-fields", "meta-check", "checks"])
+                   choices=["haul-numbers", "mismatch", "pending", "page-fields", "meta-check", "checks", "readings",
+                            "usage-check"])
     r.add_argument("--audit", type=int, metavar="N",
-                   help="page-fields: 기계의 상태와 상관없이 날짜별로 고르게 뽑은 쪽 N 개 (기계 값 없이) — 자동 적재된 쪽의 정답")
+                   help="page-fields·readings: 기계의 상태(잉크)와 상관없이 날짜별로 고르게 뽑은 쪽 N 개 (기계 값 없이) — "
+                        "자동 적재된(빈 칸으로 본) 쪽의 오류를 잴 정답")
     r.add_argument("--n", type=int, help="표본 크기: haul-numbers 기본 1500, checks(점검표 행) 기본 300")
     r.add_argument("--seed", type=int, default=0, help="표본의 순서를 정하는 씨앗. 같은 값이면 같은 표본")
     r.add_argument("--empty-share", type=float, default=0.1, help="표본 중 빈 칸 비율 (기본 0.1)")
@@ -593,6 +595,9 @@ def cmd_review(a) -> int:
                  "분할별(value·empty): " + (", ".join(f"{k} {v['fields']}셀/{v['dates']}일" for k, v in st["by_split"].items()) or "-")
                  + f"  (소금값 {site.split_salt}, test 비율 {site.test_share})",
                  f"✓ 검수: 점검표 행 {st['checks']['rows']}개 (체크 칸 {st['checks']['fields']}개)",
+                 "값의 형식별: " + kv(st["by_format"]),
+                 "대기열별(끝남/모집단, 기본 설정): " + (", ".join(f"{k} {v['done']}/{v['total']}" for k, v in st["by_queue"].items()
+                                                         if v["total"]) or "-"),
                  f"템플릿 좌표가 달라진 기록 {st['bbox_changed']}개, 이 DB 에 없는 필드 {st['fields_not_in_db']}개"]
         _emit(a, {"reviews": imported, "stats": st}, "\n".join(lines))
         return 0

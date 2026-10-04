@@ -297,19 +297,23 @@ def save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
 
 # ── 현황 ───────────────────────────────────────────────────────────────────
 def stats(con: sqlite3.Connection, site=None) -> dict:
-    """얼마나 했는지: 유효한 검수의 판정별·양식별·날짜별 건수, 검수자별 기록 수, bbox 가 달라진 기록 수, ✓ 검수(체크 칸 수와
-    행 수 — 행 하나 = 유·무 두 칸), (site 가 있으면) 분할별 건수와 날짜 수."""
+    """얼마나 했는지: 유효한 검수의 판정별·양식별·날짜별·값의 형식별 건수, 검수자별 기록 수, bbox 가 달라진 기록 수, ✓ 검수(체크 칸
+    수와 행 수 — 행 하나 = 유·무 두 칸), (site 가 있으면) 분할별 건수와 날짜 수, 대기열마다 끝난 수 / 모집단 (기본 설정)."""
     eff = effective(con)
     by_verdict: dict[str, int] = {}
     by_template: dict[str, int] = {}
     by_date: dict[str, int] = {}
     bbox_changed = not_in_db = 0
     dates = dict(con.execute("SELECT page_id, work_date FROM doc_page"))
-    fields = {r["field_id"]: r for r in con.execute("SELECT field_id, kind, x0, y0, x1, y1 FROM doc_field")}
+    fields = {r["field_id"]: r for r in con.execute("SELECT field_id, kind, format, x0, y0, x1, y1 FROM doc_field")}
     check_rows: set[tuple] = set()
     check_fields = 0
+    by_format: dict[str, int] = {}
     for fid, rv in eff.items():
         by_verdict[rv.verdict] = by_verdict.get(rv.verdict, 0) + 1
+        if fid in fields and fields[fid]["kind"].startswith("handwritten"):     # 값의 형식별 (글자 칸은 text)
+            fmt = fields[fid]["format"] or "text"
+            by_format[fmt] = by_format.get(fmt, 0) + 1
         by_template[rv.template or "unknown"] = by_template.get(rv.template or "unknown", 0) + 1
         d = dates.get(rv.page_id) or "unknown"
         by_date[d] = by_date.get(d, 0) + 1
@@ -335,7 +339,14 @@ def stats(con: sqlite3.Connection, site=None) -> dict:
             "by_verdict": dict(sorted(by_verdict.items())), "by_template": dict(sorted(by_template.items())),
             "by_date": dict(sorted(by_date.items())), "by_reviewer": by_reviewer,
             "bbox_changed": bbox_changed, "fields_not_in_db": not_in_db, "by_split": by_split,
-            "checks": {"fields": check_fields, "rows": len(check_rows)}}
+            "checks": {"fields": check_fields, "rows": len(check_rows)}, "by_format": dict(sorted(by_format.items())),
+            "by_queue": _queue_progress(con, site) if site is not None else {}}
+
+
+def _queue_progress(con: sqlite3.Connection, site) -> dict:
+    from .queue import queue_progress
+
+    return queue_progress(con, site)
 
 
 def effective_with_split(con: sqlite3.Connection, site) -> list[tuple[Review, str, str | None]]:

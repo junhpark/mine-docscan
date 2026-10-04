@@ -68,7 +68,8 @@ def test_pending_lists_only_input_kinds_and_shows_machine(null_run):
     assert all(i["title"].split(" · ")[1] == T_LOG for i in only_log["items"])
     with pytest.raises(KeyError):
         build_queue(con, "nope")
-    assert set(QUEUES) == {"haul-numbers", "mismatch", "pending", "page-fields", "meta-check", "checks"}
+    assert set(QUEUES) == {"haul-numbers", "mismatch", "pending", "page-fields", "meta-check", "checks", "readings",
+                           "usage-check"}
 
 
 def test_reviewed_and_illegible_fields_leave_every_queue(day):

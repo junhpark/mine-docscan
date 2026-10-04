@@ -12,6 +12,12 @@
   checks        점검표의 장비 행 표본 (✓ 판정의 정답, tasks/0004 단계 6). 항목 = 행 하나(유·무 두 칸). 기계의 판정은 숨긴다.
                 판정 불가인 행, 점검을 하지 않은 날(column_unused)의 행도 모집단에 있다 — 표시가 없다는 것도 정답이다.
                 검수한 행도 목록에 남긴다 (answer) — 다시 열면 전에 고른 답이 보인다
+  readings      가동 일보의 계기 칸 (tasks/0005 단계 5). 항목 = 쪽 하나 (시작·종료·총을 한 번에). 계기 표에 잉크가 있는 쪽,
+                audit=N 이면 잉크와 상관없이 날짜별로 고르게 뽑은 쪽 N 개. 기계 값도 앞날의 값도 싣지 않는다 (4.7 — 보여 주면 따라 적는다)
+  usage-check   가동 일보의 검산이 어긋난 것 (xcheck_usage 의 gap·overlap·mismatch). 항목 = 검산 하나: 비교한 칸들(다른 쪽이면
+                두 쪽)과 지금 값, 차이. 고칠 칸만 고쳐 저장한다 — 고쳐서 맞으면 끝, 여전히 어긋나면 남는다. 아무것도 고치지 않고
+                저장하면 "종이에 적힌 대로"를 확인한 것이고 끝난다 (어긋남은 xcheck_usage 와 리포트에 그대로 남는다 — ADR 0006).
+                이 대기열의 검수는 note 에 검산 id 를 남긴다 (USAGE_CHECK_NOTE)
 
 haul-numbers 의 표본 규칙 (docs/tasks/0001-review-tool.md 단계 3)
   · 모집단: prod_haul 의 셀. 값이 있다고 판단된 셀(has_value_raw=1)에서 n×(1−empty_share), 비었다고 판단된 셀에서
@@ -30,14 +36,17 @@ from dataclasses import asdict, dataclass, field
 
 from .store import effective, field_id_of
 
-QUEUES = ("haul-numbers", "mismatch", "pending", "page-fields", "meta-check", "checks")
+QUEUES = ("haul-numbers", "mismatch", "pending", "page-fields", "meta-check", "checks", "readings", "usage-check")
+USAGE_CHECK_NOTE = "usage-check:"           # usage-check 대기열에서 저장한 검수의 note 앞부분 (뒤는 검산 id)
+BAD_RESULTS = ("gap", "overlap", "mismatch")
+METER_LABELS = {"start": "계기 시작", "end": "계기 종료", "total": "총"}
 DEFAULT_N = {"haul-numbers": 1500, "checks": 300}
 HUMAN_SOURCES = ("review", "label", "filename")
 INPUT_KINDS = ("handwritten_number", "handwritten_text")      # 이 화면이 입력받는 셀 종류
 
 _FIELD_SQL = (
     "SELECT f.field_id, f.page_id, f.region, f.row_no, f.field_name, f.kind, f.format, f.row_key, f.x0, f.y0, f.x1, f.y1, "
-    "f.has_value_raw, f.value_raw, f.confidence, f.backend, f.review_status, "
+    "f.has_value_raw, f.value_raw, f.confidence, f.backend, f.review_status, f.has_value, f.value_final, "
     "p.template_name, p.page_no, p.work_date, d.source_name "
     "FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id ")
 
@@ -52,6 +61,7 @@ class QueueCell:
     meta_key: str | None = None             # page-fields: 이 셀의 값이 되는 메타 키 (후보 목록의 키)
     human: dict | None = None               # meta-check: 사람·파일명의 값 {value, source}
     format: str | None = None               # 값의 형식 (forms/formats.py) — 화면이 받는 글자와 안내를 바꾼다
+    current: dict | None = None             # usage-check: 지금의 최종 값 {value, has_value} — 고칠 칸을 고른다
 
 
 @dataclass
@@ -61,6 +71,7 @@ class QueueItem:
     work_date: str | None
     cells: list[QueueCell] = field(default_factory=list)
     answer: str | None = None               # checks: 검수로 정해진 행의 답 (유 / 무 / 표시 없음 / 모름)
+    check: dict | None = None               # usage-check: 검산 {kind, result, value_a, value_b, diff, days_between}
 
 
 def build_queue(con: sqlite3.Connection, name: str, *, n: int | None = None, seed: int = 0, empty_share: float = 0.1,
@@ -85,6 +96,14 @@ def build_queue(con: sqlite3.Connection, name: str, *, n: int | None = None, see
         if site is None:
             raise ValueError("checks 대기열에는 사이트 팩이 필요합니다 (점검표 템플릿의 유·무 칸)")
         items, total, done = _checks(con, site, n, seed)
+    elif name == "readings":
+        if site is None:
+            raise ValueError("readings 대기열에는 사이트 팩이 필요합니다 (가동 일보 템플릿의 계기 표)")
+        items, total, done = _readings(con, site, audit, seed)
+    elif name == "usage-check":
+        if site is None:
+            raise ValueError("usage-check 대기열에는 사이트 팩이 필요합니다")
+        items, total, done = _usage_check(con, site)
     else:
         raise KeyError(f"알 수 없는 대기열 '{name}' (가능: {QUEUES})")
     return {"name": name, "total": total, "done": done, "items": [asdict(i) for i in items], "candidates": candidates}
@@ -356,3 +375,109 @@ def _candidates(con, site, key: str) -> list[str]:
         if rv.verdict == "value" and rv.region == "fields" and (rv.template, rv.field_name) in names:
             counts[rv.value] = counts.get(rv.value, 0) + 1
     return [v for v, _n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+# ── readings ───────────────────────────────────────────────────────────────
+def _readings(con, site, audit: int | None = None, seed: int = 0):
+    """가동 일보의 계기 칸 (role meter). 쪽마다 한 항목: 시작·종료·총. 계기 표에 기계가 잉크를 본 칸(has_value_raw)이 있는 쪽 —
+    audit=N 이면 잉크와 상관없이 날짜별로 고르게 N 쪽. 셀에 기계 값을 싣지 않고, 다른 쪽(앞날)의 값도 싣지 않는다 (4.7).
+    세 칸에 유효한 검수가 다 있으면 끝난 쪽."""
+    from ..forms.template import meter_slot
+
+    regions = {t.name: {r["name"] for r in t.regions if r.get("role") == "meter"} for t in site.templates.values()
+               if t.handler == "usage"}
+    names = [n for n, regs in regions.items() if regs]
+    if not names:
+        return [], 0, 0
+    rows = con.execute(_FIELD_SQL + f"WHERE p.status = 'loaded' AND f.kind LIKE 'handwritten%' AND p.template_name IN "
+                       f"({','.join('?' * len(names))})", names).fetchall()
+    order = {"start": 0, "end": 1, "total": 2}
+    by_page: dict[str, list] = {}
+    for r in rows:
+        slot = meter_slot(r["field_name"], r["row_key"])
+        if r["region"] in regions[r["template_name"]] and slot:
+            by_page.setdefault(r["page_id"], []).append((order[slot], slot, r))
+    if audit:
+        firsts = [min(v, key=lambda x: x[0])[2] for v in by_page.values()]
+        pages = [r["page_id"] for r in _stratified_pages(firsts, audit, seed)]
+    else:
+        pages = [pid for pid, v in by_page.items() if any(r["has_value_raw"] for _o, _s, r in v)]
+    pages.sort(key=lambda pid: _order(by_page[pid][0][2]))
+    reviews = effective(con, field_ids=[r["field_id"] for pid in pages for _o, _s, r in by_page[pid]])
+    items, done = [], 0
+    for pid in pages:
+        cells = sorted(by_page[pid], key=lambda x: x[0])
+        if all(r["field_id"] in reviews for _o, _s, r in cells):
+            done += 1
+            continue
+        r0 = cells[0][2]
+        title = f"{r0['work_date'] or '날짜 없음'} · {r0['template_name']} · {r0['source_name']}#{r0['page_no']} · 계기"
+        items.append(QueueItem(f"readings:{pid}", title, r0["work_date"],
+                               [QueueCell(r["field_id"], METER_LABELS[slot], r["kind"], _review_dict(reviews.get(r["field_id"])),
+                                          None, format=r["format"]) for _o, slot, r in cells]))
+    return items, len(pages), done
+
+
+# ── usage-check ────────────────────────────────────────────────────────────
+def check_id(c) -> str:
+    return f"{c['page_id']}:{c['check_kind']}:{c['item']}"
+
+
+def _usage_check(con, site):
+    """xcheck_usage 의 어긋난 검산(gap·overlap·mismatch) + 이 대기열에서 손댄 검산(note 에 그 id 가 남은 검수가 있는 것).
+    끝난 것 = 지금 맞는 것(고쳐서 맞게 됐다) + 비교한 칸이 전부 이 대기열에서 확인된 것(종이에 적힌 대로의 어긋남).
+    항목의 셀에는 지금의 최종 값을 싣는다 (기계 값이 아니다 — 계기 칸은 기계가 읽지 않는다)."""
+    from ..validate.usage import check_cells
+
+    noted = {r[0][len(USAGE_CHECK_NOTE):] for r in con.execute(
+        "SELECT DISTINCT note FROM doc_review WHERE note LIKE ?", (USAGE_CHECK_NOTE + "%",))}
+    checks = [c for c in con.execute(
+        "SELECT x.*, p.page_no, p.template_name, d.source_name FROM xcheck_usage x JOIN doc_page p ON x.page_id = p.page_id "
+        "JOIN doc_document d ON p.document_id = d.document_id ORDER BY x.work_date, d.source_name, p.page_no, x.check_kind, "
+        "x.item").fetchall() if c["result"] in BAD_RESULTS or check_id(c) in noted]
+    cells_of = {check_id(c): check_cells(con, site, c) for c in checks}
+    reviews = effective(con, field_ids=sorted({f for fs in cells_of.values() for f in fs}))
+    items, done = [], 0
+    names = {"total": "총 = 종료 − 시작", "subtotal": "소계 = 합", "continuity": "계기의 연속성"}
+    for c in checks:
+        cid, fids = check_id(c), cells_of[check_id(c)]
+        confirmed = bool(fids) and all(f in reviews and reviews[f].note == USAGE_CHECK_NOTE + cid for f in fids)
+        if c["result"] not in BAD_RESULTS or confirmed:
+            done += 1
+            continue
+        cells = []
+        for k, fid in enumerate(fids):
+            r = con.execute(_FIELD_SQL + "WHERE f.field_id = ?", (fid,)).fetchone()
+            if r is None:
+                continue
+            cur = {"value": r["value_final"] if r["has_value"] else "", "has_value": r["has_value"]}
+            cells.append(QueueCell(fid, _check_label(c, k, r), r["kind"], _review_dict(reviews.get(fid)), None,
+                                   format=r["format"], current=cur))
+        diff = "" if c["diff"] is None else f" · 차이 {c['diff']:+g}"
+        title = f"{c['work_date'] or '날짜 없음'} · {c['template_name']} · {c['source_name']}#{c['page_no']} · " \
+                f"{names.get(c['check_kind'], c['check_kind'])} {c['result']}{diff}"
+        items.append(QueueItem(USAGE_CHECK_NOTE + cid, title, c["work_date"], cells,
+                               check={k: c[k] for k in ("check_kind", "result", "value_a", "value_b", "diff", "days_between")}))
+    return items, len(checks), done
+
+
+def _check_label(c, k: int, r) -> str:
+    """검산 항목의 칸 이름: 어느 쪽의 어느 칸인지 (다른 쪽이면 그 쪽의 날짜·출처)."""
+    where = f"{r['work_date'] or '날짜 없음'} · {r['source_name']}#{r['page_no']}"
+    if c["check_kind"] == "continuity":
+        return f"{'이 기록의 시작' if k == 0 else '앞 기록의 종료'} — {where}"
+    if c["check_kind"] == "total":
+        return METER_LABELS.get(r["field_name"], r["field_name"]) + f" — {where}"
+    return f"{'소계' if k == 0 else '더한 칸'} {r['row_key']} {r['field_name']} — {where}"
+
+
+def queue_progress(con: sqlite3.Connection, site) -> dict:
+    """대기열마다 (기본 설정으로) 끝난 수 / 모집단 — review stats 가 쓴다."""
+    out = {}
+    for name in QUEUES:
+        try:
+            q = build_queue(con, name, site=site)
+        except ValueError:
+            continue
+        out[name] = {"done": q["done"], "total": q["total"]}
+    return out

@@ -17,6 +17,7 @@ from minedocscan.forms.template import Template, TemplateError
 from minedocscan.pipeline import Pipeline
 from minedocscan.report import build_report
 from minedocscan.review.queue import build_queue
+from minedocscan.review.server import ReviewApp
 from minedocscan.review.store import Review, load, save
 from minedocscan.tools import synth_meta
 from minedocscan.tools.synth_usage import T_LOADER, T_USAGE
@@ -38,9 +39,6 @@ def _tally(con) -> dict[str, dict]:
                          "ON t.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id"):
         out.setdefault(r["source"], {})[(f"{r['item']}|{r['place']}", r["column_name"])] = dict(r)
     return out
-
-
-UNREAD = ("meter", "shifts", "fields")          # 정답 인식기(oracle)도 읽지 않는 칸: 소수·시각, 표 밖의 장비명·운전자
 
 
 @pytest.fixture(scope="module")
@@ -65,7 +63,19 @@ def reviewed(usage_run, usage_synth, tmp_path_factory) -> dict:
     cell = con.execute("SELECT * FROM prod_tally WHERE page_id = ? AND has_value = 1 ORDER BY tally_id", (pid,)).fetchone()
     save(con, site, settings, Review(cell["tally_id"], "value", str(cell["count"] + 10), "jp"))
     states["tally"] = dict(con.execute("SELECT * FROM prod_tally WHERE tally_id = ?", (cell["tally_id"],)).fetchone())
-    n = review_usage(con, site, settings, answers, regions=UNREAD)
+    # 계기 칸은 readings 대기열로: 쪽마다 세 칸을 한 번에 (검수 화면이 보내는 것과 같은 /api/reviews)
+    app = ReviewApp(con, site, settings, "jp", "readings")
+    key = {f["field_id"]: (f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"]) for f in usage_fields(con)}
+    q = app.queue_json({})
+    states["readings"] = [q]
+    n = 0
+    for it in q["items"]:
+        items = [{"field_id": c["field_id"], "verdict": "value" if answers.get(key[c["field_id"]]) else "empty",
+                  "value": answers.get(key[c["field_id"]], "")} for c in it["cells"]]
+        states["readings"].append(app.post_reviews({"items": items}))
+        n += len(items)
+    states["readings"].append(app.queue_json({}))
+    n += review_usage(con, site, settings, answers, regions=("shifts", "fields"))
     f = con.execute("SELECT f.*, d.source_name || '#' || p.page_no AS source, p.template_name FROM doc_field f "
                     "JOIN doc_page p ON f.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
                     "WHERE f.field_id = ?", (cell["tally_id"],)).fetchone()
@@ -88,6 +98,31 @@ def reviewed(usage_run, usage_synth, tmp_path_factory) -> dict:
     states["renamed"] = (_checks(con), _full_recompute_equal(con, site))
     save(con, site, settings, Review(eq_fid, "value", "DRILL", "jp"))
     n += 4
+
+    # 단계 5: usage-check — 고쳐서 맞으면 빠지고, 한 칸만 고쳐 여전히 어긋나면 남고, 고치지 않고 확인하면 끝난다.
+    # 마지막에는 적힌 값으로 되돌린다 (합성 정답과 같아야 하므로)
+    uc = ReviewApp(con, site, settings, "jp", "usage-check")
+    states["uc"] = [uc.queue_json({})]
+    items = {it["check"]["check_kind"] + ":" + it["check"]["result"]: it for it in states["uc"][0]["items"]}
+    over, total, gap = items["continuity:overlap"], items["total:mismatch"], items["continuity:gap"]
+
+    def post(item, values: dict) -> None:
+        uc.post_reviews({"items": [{"field_id": fid, "verdict": "value", "value": v, "note": item["item_id"]}
+                                   for fid, v in values.items()]})
+
+    start, prev_end = over["cells"][0], over["cells"][1]
+    post(over, {start["field_id"]: prev_end["current"]["value"]})             # 시작을 앞 기록의 종료로 고친다 → 맞는다
+    states["uc"].append(uc.queue_json({}))
+    post(over, {start["field_id"]: start["current"]["value"]})                # 적힌 값으로 되돌린다 → 다시 어긋난다
+    states["uc"].append(uc.queue_json({}))
+    end = next(c for c in total["cells"] if c["label"].startswith("계기 종료"))
+    post(total, {end["field_id"]: f"{float(end['current']['value']) + 0.3:.1f}"})   # 한 칸만, 여전히 어긋난다 → 남는다
+    states["uc"].append(uc.queue_json({}))
+    post(total, {end["field_id"]: end["current"]["value"]})
+    post(gap, {c["field_id"]: c["current"]["value"] for c in gap["cells"]})    # 고치지 않고 확인 → 끝난다 (gap 은 그대로)
+    states["uc"].append(uc.queue_json({}))
+    states["uc_ids"] = {"overlap": over["item_id"], "total": total["item_id"], "gap": gap["item_id"]}
+    n += 4 + len(gap["cells"])
     return {"con": con, "settings": settings, "site": site, "n": n, "root": root, "page_id": pid, "states": states,
             "tally_id": cell["tally_id"], "loader": (first["source"], second["source"]), "drill": drill["source"]}
 
@@ -395,3 +430,68 @@ def test_renaming_moves_the_record_between_both_equipments(reviewed, usage_synth
     assert before[(truck_day["source"], "continuity", "")]["result"] == "first"
     c = checks[(truck_day["source"], "continuity", "")]                             # 새 장비
     assert c["result"] == "gap" and c["other_page_id"] == _pid(reviewed, next(t for t in truth if t["source"] == reviewed["drill"]))
+
+
+# ── 단계 5: 검수 대기열 ─────────────────────────────────────────────────────
+def test_readings_queue_shows_one_page_at_a_time_without_machine_or_other_pages(reviewed, usage_synth):
+    q0, *saves, q1 = reviewed["states"]["readings"]
+    truth = usage_synth.truth["usage"]
+    inked = [t for t in truth if t["reading_kind"] != "empty"]
+    assert (q0["total"], q0["done"], len(q0["items"])) == (len(inked), 0, len(inked))
+    assert (q1["total"], q1["done"], q1["items"]) == (len(inked), len(inked), [])
+    for it in q0["items"]:
+        pid = it["item_id"].split(":", 1)[1]
+        assert [c["label"] for c in it["cells"]] == ["계기 시작", "계기 종료", "총"]
+        assert all(c["field_id"].startswith(pid + ":meter:") for c in it["cells"])        # 다른 쪽(앞날)의 칸이 없다
+        assert all(c["machine"] is None and c["human"] is None and c["current"] is None for c in it["cells"])
+        assert {c["format"] for c in it["cells"]} == {"reading"}
+    blob = json.dumps(q0, ensure_ascii=False)
+    for t in truth:                                                    # 응답 어디에도 계기 값(정답)이 없다
+        for v in (t["meter_start"], t["meter_end"], t["clock_start"]):
+            assert v is None or (f"{v:.1f}" if isinstance(v, float) else v) not in blob
+    # 한 쪽의 세 칸이 한 번의 저장으로 남는다 (같은 시각)
+    assert all(len(s["saved"]) == 3 and s["reviewed_at"] for s in saves)
+    recs = [rv for _seq, rv in load(reviewed["settings"].reviews)[0] if rv.region == "meter"]
+    by_page: dict = {}
+    for rv in recs[: 3 * len(saves)]:
+        by_page.setdefault(rv.page_id, set()).add(rv.reviewed_at)
+    assert len(by_page) == len(saves) and all(len(v) == 1 for v in by_page.values())
+
+
+def test_readings_audit_samples_pages_whatever_the_ink(usage_run):
+    con, site = clone_db(usage_run["pipe"].con), usage_run["pipe"].site
+    q = build_queue(con, "readings", site=site, audit=6, seed=1)
+    dates = {it["work_date"] for it in q["items"]}
+    assert q["total"] == 6 and len(dates) == 3                          # 날짜별로 고르게
+    assert build_queue(con, "readings", site=site, audit=6, seed=1)["items"] == q["items"]
+
+
+def test_usage_check_fix_leaves_still_wrong_stays_confirm_finishes(reviewed):
+    q0, fixed, restored, still, confirmed = reviewed["states"]["uc"]
+    ids = reviewed["states"]["uc_ids"]
+    item_ids = lambda q: {it["item_id"] for it in q["items"]}                              # noqa: E731
+    bad = len(q0["items"])
+    assert (q0["total"], q0["done"]) == (bad, 0) and bad >= 4                              # gap, overlap, 총, 소계
+    assert ids["overlap"] not in item_ids(fixed) and (fixed["total"], fixed["done"]) == (bad, 1)      # 고쳐서 맞으면 빠진다
+    assert ids["overlap"] in item_ids(restored) and (restored["total"], restored["done"]) == (bad, 0)
+    assert ids["total"] in item_ids(still) and still["done"] == 0                           # 한 칸만 고쳤고 여전히 어긋난다
+    assert ids["gap"] not in item_ids(confirmed) and confirmed["done"] == 1                 # 고치지 않고 확인했다
+    assert ids["overlap"] in item_ids(confirmed) and ids["total"] in item_ids(confirmed)
+    # 확인했어도 검산은 그대로 gap — 값을 맞춰 넣지 않는다
+    con = reviewed["con"]
+    pid = ids["gap"].split(":")[1]
+    assert con.execute("SELECT result FROM xcheck_usage WHERE page_id = ? AND check_kind = 'continuity'", (pid,)).fetchone()[0] == "gap"
+    for it in q0["items"]:                                                                  # 지금 값과 차이, 기계 값은 없다
+        assert it["check"]["result"] in ("gap", "overlap", "mismatch")
+        assert all(c["current"] is not None and c["machine"] is None for c in it["cells"])
+    over = next(it for it in q0["items"] if it["item_id"] == ids["overlap"])
+    assert len({c["field_id"].split(":")[0] for c in over["cells"]}) == 2                  # 두 쪽의 칸
+
+
+def test_stats_count_by_format_and_by_queue(reviewed):
+    from minedocscan.review.store import stats
+
+    st = stats(reviewed["con"], reviewed["site"])
+    assert st["by_format"]["reading"] > 0 and st["by_format"]["time_range"] > 0 and st["by_format"]["text"] > 0
+    assert st["by_queue"]["readings"]["done"] == st["by_queue"]["readings"]["total"] > 0
+    assert st["by_queue"]["usage-check"]["total"] >= 4

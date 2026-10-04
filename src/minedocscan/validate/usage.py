@@ -62,15 +62,7 @@ def _subtotal_checks(con, tpl: Template, u) -> list[dict]:
         if reg.get("role") != "tally":
             continue
         name = reg["name"]
-        cols = [c for c in reg["columns"] if c.get("kind", "").startswith("handwritten") and (c.get("format") or "integer")
-                == "integer"]
-        sub_cols = [c["name"] for c in cols if c.get("subtotal")]
-        val_cols = [c["name"] for c in cols if not c.get("subtotal")]
-        sub_rows = [r["row"] for r in reg["rows"] if r.get("subtotal")]
-        val_rows = [r["row"] for r in reg["rows"] if not r.get("subtotal")]
-        pairs = [((row, sc), [(row, vc) for vc in val_cols]) for row in [*val_rows, *sub_rows] for sc in sub_cols]
-        pairs += [((sr, vc), [(vr, vc) for vr in val_rows]) for sr in sub_rows for vc in val_cols]
-        for (row, col), parts in pairs:
+        for (row, col), parts in subtotal_pairs(reg):
             cell = cells.get((name, row, col))
             if cell is None or not cell["has_value"]:
                 continue
@@ -83,6 +75,40 @@ def _subtotal_checks(con, tpl: Template, u) -> list[dict]:
             out.append(_row(u, "subtotal", cell["field_id"], got, total, got - total,
                             "match" if got == total else "mismatch", field_a=cell["field_id"]))
     return out
+
+
+def subtotal_pairs(reg: dict) -> list[tuple[tuple[int, str], list[tuple[int, str]]]]:
+    """작업량 표(role tally)의 소계 칸마다 (소계 칸, 더할 칸들) — 칸은 (행 번호, 열 이름). 소계 열은 같은 행의 소계가 아닌 열,
+    소계 행은 같은 열의 소계가 아닌 행. 둘 다 소계인 칸(합계의 합계)은 소계 행의 소계가 아닌 열."""
+    cols = [c for c in reg["columns"] if c.get("kind", "").startswith("handwritten")
+            and (c.get("format") or "integer") == "integer"]
+    sub_cols = [c["name"] for c in cols if c.get("subtotal")]
+    val_cols = [c["name"] for c in cols if not c.get("subtotal")]
+    sub_rows = [r["row"] for r in reg["rows"] if r.get("subtotal")]
+    val_rows = [r["row"] for r in reg["rows"] if not r.get("subtotal")]
+    pairs = [((row, sc), [(row, vc) for vc in val_cols]) for row in [*val_rows, *sub_rows] for sc in sub_cols]
+    pairs += [((sr, vc), [(vr, vc) for vr in val_rows]) for sr in sub_rows for vc in val_cols]
+    return pairs
+
+
+def check_cells(con: sqlite3.Connection, site, check) -> list[str]:
+    """검산 하나가 비교한 칸들의 field_id (검수 화면이 같이 보여 준다): 연속성 = 이 쪽의 시작·앞 기록의 종료,
+    총 = 시작·종료·총, 소계 = 소계 칸과 더한 칸들."""
+    if check["check_kind"] == "continuity":
+        return [f for f in (check["field_a"], check["field_b"]) if f]
+    if check["check_kind"] == "total":
+        u = con.execute("SELECT start_field_id, end_field_id, total_field_id FROM eq_usage_daily WHERE page_id = ?",
+                        (check["page_id"],)).fetchone()
+        return [f for f in (u or ()) if f]
+    f = con.execute("SELECT f.region, f.row_no, f.field_name, p.template_name FROM doc_field f JOIN doc_page p "
+                    "ON f.page_id = p.page_id WHERE f.field_id = ?", (check["field_a"],)).fetchone()
+    tpl = site.templates.get(f["template_name"]) if f is not None else None
+    if tpl is None:
+        return [check["field_a"]]
+    for (row, col), parts in subtotal_pairs(tpl.region(f["region"])):
+        if (row, col) == (f["row_no"], f["field_name"]):
+            return [check["field_a"]] + [f"{check['page_id']}:{f['region']}:{c}:{r}" for r, c in parts]
+    return [check["field_a"]]
 
 
 def _int(cell) -> int | None:
