@@ -102,6 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--low-cells", action="store_true",
                    help="운반 양식 두 종을 실제처럼 낮은 칸·거친 숫자·X 표로 (숫자 인식기 시험용)")
+    p.add_argument("--meta-fields", action="store_true",
+                   help="일보의 차량번호(네 자리)·작성자를 사람마다 다른 획으로, 날짜 줄에 월·일 필드 (메타 필드 인식기 시험용)")
+    p.add_argument("--mix-pages", action="store_true", help="--meta-fields 와 함께: 마지막 날의 묶음에 첫날의 일보 한 쪽을 섞는다")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
@@ -130,6 +133,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--allow-in-repo", action="store_true", help="git 작업 트리 안에도 쓴다 (글씨가 들어 있다 — 커밋하지 말 것)")
     r.add_argument("--include-illegible", action="store_true",
                    help="'읽을 수 없음'(illegible)도 내보낸다 — 숫자 인식기가 '거절'로 학습한다 (labels.jsonl 의 verdict)")
+    r.add_argument("--meta", action="store_true",
+                   help="표 밖 메타 필드(차량번호·작성자·날짜의 월·일)의 크롭 + 사람·파일명 값 → OUT/<split>/meta/<키>/. "
+                        "여유 기본 8 px")
+    r.add_argument("--meta-key", help="--meta: 이 키만 (vehicle_no, operator, date.month, date.day …)")
 
     p = sub.add_parser("recognizer", parents=[common], help="숫자 인식기: 학습·목록")
     nsub = p.add_subparsers(dest="recognizer_command", required=True)
@@ -425,7 +432,9 @@ def cmd_template(a) -> int:
 def cmd_synth(a) -> int:
     from .tools.synth import generate
 
-    r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells)
+    if a.mix_pages and not a.meta_fields:
+        raise SystemExit("--mix-pages 는 --meta-fields 와 같이 씁니다")
+    r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")
@@ -501,6 +510,21 @@ def cmd_review(a) -> int:
         _emit(a, {"out": a.out, "answers": n, "split": a.split},
               f"정답 {n}개를 썼습니다 (분할 {a.split}): {a.out}\n"
               f"비교: minedocscan eval --answers {a.out} --target raw --only-listed{sp}")
+        return 0
+    if a.review_command == "export-crops" and (a.meta or a.meta_key):
+        from .review.export import ExportError, export_meta_crops
+
+        if a.kind:
+            raise SystemExit("--meta 와 --kind 는 같이 쓰지 않습니다 (메타 필드는 키로 고른다: --meta-key)")
+        s, site, con, _imported = _review_db(a)
+        try:
+            r = export_meta_crops(con, site, s, a.out, split=a.split, meta_key=a.meta_key, res=a.res, out_scale=a.scale,
+                                  pad=a.pad, allow_in_repo=a.allow_in_repo, include_illegible=a.include_illegible)
+        except (ExportError, ValueError) as e:
+            raise SystemExit(str(e)) from e
+        _emit(a, r, f"메타 필드 크롭 {r['written']}개를 썼습니다: {r['out']} — 분할별 {r['by_split']}, 키별 {r['by_key']}, "
+                    f"정답의 출처별 {r['by_label_source']}, 해상도별 {r['by_source']}, 읽을 수 없음 제외 {r['skipped_illegible']}개\n"
+                    "저장소에 넣지 마세요 — 이름·차량번호가 들어 있습니다.")
         return 0
     if a.review_command == "export-crops":
         from .review.export import ExportError, export_crops

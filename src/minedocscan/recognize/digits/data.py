@@ -61,8 +61,9 @@ def label_files(root: str | Path) -> list[Path]:
 
 
 def _resolve(root: Path, labels: Path, rel: str) -> Path:
-    """file 은 내보낸 폴더(OUT) 기준이다 (OUT/<split>/labels.jsonl). 사용자가 OUT 을 줬든 OUT/<split> 을 줬든 찾는다."""
-    for base in (labels.parent.parent, root, labels.parent):
+    """file 은 내보낸 폴더(OUT) 기준이다 (OUT/<split>/labels.jsonl, 메타는 OUT/<split>/meta/labels.jsonl).
+    사용자가 OUT 을 줬든 OUT/<split> 을 줬든 찾는다."""
+    for base in (labels.parent.parent, root, labels.parent, labels.parent.parent.parent):
         p = base / rel
         if p.is_file():
             return p
@@ -79,9 +80,11 @@ def text_of(line: dict) -> str | None:
 
 
 def read_crops(root: str | Path, *, allow_test: bool = False, only_split: str | None = None,
-               kinds: tuple[str, ...] = KINDS) -> Crops:
+               kinds: tuple[str, ...] = KINDS, meta_keys: tuple[str, ...] | None = None) -> Crops:
     """폴더 → Crops. allow_test=False 면 test 줄이 하나라도 있으면 CropsError (학습). 규격이 둘 이상이면 CropsError.
-    only_split: 그 분할의 줄만 (평가). kinds: 이 종류의 칸만 (숫자 칸)."""
+    only_split: 그 분할의 줄만 (평가). kinds: 이 종류의 칸만 (숫자 칸).
+    meta_keys: None 이면 표의 칸만 — 메타 필드 줄(meta_key 가 있거나 region 이 fields)은 뺀다. 주면 그 키의 메타 필드 줄만
+    (칸 종류는 보지 않는다 — tasks/0004 단계 3)."""
     root = Path(root)
     files = label_files(root)
     if not files:
@@ -108,8 +111,16 @@ def read_crops(root: str | Path, *, allow_test: bool = False, only_split: str | 
             if only_split and sp != only_split:
                 skipped["other_split"] += 1
                 continue
-            if line.get("kind") not in kinds:
-                skipped["other_kind"] += 1
+            is_meta = bool(line.get("meta_key")) or line.get("region") == "fields"
+            if meta_keys is None:
+                if is_meta:
+                    skipped["meta_field"] += 1
+                    continue
+                if line.get("kind") not in kinds:
+                    skipped["other_kind"] += 1
+                    continue
+            elif line.get("meta_key") not in meta_keys:
+                skipped["other_key"] += 1
                 continue
             if "spec" not in line:
                 raise CropsError(f"{lf}:{k} 에 크롭 규격(spec)이 없습니다 — 이 버전의 `review export-crops` 로 다시 내보내세요")

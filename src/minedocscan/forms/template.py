@@ -11,7 +11,9 @@
       columns: [{idx, name, kind, ...메타}]   # kind: printed | handwritten_text | handwritten_number | checkmark
       rows:    [{row, key, ...메타}]
   fields: [{name, kind, bbox, meta_key?}]     # 표 밖의 자유 필드 (날짜, 작성자, 비고 …)
-                                              # meta_key: 이 필드의 검수값이 쪽의 메타(vehicle_no, operator …)가 된다. date 는 안 된다
+                                              # meta_key: 이 필드의 값이 쪽의 메타(vehicle_no, operator …)가 된다. date 는 안 된다
+                                              # date.month, date.day: 읽기 전용 — 날짜의 월·일을 적는 칸. 값은 쪽의 날짜(파일명·라벨)에서
+                                              #   오고 기계가 읽은 값은 대조에만 쓴다. 검수로 받지 않는다 (tasks/0004 4.3)
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ from ..imaging.align import orb_features
 from ..imaging.io import imread_gray
 
 CELL_KINDS = {"printed", "handwritten_text", "handwritten_number", "checkmark", "signature"}
+DATE_PARTS = ("date.month", "date.day")      # 읽기 전용 메타 키: 정답은 쪽의 날짜에서 나온다. 검수로 받지 않는다
 
 
 @dataclass
@@ -95,7 +98,14 @@ class Template:
             if mk is not None and (not isinstance(mk, str) or not mk):
                 raise TemplateError(f"{self.name}/fields/{f['name']}: meta_key 는 빈 문자열이 아니어야 합니다")
             if mk == "date":
-                raise TemplateError(f"{self.name}/fields/{f['name']}: meta_key 'date' 는 받지 않습니다 — 날짜는 파일명 규칙과 라벨로 정한다")
+                raise TemplateError(f"{self.name}/fields/{f['name']}: meta_key 'date' 는 받지 않습니다 — 날짜는 파일명 규칙과 라벨로 정한다 "
+                                    "(월·일 칸은 date.month, date.day — 대조에만 쓴다)")
+            if isinstance(mk, str) and mk.startswith("date.") and mk not in DATE_PARTS:
+                raise TemplateError(f"{self.name}/fields/{f['name']}: 날짜의 부분은 {' | '.join(DATE_PARTS)} 만 받습니다: {mk!r}")
+        mks = [f["meta_key"] for f in self.fields if f.get("meta_key")]
+        dup = sorted({k for k in mks if mks.count(k) > 1})
+        if dup:
+            raise TemplateError(f"{self.name}: 같은 meta_key 를 가진 필드가 둘 이상입니다: {dup}")
         for reg in self.regions:
             ys, xs = reg["grid"]["ys"], reg["grid"]["xs"]
             if ys != sorted(ys) or xs != sorted(xs):
@@ -165,5 +175,9 @@ class Template:
                      col_meta={"meta_key": f["meta_key"]} if f.get("meta_key") else {}) for f in self.fields]
 
     def meta_fields(self) -> dict[str, str]:
-        """검수값이 쪽의 메타가 되는 자유 필드: {필드 이름: meta_key}."""
+        """쪽의 메타를 적는 자유 필드: {필드 이름: meta_key}. 날짜의 부분(date.month, date.day)도 들어 있다."""
         return {f["name"]: f["meta_key"] for f in self.fields if f.get("meta_key")}
+
+    def review_meta_fields(self) -> dict[str, str]:
+        """검수값이 쪽의 메타가 되는 자유 필드 — meta_fields 에서 날짜의 부분(읽기 전용)을 뺀 것."""
+        return {n: k for n, k in self.meta_fields().items() if k not in DATE_PARTS}

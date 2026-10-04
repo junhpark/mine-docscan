@@ -21,6 +21,10 @@
 위아래 괘선을 넘으며, 빈 칸 몇 개에 X 표가 있다. X 표 칸은 잉크로는 "값 있음"이지만 정답은 빈 칸이다.
 기본 합성 데이터(low_cells=False)는 그대로다 — 기존 테스트의 기대 수치를 바꾸지 않는다.
 
+선택 기능 meta_fields=True (tasks/0004 단계 2): 일보의 차량번호가 네 자리 숫자, 작성자는 사람마다 다른 획(tools/synth_meta.py),
+날짜 줄에 월·일 필드(meta_key date.month, date.day). 날마다 돌아가며: 두 사람이 차를 바꿔 탄 날, 처음 보는 차, 처음 보는
+사람이 쓴 날. mix_pages=True 면 마지막 날의 묶음에 첫날의 일보 한 쪽이 섞인다 (적힌 날짜가 파일의 날짜와 다르다).
+
 글자는 OpenCV 내장 글꼴(영문)로 그린다 — 글꼴 파일에 의존하지 않기 위해서다. 따라서 이 데이터로
 잴 수 있는 것은 파이프라인의 기하·논리이지 한글 손글씨 인식률이 아니다 (docs/DATA.md).
 """
@@ -36,7 +40,7 @@ import numpy as np
 import yaml
 
 from ..imaging.io import imwrite
-from . import synth_cells
+from . import synth_cells, synth_meta
 
 DPI = 200
 PORTRAIT = (1654, 2339)          # (폭, 높이) — A4 @ 200 dpi
@@ -72,6 +76,11 @@ SLOTS = [("T01", "V-101", "ALPHA"), ("T02", "V-102", "BRAVO"), ("T03", "V-103", 
 # 개정판(선택): 둘째 날부터 T02 자리의 인쇄된 차량·운전자가 바뀐 판. 머리글 몇 글자만 달라 모양으로는 가릴 수 없다
 SLOTS_V2 = [("T01", "V-101", "ALPHA"), ("T02", "V-202", "GOLF"), ("T03", "V-103", "CHARLIE"), ("T04", "V-104", "DELTA")]
 T_MATRIX_V2 = "synth_haul_matrix_v2"
+# 메타 필드 (선택): 차량번호가 네 자리 숫자인 머리글. 앞 두 자리가 같은 번호가 여럿 (tools/synth_meta.py 의 VEHICLES)
+SLOTS_META = [("T01", "4127", "ALPHA"), ("T02", "4183", "BRAVO"), ("T03", "4135", "CHARLIE"), ("T04", "5260", "DELTA")]
+# 메타 필드 일보의 머리 (템플릿 px): 인쇄된 글자와 필드 사이를 띄운다 — 크롭(여유 8 px)에 OpenCV 내장 글꼴의 글자가 들어가지 않게
+META_BOXES = {"date_month": (530, 205, 670, 270), "date_day": (775, 205, 915, 270),
+              "vehicle_no": (340, 290, 730, 355), "operator": (920, 290, 1290, 355)}
 MATRIX_FAMILY = "synth_haul_matrix"
 # 낮은 칸 (선택): 실제 운반 칸처럼 행 높이 30 px. 숫자 칸 폭은 덩어리 배정(imaging/blobs.py)이 가로로 붙여 묶는 거리(칸 폭의
 # 절반)보다 이웃 칸 숫자 사이가 넓게 남도록 120 px — 판정 규칙은 건드리지 않는다
@@ -207,10 +216,18 @@ def _haul_rows(rows: list[tuple[str, str]]) -> list[dict]:
     return [{"row": i, "key": f"{m}|{lv}", "material": m, "level": lv} for i, (m, lv) in enumerate(rows)]
 
 
-def build_haul_log(low: bool = False) -> tuple[np.ndarray, dict]:
+def build_haul_log(low: bool = False, meta: bool = False) -> tuple[np.ndarray, dict]:
     img = _canvas(LANDSCAPE)
     _label(img, "DUMP TRUCK DAILY HAUL LOG", 150, 170, 1.5, 3)
-    _label(img, "Date:  20      .        .", 150, 255, 0.9)
+    if meta:                       # 월·일 칸이 따로 있는 날짜 줄 (인쇄된 "Month"·"Day" 와 밑줄)
+        _label(img, "Date:  20", 150, 255, 0.9)
+        _label(img, "Month", 420, 255, 0.9)
+        _label(img, "Day", 700, 255, 0.9)
+        for name in ("date_month", "date_day"):
+            x0, _y0, x1, y1 = META_BOXES[name]
+            cv2.line(img, (x0, y1 - 6), (x1, y1 - 6), 0, 2)
+    else:
+        _label(img, "Date:  20      .        .", 150, 255, 0.9)
     _label(img, "Vehicle No:", 150, 335, 0.9)
     _label(img, "Operator:", 760, 335, 0.9)
     rows = UG_ROWS + [SURFACE_ROW]
@@ -260,6 +277,13 @@ def build_haul_log(low: bool = False) -> tuple[np.ndarray, dict]:
             {"name": "operator", "kind": "handwritten_text", "bbox": [920, 290, 1290, 355], "meta_key": "operator"},
         ],
     }
+    if meta:
+        spec["fields"] = [
+            {"name": "date_month", "kind": "handwritten_number", "bbox": list(META_BOXES["date_month"]), "meta_key": "date.month"},
+            {"name": "date_day", "kind": "handwritten_number", "bbox": list(META_BOXES["date_day"]), "meta_key": "date.day"},
+            {"name": "vehicle_no", "kind": "handwritten_text", "bbox": list(META_BOXES["vehicle_no"]), "meta_key": "vehicle_no"},
+            {"name": "operator", "kind": "handwritten_text", "bbox": list(META_BOXES["operator"]), "meta_key": "operator"},
+        ]
     return img, spec
 
 
@@ -347,17 +371,21 @@ test_share = 0.2
 """
 
 
-def _blank_forms(low: bool = False) -> dict:
+def _blank_forms(low: bool = False, meta: bool = False) -> dict:
+    if meta:
+        return {T_INSP: build_inspection(), T_LOG: build_haul_log(low, meta=True),
+                T_MATRIX: build_haul_matrix(SLOTS_META, low=low)}
     return {T_INSP: build_inspection(), T_LOG: build_haul_log(low), T_MATRIX: build_haul_matrix(low=low)}
 
 
-def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low: bool = False) -> Path:
+def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low: bool = False, meta: bool = False) -> Path:
     """합성 사이트 팩(site.toml + 템플릿 세 종)을 쓴다. revision_from(날짜)을 주면 행렬 양식이 두 판이 된다:
-    그 전날까지 v1, 그날부터 v2 (같은 계열, 유효 기간으로 가린다). low: 운반 양식 두 종이 낮은 칸."""
+    그 전날까지 v1, 그날부터 v2 (같은 계열, 유효 기간으로 가린다). low: 운반 양식 두 종이 낮은 칸.
+    meta: 일보에 월·일 필드, 차량번호가 네 자리 숫자인 행렬 머리글 (tasks/0004 단계 2)."""
     site = Path(site_dir)
     site.mkdir(parents=True, exist_ok=True)
     (site / "site.toml").write_text(SITE_TOML, encoding="utf-8")
-    built = _blank_forms(low)
+    built = _blank_forms(low, meta)
     if revision_from:
         last_v1 = (date.fromisoformat(revision_from) - timedelta(days=1)).isoformat()
         built[T_MATRIX] = build_haul_matrix(SLOTS, T_MATRIX, (None, last_v1), low=low)
@@ -373,8 +401,9 @@ def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low:
 
 
 # ── 하루치 내용(정답) 만들기 ───────────────────────────────────────────────
-def _day_truth(d: int, day: str, rng, slots: list[tuple[str, str, str]] = SLOTS) -> dict:
-    """d 번째 날의 정답. 날마다 다른 어려움을 넣는다 (d % 3). slots 는 그날 유효한 행렬 판의 머리글."""
+def _day_truth(d: int, day: str, rng, slots: list[tuple[str, str, str]] = SLOTS, meta: bool = False) -> dict:
+    """d 번째 날의 정답. 날마다 다른 어려움을 넣는다 (d % 3). slots 는 그날 유효한 행렬 판의 머리글.
+    meta: 메타 필드 합성의 배차 (d % 4): 1 = 두 사람이 차를 바꿔 탄다, 2 = 처음 보는 차, 3 = 처음 보는 사람이 쓴다."""
     scen = []
     # 점검표
     unused = d % 3 == 1
@@ -395,6 +424,10 @@ def _day_truth(d: int, day: str, rng, slots: list[tuple[str, str, str]] = SLOTS)
     trucks = []
     for slot, vehicle, operator in slots:
         t = {"slot": slot, "vehicle_no": vehicle, "operator": operator, "matched_by": "operator", "has_log": True}
+        if meta:
+            _meta_scenario(d, t, slots, scen)
+            trucks.append(t)
+            continue
         if d % 3 == 1 and slot == "T03":
             t["vehicle_no"] = "V-909"                      # 같은 운전자가 다른 차를 몬다
             scen.append("T03_vehicle_changed")
@@ -406,6 +439,7 @@ def _day_truth(d: int, day: str, rng, slots: list[tuple[str, str, str]] = SLOTS)
             scen.append("T02_log_missing")
         trucks.append(t)
 
+    scen = list(dict.fromkeys(scen))
     # 운반 횟수: 일보(차량·광종·편·근무조) → 행렬(자리·광종·편) 은 그 합
     value_rows = [r for r in UG_ROWS if r != NOTE_ROW]
     log, matrix = [], {}
@@ -440,6 +474,21 @@ def _day_truth(d: int, day: str, rng, slots: list[tuple[str, str, str]] = SLOTS)
             "haul_matrix": [{"slot": k[0], "material": k[1], "level": k[2], "trips": v} for k, v in sorted(matrix.items())],
             "discrepancies": disc,
             "headers": {slot: [vehicle, operator] for slot, vehicle, operator in slots}}
+
+
+def _meta_scenario(d: int, t: dict, slots, scen: list) -> None:
+    """메타 필드 합성의 배차 변화 (그날의 실제 차·사람). 행렬 머리글은 그대로다."""
+    header = {s: (v, o) for s, v, o in slots}
+    if d % 4 == 1 and t["slot"] in ("T03", "T04"):          # 두 사람이 차를 바꿔 탄다 (같은 사람, 다른 차)
+        other = "T04" if t["slot"] == "T03" else "T03"
+        t["vehicle_no"] = header[other][0]
+        scen.append("T03_T04_swapped_vehicles")
+    if d % 4 == 2 and t["slot"] == "T02":                   # 처음 보는 차 (목록에 없는 값)
+        t["vehicle_no"] = synth_meta.NEW_VEHICLES[0]
+        scen.append("T02_new_vehicle")
+    if d % 4 == 3 and t["slot"] == "T04":                   # 처음 보는 사람이 같은 차를 몬다 → 차량번호로 자리를 찾는다
+        t.update(operator=synth_meta.STRANGERS[0], matched_by="vehicle")
+        scen.append("T04_new_operator")
 
 
 def expected_xcheck(days: list[dict], with_trips: bool) -> dict[str, int]:
@@ -542,14 +591,21 @@ def _x_marks(img: np.ndarray, empty_cells: list, rng, n_max: int = 2) -> list:
     return picks
 
 
-def _fill_log(blank, spec, dt, truck, rng, low: bool = False) -> np.ndarray:
+def _fill_log(blank, spec, dt, truck, rng, low: bool = False, meta: bool = False) -> np.ndarray:
     img = blank.copy()
     haul, side = spec["regions"]
     ys, xs = haul["grid"]["ys"], haul["grid"]["xs"]
     y, m, dd = dt["date"].split("-")
-    _hand(img, f"{y[2:]}   {m}   {dd}", 300, 262, rng, 1.1)
-    _hand(img, truck["vehicle_no"], 370, 340, rng, 1.2)
-    _hand(img, truck["operator"].title(), 950, 340, rng, 1.2)
+    if meta:                                     # 그날 그 차를 몬 사람이 자기 글씨로 쓴다
+        style = synth_meta.page_style(synth_meta.writer_style(truck["operator"]), rng)
+        _hand(img, y[2:], 262, 262, rng, 1.0)
+        for name, text, kind in (("date_month", str(int(m)), "digits"), ("date_day", str(int(dd)), "digits"),
+                                 ("vehicle_no", truck["vehicle_no"], "digits"), ("operator", truck["operator"], "name")):
+            _meta_field(img, META_BOXES[name], text, kind, style, rng)
+    else:
+        _hand(img, f"{y[2:]}   {m}   {dd}", 300, 262, rng, 1.1)
+        _hand(img, truck["vehicle_no"], 370, 340, rng, 1.2)
+        _hand(img, truck["operator"].title(), 950, 340, rng, 1.2)
     row_of = {r["key"]: r["row"] for r in haul["rows"]}
     filled = set()
     for r in dt["haul_log"]:
@@ -569,6 +625,15 @@ def _fill_log(blank, spec, dt, truck, rng, low: bool = False) -> np.ndarray:
     for i, s in enumerate((str(int(rng.integers(40, 160))), f"{rng.uniform(4, 11):.1f}")):
         _hand_in_cell(img, s, _cell_bbox(sys_, sxs, i, 1), rng, 1.3)
     return img
+
+
+def _meta_field(img: np.ndarray, box, text: str, kind: str, style: dict, rng) -> None:
+    """메타 필드 하나를 쪽에 쓴다 (synth_meta 의 획 — 학습용 크롭과 같은 그리기)."""
+    x0, y0, x1, y1 = box
+    margin = 12
+    ink = synth_meta.render_field_ink(text, kind, x1 - x0, y1 - y0, margin, 2.0, style, rng)
+    ink = cv2.resize(ink, (x1 - x0 + 2 * margin, y1 - y0 + 2 * margin), interpolation=cv2.INTER_AREA)
+    _composite(img, ink, x0 - margin, y0 - margin, int(rng.integers(20, 60)))
 
 
 def _fill_matrix(blank, spec, dt, rng, low: bool = False) -> np.ndarray:
@@ -616,6 +681,14 @@ def _write_pdf(path: Path, pages: list[np.ndarray], dpi: int = DPI) -> None:
     doc.close()
 
 
+def _meta_answers(source: str, day: str, t: dict) -> list[dict]:
+    """메타 필드의 정답 (eval·oracle 형식): 종이에 적힌 값 — 월·일은 쪽의 날짜에서."""
+    _y, m, dd = day.split("-")
+    vals = {"date_month": str(int(m)), "date_day": str(int(dd)), "vehicle_no": t["vehicle_no"], "operator": t["operator"]}
+    return [{"source": source, "template": T_LOG, "region": "fields", "field_name": k, "row_key": "", "text": v}
+            for k, v in vals.items()]
+
+
 @dataclass
 class SynthResult:
     root: Path
@@ -627,21 +700,26 @@ class SynthResult:
 
 
 def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "2030-01-07",
-             strength: float = 1.0, matrix_revision: bool = False, low_cells: bool = False) -> SynthResult:
+             strength: float = 1.0, matrix_revision: bool = False, low_cells: bool = False,
+             meta_fields: bool = False, mix_pages: bool = False) -> SynthResult:
     """out_dir 에 합성 사이트 팩(site/)과 스캔 문서(scans/), 정답(truth.json, answers.json)을 만든다.
 
     하루에 PDF 한 개: 점검표 1장 → 차량별 일보(일보를 낸 차량 수) → 행렬 1장.
     같은 seed 는 같은 결과를 낸다. matrix_revision=True 면 둘째 날부터 행렬 양식이 개정판(v2)이다 — 기본 데이터는 그대로다.
     low_cells=True 면 운반 양식 두 종이 낮은 칸·거친 숫자·X 표 (tasks/0003 단계 3). X 표 칸은 정답에 없다(빈 칸)
     — 잉크로는 값이 있어 보이므로 그 날의 truth["expected"] 의 교차검증 수치와는 맞지 않는다.
+    meta_fields=True 면 일보의 메타 필드가 사람마다 다른 획 (tasks/0004 단계 2), mix_pages=True 면 마지막 날의 묶음에
+    첫날의 일보 한 쪽이 섞인다 — truth["documents"] 에 mixed_from 으로 표시한다. 정답(answers.json)에 메타 필드의 값이 들어간다.
     """
+    if mix_pages and not meta_fields:
+        raise ValueError("mix_pages 는 meta_fields 와 같이 쓴다")
     root = Path(out_dir)
     d0 = date.fromisoformat(start)
     revision_from = (d0 + timedelta(days=1)).isoformat() if matrix_revision else None
-    site = write_site_pack(root / "site", revision_from=revision_from, low=low_cells)
+    site = write_site_pack(root / "site", revision_from=revision_from, low=low_cells, meta=meta_fields)
     scans = root / "scans"
     rng = np.random.default_rng(seed)
-    blanks = _blank_forms(low_cells)
+    blanks = _blank_forms(low_cells, meta_fields)
     if revision_from:
         blanks[T_MATRIX_V2] = build_haul_matrix(SLOTS_V2, T_MATRIX_V2, (revision_from, None), low=low_cells)
 
@@ -650,7 +728,9 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         day = (d0 + timedelta(days=d)).isoformat()
         v2 = bool(revision_from) and day >= revision_from
         matrix_name, slots = (T_MATRIX_V2, SLOTS_V2) if v2 else (T_MATRIX, SLOTS)
-        dt = _day_truth(d, day, rng, slots)
+        if meta_fields:
+            slots = SLOTS_META
+        dt = _day_truth(d, day, rng, slots, meta=meta_fields)
         stem = f"scan_{day}"
         pages, page_info = [], []
 
@@ -666,15 +746,23 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         for t in dt["trucks"]:
             if not t["has_log"]:
                 continue
-            n = add(_fill_log(*blanks[T_LOG], dt, t, rng, low=low_cells), T_LOG, slot=t["slot"])
+            n = add(_fill_log(*blanks[T_LOG], dt, t, rng, low=low_cells, meta=meta_fields), T_LOG, slot=t["slot"])
             source = f"{stem}#{n}"
             labels[source] = {"vehicle_no": t["vehicle_no"], "operator": t["operator"]}
+            if meta_fields:
+                answers += _meta_answers(source, dt["date"], t)
             for r in dt["haul_log"]:
                 if r["slot"] == t["slot"]:
                     r["source"] = source
                     answers.append({"source": source, "template": T_LOG, "region": "haul",
                                     "field_name": f"trips_{r['shift']}", "row_key": f"{r['material']}|{r['level']}",
                                     "text": str(r["trips"])})
+        if mix_pages and d == days - 1 and day_truths:        # 첫날의 일보 한 쪽이 섞였다 (적힌 날짜가 다르다)
+            first = day_truths[0]
+            t0 = next(t for t in first["trucks"] if t["has_log"])
+            n = add(_fill_log(*blanks[T_LOG], first, t0, rng, low=low_cells, meta=True), T_LOG, slot=t0["slot"],
+                    mixed_from=first["date"])
+            labels[f"{stem}#{n}"] = {"vehicle_no": t0["vehicle_no"], "operator": t0["operator"]}
         n = add(_fill_matrix(*blanks[matrix_name], dt, rng, low=low_cells), matrix_name)
         for r in dt["haul_matrix"]:
             answers.append({"source": f"{stem}#{n}", "template": matrix_name, "region": "matrix",
@@ -708,6 +796,8 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
                                 for dt in day_truths for t in dt["trucks"])},
         },
     }
+    if meta_fields:                                   # 기본 데이터의 truth.json 은 바이트까지 그대로
+        truth["meta_fields"] = True
     truth_path, answers_path = root / "truth.json", root / "answers.json"
     truth_path.write_text(json.dumps(truth, ensure_ascii=False, indent=1), encoding="utf-8")
     answers_path.write_text(json.dumps(answers, ensure_ascii=False, indent=1), encoding="utf-8")

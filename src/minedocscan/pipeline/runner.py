@@ -28,6 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .. import pagemeta
 from ..config import Settings
 from ..correct import Corrector, get_corrector
 from ..forms.classify import FormClassifier
@@ -39,7 +40,6 @@ from ..imaging.cropspec import PageImages
 from ..imaging.io import IMAGE_EXT, SUPPORTED_EXT, imwrite, load_pages
 from ..recognize import Recognizer, build_recognizer
 from ..review.store import import_into
-from ..review.store import page_meta as _page_meta
 from ..store.db import open_db, upsert
 
 
@@ -212,7 +212,11 @@ class Pipeline:
 
         # extract → (recognize → correct → validate → load: 핸들러)
         upsert(self.con, "doc_page", page)      # doc_field 가 참조하므로 먼저 적는다
-        meta = _page_meta(self.con, self.site, source_name, page_no, page_id, tpl)   # 검수값 > 라벨 > 파일명
+        # 쪽 메타: 검수값 > 라벨 > 파일명 (> 기계 값) — 출처와 함께 doc_page_meta 에. 핸들러는 그 최종 값을 쓴다
+        human = pagemeta.human_values(self.con, self.site, source_name, page_no, page_id, tpl)
+        meta_rows = pagemeta.resolve(page_id, tpl, human)
+        pagemeta.write(self.con, page_id, meta_rows)
+        meta = pagemeta.final_meta(meta_rows)
         handler = self._handler(tpl.handler)
         # 원본 쪽은 인식기가 원본 해상도 규격을 원할 때만, 쪽마다 한 번 렌더링한다 (PageImages)
         is_image = source_path is not None and Path(source_path).suffix.lower() in IMAGE_EXT

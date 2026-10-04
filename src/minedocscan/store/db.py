@@ -18,13 +18,15 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 # 1: 처음 골격. 2: 검수(doc_review, has_value_raw, trips_raw, *_trips_raw) — docs/tasks/0001-review-tool.md
 # 3: 전체 묶음 운용(prod_haul.has_value_raw, 오류 격리, 호모그래피 …) — docs/tasks/0002-full-archive-and-evalset.md
 # 4: 숫자 인식기(doc_document.warning, doc_field.status_raw) — docs/tasks/0003-digit-recognizer.md
-SCHEMA_VERSION = 4
+# 5: 쪽 메타의 출처(doc_page_meta) — docs/tasks/0004-page-fields-and-checks.md
+SCHEMA_VERSION = 5
 
 # 테이블별 기본 키 (upsert 의 충돌 대상)
 PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "meta_schema": ("key",),
     "doc_document": ("document_id",),
     "doc_page": ("page_id",),
+    "doc_page_meta": ("page_id", "meta_key"),
     "doc_field": ("field_id",),
     "doc_review": ("review_id",),
     "eq_equipment": ("equipment_id",),

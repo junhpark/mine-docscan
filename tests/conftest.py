@@ -157,3 +157,21 @@ def digits_metrics(cells: list[dict]) -> dict:
             "auto": len(auto), "auto_wrong": len(wrong),
             "inked_empty": len(inked_empty),
             "inked_empty_auto": sum(c["has_value_raw"] == 0 and c["review_status"] == "auto" for c in inked_empty)}
+
+
+# ── 메타 필드 합성 (tasks/0004) ─────────────────────────────────────────────
+@pytest.fixture(scope="session")
+def meta_synth(tmp_path_factory):
+    """메타 필드가 사람마다 다른 획인 합성 4일치 (네 자리 차량번호, 월·일 필드, 차를 바꿔 탄 날·새 차·새 사람)."""
+    return generate(tmp_path_factory.mktemp("meta_synth"), days=4, seed=3, meta_fields=True)
+
+
+@pytest.fixture(scope="session")
+def meta_null(meta_synth, tmp_path_factory):
+    """meta_synth 를 라벨 그대로, 인식기 없이 돌린 것. 이 DB 에 쓰지 않는다 (쓸 시험은 clone_db 로)."""
+    root = tmp_path_factory.mktemp("meta_null")
+    settings = Settings(site=meta_synth.site, archive_root=meta_synth.scans, work_root=root / "work",
+                        reviews=root / "reviews.jsonl")
+    pipe = Pipeline(settings)
+    pipe.run([meta_synth.scans])
+    return {"root": root, "settings": settings, "pipe": pipe}

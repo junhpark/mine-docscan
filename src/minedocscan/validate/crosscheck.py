@@ -9,6 +9,8 @@
   2) 아니면 차량번호가 머리글 차량번호와 같은 자리
 순서로 자리를 정한다. 그 결과는 eq_assignment_obs 에 남긴다 (그날의 실제 배차).
 
+일보 쪽의 (차량번호, 작성자)는 쪽 메타(doc_page_meta)의 최종 값이다 — 검수 > 라벨 > 파일명 > 기계가 읽은 값 (pagemeta.py).
+
 하루에 행렬 양식이 여러 장일 수 있으므로(상차 장비마다 한 장) 그날의 모든 장을 합쳐서 비교한다.
 
 판정(status)은 최종 값(검수가 있으면 검수값)으로 한다. 기계가 읽은 횟수(trips_raw)의 합은 log_trips_raw,
@@ -44,28 +46,15 @@ def _crosscheck_date(con: sqlite3.Connection, date: str, exclude: set[str]) -> d
     for r in matrix:
         slots.setdefault(r["slot"], (r["operator"], r["vehicle_no"]))
 
-    # ── 일보 한 장(page) → 자리 ──
+    # ── 일보 한 장(page) → 자리. 쪽의 차량·작성자는 쪽 메타(doc_page_meta)의 최종 값 ──
+    page_ids = list(dict.fromkeys(r["page_id"] for r in log))
+    meta = page_meta_values(con, page_ids, ("vehicle_no", "operator"))
     pages: dict[str, tuple[str | None, str | None]] = {}
     for r in log:
-        pages.setdefault(r["page_id"], (r["vehicle_no"], r["operator"]))
-    page_slot: dict[str, tuple[str, str]] = {}
-    taken: set[str] = set()
-    for pid, (_vehicle, operator) in pages.items():            # 1) 작성자 일치
-        if not operator:
-            continue
-        for slot, (h_op, _h_veh) in slots.items():
-            if slot not in taken and h_op and h_op == operator:
-                page_slot[pid] = (slot, "operator")
-                taken.add(slot)
-                break
-    for pid, (vehicle, _operator) in pages.items():            # 2) 차량번호 일치
-        if pid in page_slot or not vehicle:
-            continue
-        for slot, (_h_op, h_veh) in slots.items():
-            if slot not in taken and h_veh and str(h_veh) == str(vehicle):
-                page_slot[pid] = (slot, "vehicle")
-                taken.add(slot)
-                break
+        m = meta.get(r["page_id"])
+        pages.setdefault(r["page_id"], (m.get("vehicle_no"), m.get("operator")) if m is not None
+                         else (r["vehicle_no"], r["operator"]))
+    page_slot = assign_slots(pages, slots)
 
     obs = []
     # 자리를 못 정한 쪽은 slot 을 비운다 — 차량·작성자를 고쳐 자리가 풀리면 옛 자리가 남으면 안 된다 (새로 돌린 DB 와 같아야 한다)
@@ -110,6 +99,45 @@ def _crosscheck_date(con: sqlite3.Connection, date: str, exclude: set[str]) -> d
     con.execute("DELETE FROM xcheck_haul WHERE work_date=?", (date,))
     upsert(con, "xcheck_haul", out)
     return counts
+
+
+def page_meta_values(con: sqlite3.Connection, page_ids: list[str], keys: tuple[str, ...]) -> dict[str, dict]:
+    """쪽마다 {키: 최종 값} (doc_page_meta). 행이 하나도 없는 쪽은 빠진다 — 그때는 prod_haul 의 값을 쓴다."""
+    out: dict[str, dict] = {}
+    for i in range(0, len(page_ids), 500):
+        chunk = page_ids[i:i + 500]
+        for pid, k, v in con.execute(f"SELECT page_id, meta_key, value FROM doc_page_meta WHERE page_id IN "
+                                     f"({','.join('?' * len(chunk))})", chunk):
+            d = out.setdefault(pid, {})
+            if k in keys:
+                d[k] = v
+    return out
+
+
+def assign_slots(pages: dict[str, tuple[str | None, str | None]],
+                 slots: dict[str, tuple[str | None, str | None]]) -> dict[str, tuple[str, str]]:
+    """일보 한 장(쪽 → (차량번호, 작성자))마다 행렬의 자리. slots: 자리 → (머리글 운전자, 머리글 차량번호).
+      1) 작성자가 머리글 운전자와 같은 자리   2) 아니면 차량번호가 머리글 차량번호와 같은 자리
+    한 자리는 한 쪽에만. 돌려주는 값: 쪽 → (자리, operator | vehicle). 쪽의 순서(dict 순서)대로 정한다."""
+    page_slot: dict[str, tuple[str, str]] = {}
+    taken: set[str] = set()
+    for pid, (_vehicle, operator) in pages.items():            # 1) 작성자 일치
+        if not operator:
+            continue
+        for slot, (h_op, _h_veh) in slots.items():
+            if slot not in taken and h_op and h_op == operator:
+                page_slot[pid] = (slot, "operator")
+                taken.add(slot)
+                break
+    for pid, (vehicle, _operator) in pages.items():            # 2) 차량번호 일치
+        if pid in page_slot or not vehicle:
+            continue
+        for slot, (_h_op, h_veh) in slots.items():
+            if slot not in taken and h_veh and str(h_veh) == str(vehicle):
+                page_slot[pid] = (slot, "vehicle")
+                taken.add(slot)
+                break
+    return page_slot
 
 
 def _collect(items) -> tuple[dict, dict, dict]:

@@ -22,7 +22,7 @@ import hashlib
 import sqlite3
 from dataclasses import asdict, dataclass, field
 
-from .store import effective, field_id_of, meta_from_reviews
+from .store import effective, field_id_of
 
 QUEUES = ("haul-numbers", "mismatch", "pending", "page-fields")
 INPUT_KINDS = ("handwritten_number", "handwritten_text")      # 이 화면이 입력받는 셀 종류
@@ -179,8 +179,9 @@ def _pending(con, template: str | None, kind: str | None):
 
 # ── page-fields ────────────────────────────────────────────────────────────
 def _page_fields(con, site):
-    """meta_key 필드가 있는 양식의 쪽마다, 쪽 메타(검수값 > 라벨 > 파일명)에 아직 없는 키의 필드를 한 항목으로 묶는다."""
-    metas = {name: t.meta_fields() for name, t in site.templates.items() if t.meta_fields()}
+    """meta_key 필드가 있는 양식의 쪽마다, 쪽 메타(doc_page_meta 의 최종 값: 검수값 > 라벨 > 파일명 > 기계 값)에 아직 없는
+    키의 필드를 한 항목으로 묶는다. 기계가 채운 키는 나오지 않는다. 날짜의 부분(date.month·date.day)은 검수로 받지 않는다."""
+    metas = {name: t.review_meta_fields() for name, t in site.templates.items() if t.review_meta_fields()}
     if not metas:
         return [], 0, 0, {}
     pages = con.execute(
@@ -189,13 +190,7 @@ def _page_fields(con, site):
         f"({','.join('?' * len(metas))}) ORDER BY p.work_date, d.source_name, p.page_no", list(metas)).fetchall()
     items, done = [], 0
     for pg in pages:
-        tpl = site.templates[pg["template_name"]]
-        meta = site.page_meta(pg["source_name"], pg["page_no"])
-        for k, v in meta_from_reviews(con, pg["page_id"], tpl).items():
-            if v is None:
-                meta.pop(k, None)
-            else:
-                meta[k] = v
+        meta = _final_meta(con, pg["page_id"])
         missing = {name: key for name, key in metas[pg["template_name"]].items() if not meta.get(key)}
         if not missing:
             done += 1
@@ -212,6 +207,11 @@ def _page_fields(con, site):
     return items, len(pages), done, {k: _candidates(con, site, k) for k in keys}
 
 
+def _final_meta(con, page_id: str) -> dict:
+    return {r[0]: r[1] for r in con.execute("SELECT meta_key, value FROM doc_page_meta WHERE page_id = ? "
+                                            "AND value IS NOT NULL", (page_id,))}
+
+
 def _candidates(con, site, key: str) -> list[str]:
     """키의 후보 값: 행렬 템플릿 머리글(header_<key>) + 라벨과 검수에 나온 값. 많이 나온 순."""
     counts: dict[str, int] = {}
@@ -225,7 +225,7 @@ def _candidates(con, site, key: str) -> list[str]:
         v = lab.get(key)
         if v not in (None, ""):
             counts[str(v)] = counts.get(str(v), 0) + 1
-    names = {(t.name, name) for t in site.templates.values() for name, k in t.meta_fields().items() if k == key}
+    names = {(t.name, name) for t in site.templates.values() for name, k in t.review_meta_fields().items() if k == key}
     for rv in effective(con).values():
         if rv.verdict == "value" and rv.region == "fields" and (rv.template, rv.field_name) in names:
             counts[rv.value] = counts.get(rv.value, 0) + 1

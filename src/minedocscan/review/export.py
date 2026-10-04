@@ -7,6 +7,12 @@
 
 크롭은 파이프라인이 인식기에 넘기는 것과 같은 구현으로 뜬다(imaging/cropspec.py) — 같은 셀이면 화소까지 같다.
 
+메타 필드 (--meta, tasks/0004 단계 2): meta_key 가 있는 자유 필드(차량번호·작성자·날짜의 월·일)의 크롭과 정답.
+  OUT/<split>/meta/<키>/<이름>.png, OUT/<split>/meta/labels.jsonl (file 은 OUT 기준 경로 — 셀의 labels.jsonl 과 섞이지 않는다)
+  정답 = 그 쪽 메타의 **사람·파일명** 값(검수 > 라벨 > 파일명, doc_page_meta). 기계가 읽은 값은 정답이 아니다. 줄마다 출처(label_source).
+  값이 없는 쪽은 내보내지 않는다. illegible 로 검수된 필드는 --include-illegible 일 때만 (verdict illegible).
+  규격의 여유는 고정 8 px — 필드는 표의 칸이 아니라 "행 높이의 절반"이 맞지 않는다 (60 px 높이의 필드에 30 px).
+
 illegible 은 기본으로 뺀다 (--include-illegible 이면 넣는다: 숫자 인식기의 "거절"로 학습한다 — labels.jsonl 의 verdict 로 구분).
 empty 는 빈 칸의 예로 넣는다. test 와 train 을 섞지 않는다 (날짜 분할, ADR 0009).
 크롭과 라벨에는 현장의 글씨가 들어 있다. 대상이 git 작업 트리 안이면 거절한다 (--allow-in-repo 로만).
@@ -30,6 +36,8 @@ class ExportError(RuntimeError):
 
 _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 MAX_SCALE = 6.0
+META_PAD = 8                 # 메타 필드 크롭의 여유(템플릿 px, 고정) — tasks/0004 9절 기본값
+HUMAN_SOURCES = ("review", "label", "filename")
 
 
 def safe_name(field_id: str) -> str:
@@ -103,3 +111,71 @@ def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split
         for h in handles.values():
             h.close()
     return {"out": str(out), "written": written, "by_split": by_split, "by_source": by_source, "skipped_illegible": skipped}
+
+
+def export_meta_crops(con: sqlite3.Connection, site, settings, out: str | Path, split: str = "all",
+                      meta_key: str | None = None, res: str = "auto", out_scale: float = 1.5, pad: int | None = META_PAD,
+                      allow_in_repo: bool = False, include_illegible: bool = False) -> dict:
+    """메타 필드의 크롭 + 정답(사람·파일명 값). 돌려주는 값: {"written", "by_split", "by_key", "by_label_source",
+    "by_source", "skipped_illegible"}. 줄 수 = PNG 수 = 사람·파일명 값이 있는 (쪽, 키) 수 (illegible 로 검수된 것 빼고)."""
+    from .store import effective
+
+    out = Path(out)
+    pad = META_PAD if pad is None else pad
+    check_spec_args(out_scale, pad)
+    if inside_git_tree(out) and not allow_in_repo:
+        raise ExportError(f"{out} 은 git 작업 트리 안입니다. 크롭에는 현장의 글씨(이름·차량번호)가 들어 있으므로 저장소 밖에 "
+                          "내보내세요 (정말 필요하면 --allow-in-repo)")
+    if split not in ("all", "test", "train"):
+        raise ValueError(f"split 은 all | test | train: {split}")
+    rows = con.execute(
+        "SELECT m.page_id, m.meta_key, m.value, m.source, m.field_id, p.work_date FROM doc_page_meta m "
+        "JOIN doc_page p ON m.page_id = p.page_id WHERE m.field_id IS NOT NULL AND m.value IS NOT NULL "
+        f"AND m.source IN ({','.join('?' * len(HUMAN_SOURCES))})" + (" AND m.meta_key = ?" if meta_key else "")
+        + " ORDER BY p.work_date, m.page_id, m.meta_key", (*HUMAN_SOURCES, *([meta_key] if meta_key else []))).fetchall()
+    reviews = effective(con, field_ids=[r["field_id"] for r in rows])
+    written = skipped = 0
+    by_split: dict[str, int] = {}
+    by_key: dict[str, int] = {}
+    by_label: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    handles: dict[str, object] = {}
+    try:
+        for r in rows:
+            sp = site.split_of(r["work_date"])
+            if split != "all" and sp != split:
+                continue
+            rv = reviews.get(r["field_id"])
+            verdict = "value"
+            if rv is not None and rv.verdict == "illegible":
+                if not include_illegible:
+                    skipped += 1
+                    continue
+                verdict = "illegible"
+            f = field_info(con, r["field_id"])
+            if f is None:
+                continue
+            img, spec = spec_crop(settings, f, res, out_scale, pad)
+            rel = Path(sp) / "meta" / safe_name(r["meta_key"]) / f"{safe_name(r['field_id'])}.png"
+            imwrite(out / rel, img)
+            if sp not in handles:
+                (out / sp / "meta").mkdir(parents=True, exist_ok=True)
+                handles[sp] = open(out / sp / "meta" / "labels.jsonl", "w", encoding="utf-8")   # noqa: SIM115
+            handles[sp].write(json.dumps({
+                "field_id": r["field_id"], "file": rel.as_posix(), "meta_key": r["meta_key"],
+                "text": r["value"] if verdict == "value" else "", "verdict": verdict, "label_source": r["source"],
+                "template": f["template_name"], "region": f["region"], "field_name": f["field_name"], "kind": f["kind"],
+                "work_date": r["work_date"], "split": sp, "spec": spec.to_dict(), "inked": (f["ink"] or 0) > 0,
+                "resolution": spec.res, "out_scale": out_scale, "pad": pad, "bbox": [f["x0"], f["y0"], f["x1"], f["y1"]],
+                "reviewer": rv.reviewer if rv is not None else None,
+                "reviewed_at": rv.reviewed_at if rv is not None else None}, ensure_ascii=False) + "\n")
+            written += 1
+            by_split[sp] = by_split.get(sp, 0) + 1
+            by_key[r["meta_key"]] = by_key.get(r["meta_key"], 0) + 1
+            by_label[r["source"]] = by_label.get(r["source"], 0) + 1
+            by_source[spec.res] = by_source.get(spec.res, 0) + 1
+    finally:
+        for h in handles.values():
+            h.close()
+    return {"out": str(out), "written": written, "by_split": by_split, "by_key": by_key, "by_label_source": by_label,
+            "by_source": by_source, "skipped_illegible": skipped}
