@@ -5,6 +5,8 @@
   GET  /crop?field_id=&kind=cell|row|pair[&scale=][&box=0]      PNG. 응답 머리글 X-Crop-Source: source | aligned
                                            (pair: 점검표 행의 유·무 두 칸을 같이, box=0: 행 띠에 대상 칸 테두리 없이)
   POST /api/review  {field_id, verdict, value, note}            저장 (검수자는 서버를 띄울 때 정한다)
+  POST /api/reviews {items: [{field_id, verdict, value, note}]}  한 항목의 칸 여럿을 한 번에 — 전부 검사한 뒤에야 저장한다
+                                           (한 칸이라도 형식에 맞지 않으면 아무것도 남지 않는다, tasks/0005 4.1)
   POST /api/check   {field_id, answer: yes|no|none|unknown}     ✓ 행의 답 → 두 칸의 검수 두 건 (review/checks.py)
   GET  /api/stats                          진행 현황
 
@@ -22,12 +24,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from ..forms.formats import FORMATS, HINTS, INPUT_CHARS, FormatError, normalize
 from .crops import CropError, cell_crop, field_info, pair_crop, row_crop
 from .queue import INPUT_KINDS, QUEUES, build_queue
-from .store import VERDICTS, review_from_field, save, stats
+from .store import VERDICTS, field_format, review_from_field, save, stats
 
 STATIC = Path(__file__).parent / "static"
-DIGITS = re.compile(r"^[0-9]+$")
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 
 
@@ -70,7 +72,8 @@ class ReviewApp:
         q = build_queue(self.con, name, site=self.site,
                         **{k: v for k, v in opts.items() if k in ("n", "seed", "empty_share", "template", "kind", "audit")})
         q.update(reviewer=self.reviewer, site=self.site.name, show_machine=(name == "pending"),
-                 templates={t.name: t.title for t in self.site.templates.values()})
+                 templates={t.name: t.title for t in self.site.templates.values()},
+                 formats={f: {"chars": INPUT_CHARS[f], "hint": HINTS[f]} for f in FORMATS})
         return q
 
     def crop_png(self, params: dict) -> tuple[bytes, str]:
@@ -98,6 +101,40 @@ class ReviewApp:
         raise ApiError(400, f"kind 는 cell, row, pair 중 하나: {kind}")
 
     def post_review(self, body: dict) -> dict:
+        review = self._checked_review(body)
+        try:
+            out = save(self.con, self.site, self.settings, review)
+        except FormatError as e:
+            raise ApiError(400, str(e)) from e
+        return {"ok": True, **out, "field_id": review.field_id, "verdict": review.verdict, "value": review.value,
+                "reviewed_at": review.reviewed_at}
+
+    def post_reviews(self, body: dict) -> dict:
+        """한 항목의 칸 여럿 (계기의 시작·종료·총, 묶음 항목). 전부 검사하고 정규화한 뒤에야 저장한다 — 한 칸이라도 틀리면 400 이고
+        검수 파일에 아무것도 남지 않는다. 같은 칸이 두 번이면 거절. 저장 시각은 하나."""
+        from .store import now_iso
+
+        if not isinstance(body, dict) or not isinstance(body.get("items"), list) or not body["items"]:
+            raise ApiError(400, "본문은 {items: [...]} 이어야 합니다")
+        reviews = []
+        for k, item in enumerate(body["items"]):
+            try:
+                reviews.append(self._checked_review(item))
+            except ApiError as e:
+                raise ApiError(e.status, f"{k + 1}번째 칸: {e}") from e
+        if len({r.field_id for r in reviews}) != len(reviews):
+            raise ApiError(400, "같은 칸이 두 번 들어 있습니다")
+        at = now_iso()
+        saved = []
+        for r in reviews:
+            r.reviewed_at = at
+            out = save(self.con, self.site, self.settings, r)
+            saved.append({"field_id": r.field_id, "verdict": r.verdict, "value": r.value, "review_id": out["review_id"],
+                          "applied": out["applied"]})
+        return {"ok": True, "saved": saved, "reviewed_at": at}
+
+    def _checked_review(self, body: dict):
+        """요청 하나 → 검사하고 정규화한 Review (아직 저장하지 않는다)."""
         if not isinstance(body, dict):
             raise ApiError(400, "본문은 JSON 객체여야 합니다")
         fid, verdict = str(body.get("field_id", "")), str(body.get("verdict", ""))
@@ -112,14 +149,13 @@ class ReviewApp:
         if verdict == "value":
             if not value:
                 raise ApiError(400, "값이 비었습니다 (빈 칸이면 verdict=empty)")
-            if f["kind"] == "handwritten_number":
-                if not DIGITS.match(value):
-                    raise ApiError(400, f"숫자 셀에는 숫자만: {value!r}")
-                value = str(int(value))              # "07" → "7": 정답 파일과 인식기 출력이 같은 표기여야 채점이 맞는다
-        review = review_from_field(self.con, fid, verdict, value, self.reviewer, note=note)
-        out = save(self.con, self.site, self.settings, review)
-        return {"ok": True, **out, "field_id": fid, "verdict": verdict, "value": review.value,
-                "reviewed_at": review.reviewed_at}
+            # 칸의 형식(forms/formats.py)으로 정규화 — "07" → "7", "8-17" → "08:00~17:00". 정답 파일과 인식기 출력이 같은 표기여야
+            # 채점이 맞는다. 맞지 않으면 400 이고 검수 파일에 아무것도 남지 않는다 (store.save 도 다시 검사한다)
+            try:
+                value = normalize(field_format(self.site, f["template_name"], f["region"], f["field_name"]), value)
+            except FormatError as e:
+                raise ApiError(400, str(e)) from e
+        return review_from_field(self.con, fid, verdict, value, self.reviewer, note=note)
 
     def post_check(self, body: dict) -> dict:
         """✓ 행의 답 하나 → 유·무 두 칸의 검수 두 건 (tasks/0004 4.9). 둘 다 저장한 뒤 insp_daily 가 그 답을 따른다."""
@@ -210,7 +246,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         try:
-            if u.path not in ("/api/review", "/api/check"):
+            if u.path not in ("/api/review", "/api/reviews", "/api/check"):
                 raise ApiError(404, "없는 경로")
             self._check_local(need_json=True)
             try:
@@ -218,7 +254,8 @@ class _Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
             except (ValueError, UnicodeDecodeError) as e:
                 raise ApiError(400, "본문이 JSON 이 아닙니다") from e
-            self._json(200, self.app.post_review(body) if u.path == "/api/review" else self.app.post_check(body))
+            post = {"/api/review": self.app.post_review, "/api/reviews": self.app.post_reviews, "/api/check": self.app.post_check}
+            self._json(200, post[u.path](body))
         except (BrokenPipeError, ConnectionResetError):
             return
         except ApiError as e:

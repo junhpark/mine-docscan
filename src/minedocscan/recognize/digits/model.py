@@ -194,7 +194,8 @@ def resolve_model(ref: str, site_root: str | Path | None) -> Path:
     if missing:
         have = ""
         if site_root is not None and models_dir(site_root).is_dir():
-            names = sorted(x.name for x in models_dir(site_root).iterdir() if (x / "card.json").is_file())
+            names = sorted(x.name for x in models_dir(site_root).iterdir()
+                           if (x / "card.json").is_file() and not x.name.startswith("."))      # 학습 중의 임시 폴더는 빼고
             have = f" — 사이트 팩에 있는 모델: {', '.join(names) if names else '없음'}"
         raise FileNotFoundError(f"모델 폴더에 {', '.join(missing)} 이(가) 없습니다: {d}{have}")
     return d

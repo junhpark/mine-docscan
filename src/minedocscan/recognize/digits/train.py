@@ -43,6 +43,7 @@ from .model import (
     N_CLASSES,
     N_INPUT_CHANNELS,
     OnnxNet,
+    clean_orphan_staging,
     encode,
     log_softmax,
     normalize,
@@ -238,6 +239,7 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
     out_dir = Path(out_dir)
     if out_dir.exists() and any(out_dir.iterdir()):
         raise TrainError(f"같은 이름의 모델이 있습니다: {out_dir} — 덮어쓰지 않습니다. 다른 --name 을 주세요")
+    clean_orphan_staging(out_dir.parent)                      # 끊긴 학습이 남긴 주인 없는 임시 폴더 (시작할 때 치운다)
     if inside_git_tree(out_dir.parent if not out_dir.exists() else out_dir) and not allow_in_repo:
         raise TrainError(f"{out_dir} 은 git 작업 트리 안입니다. 현장 글씨로 학습한 모델은 사이트 팩에 둡니다 "
                          "(합성 셀만으로 만든 시험용 모델이면 --allow-in-repo)")

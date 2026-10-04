@@ -36,7 +36,7 @@ HUMAN_SOURCES = ("review", "label", "filename")
 INPUT_KINDS = ("handwritten_number", "handwritten_text")      # 이 화면이 입력받는 셀 종류
 
 _FIELD_SQL = (
-    "SELECT f.field_id, f.page_id, f.region, f.row_no, f.field_name, f.kind, f.row_key, f.x0, f.y0, f.x1, f.y1, "
+    "SELECT f.field_id, f.page_id, f.region, f.row_no, f.field_name, f.kind, f.format, f.row_key, f.x0, f.y0, f.x1, f.y1, "
     "f.has_value_raw, f.value_raw, f.confidence, f.backend, f.review_status, "
     "p.template_name, p.page_no, p.work_date, d.source_name "
     "FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id ")
@@ -51,6 +51,7 @@ class QueueCell:
     machine: dict | None = None             # 기계 값 — pending 대기열에서만
     meta_key: str | None = None             # page-fields: 이 셀의 값이 되는 메타 키 (후보 목록의 키)
     human: dict | None = None               # meta-check: 사람·파일명의 값 {value, source}
+    format: str | None = None               # 값의 형식 (forms/formats.py) — 화면이 받는 글자와 안내를 바꾼다
 
 
 @dataclass
@@ -110,7 +111,8 @@ def _machine_dict(r) -> dict:
 
 
 def _cell(r, label: str, rv, show_machine: bool) -> QueueCell:
-    return QueueCell(r["field_id"], label, r["kind"], _review_dict(rv), _machine_dict(r) if show_machine else None)
+    return QueueCell(r["field_id"], label, r["kind"], _review_dict(rv), _machine_dict(r) if show_machine else None,
+                     format=r["format"])
 
 
 def _title(r, label: str) -> str:
@@ -223,7 +225,7 @@ def _page_fields(con, site, audit: int | None = None, seed: int = 0):
         for name, key in missing.items():
             r = con.execute(_FIELD_SQL + "WHERE f.field_id = ?", (field_id_of(pg["page_id"], name),)).fetchone()
             if r is not None:
-                cells.append(QueueCell(r["field_id"], key, r["kind"], None, None, meta_key=key))
+                cells.append(QueueCell(r["field_id"], key, r["kind"], None, None, meta_key=key, format=r["format"]))
         if cells:
             title = f"{pg['work_date'] or '날짜 없음'} · {pg['template_name']} · {pg['source_name']}#{pg['page_no']}"
             items.append(QueueItem(pg["page_id"], title, pg["work_date"], cells))
@@ -300,7 +302,8 @@ def _meta_check(con, site):
                                    {"has_value": f["has_value_raw"], "value_raw": r["machine_value"],
                                     "confidence": r["machine_confidence"], "backend": f["backend"],
                                     "status": r["machine_status"]},
-                                   meta_key=r["meta_key"], human={"value": r["value"], "source": r["source"]}))
+                                   meta_key=r["meta_key"], human={"value": r["value"], "source": r["source"]},
+                                   format=f["format"]))
         if cells:
             r0 = rs[0]
             items.append(QueueItem(f"meta-check:{pid}", f"{r0['work_date'] or '날짜 없음'} · {r0['template_name']} · "

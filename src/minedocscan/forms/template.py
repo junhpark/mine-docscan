@@ -8,9 +8,11 @@
   handler_options: {...}
   regions:                                    # 한 페이지에 표가 여러 개일 수 있다
     - name, grid: {ys, xs}, header_rows
-      columns: [{idx, name, kind, ...메타}]   # kind: printed | handwritten_text | handwritten_number | checkmark
+      columns: [{idx, name, kind, format?, ...메타}]   # kind: printed | handwritten_text | handwritten_number | checkmark
       rows:    [{row, key, ...메타}]
-  fields: [{name, kind, bbox, meta_key?}]     # 표 밖의 자유 필드 (날짜, 작성자, 비고 …)
+  fields: [{name, kind, bbox, meta_key?, format?}]     # 표 밖의 자유 필드 (날짜, 작성자, 비고 …)
+                                              # format: 손으로 쓰는 칸의 값의 형식 — integer | decimal | time | time_range | reading
+                                              #   (forms/formats.py, tasks/0005 4.1). 숫자 칸의 기본은 integer, 글자 칸은 없음
                                               # meta_key: 이 필드의 값이 쪽의 메타(vehicle_no, operator …)가 된다. date 는 안 된다
                                               # date.month, date.day: 읽기 전용 — 날짜의 월·일을 적는 칸. 값은 쪽의 날짜(파일명·라벨)에서
                                               #   오고 기계가 읽은 값은 대조에만 쓴다. 검수로 받지 않는다 (tasks/0004 4.3)
@@ -26,6 +28,7 @@ import yaml
 
 from ..imaging.align import orb_features
 from ..imaging.io import imread_gray
+from .formats import FORMAT_KINDS, FORMATS, default_format
 
 CELL_KINDS = {"printed", "handwritten_text", "handwritten_number", "checkmark", "signature"}
 DATE_PARTS = ("date.month", "date.day")      # 읽기 전용 메타 키: 정답은 쪽의 날짜에서 나온다. 검수로 받지 않는다
@@ -42,6 +45,11 @@ class Cell:
     row_key: str = ""        # 행을 식별하는 키 (장비, 광종|편 …)
     col_meta: dict = field(default_factory=dict)
     row_meta: dict = field(default_factory=dict)
+
+    @property
+    def fmt(self) -> str | None:
+        """값의 형식 (forms/formats.py): 템플릿의 format, 없으면 칸 종류의 기본 (숫자 칸 integer, 글자 칸 없음)."""
+        return self.col_meta.get("format") or default_format(self.kind)
 
 
 class TemplateError(ValueError):
@@ -102,6 +110,7 @@ class Template:
                                     "(월·일 칸은 date.month, date.day — 대조에만 쓴다)")
             if isinstance(mk, str) and mk.startswith("date.") and mk not in DATE_PARTS:
                 raise TemplateError(f"{self.name}/fields/{f['name']}: 날짜의 부분은 {' | '.join(DATE_PARTS)} 만 받습니다: {mk!r}")
+            _check_format(f"{self.name}/fields/{f['name']}", f)
         mks = [f["meta_key"] for f in self.fields if f.get("meta_key")]
         dup = sorted({k for k in mks if mks.count(k) > 1})
         if dup:
@@ -115,6 +124,7 @@ class Template:
                     raise TemplateError(f"{self.name}/{reg['name']}: 알 수 없는 kind '{c['kind']}'")
                 if not 0 <= c["idx"] < len(xs) - 1:
                     raise TemplateError(f"{self.name}/{reg['name']}: 컬럼 idx {c['idx']} 가 괘선 범위를 벗어납니다")
+                _check_format(f"{self.name}/{reg['name']}/{c['name']}", c)
             hr = reg.get("header_rows", 0)
             keys = set()
             for r in reg["rows"]:
@@ -172,7 +182,21 @@ class Template:
 
     def field_cells(self) -> list[Cell]:
         return [Cell("fields", -1, -1, f["name"], f["kind"], tuple(f["bbox"]),
-                     col_meta={"meta_key": f["meta_key"]} if f.get("meta_key") else {}) for f in self.fields]
+                     col_meta={k: f[k] for k in ("meta_key", "format") if f.get(k)}) for f in self.fields]
+
+    def format_of(self, region: str, name: str) -> str | None:
+        """칸(표의 열 이름 또는 자유 필드 이름)의 값의 형식. 없는 칸이면 None (형식 검사를 하지 않는다)."""
+        if region == "fields":
+            for f in self.fields:
+                if f["name"] == name:
+                    return f.get("format") or default_format(f.get("kind", ""))
+            return None
+        for reg in self.regions:
+            if reg["name"] == region:
+                for c in reg["columns"]:
+                    if c["name"] == name:
+                        return c.get("format") or default_format(c["kind"])
+        return None
 
     def meta_fields(self) -> dict[str, str]:
         """쪽의 메타를 적는 자유 필드: {필드 이름: meta_key}. 날짜의 부분(date.month, date.day)도 들어 있다."""
@@ -181,3 +205,14 @@ class Template:
     def review_meta_fields(self) -> dict[str, str]:
         """검수값이 쪽의 메타가 되는 자유 필드 — meta_fields 에서 날짜의 부분(읽기 전용)을 뺀 것."""
         return {n: k for n, k in self.meta_fields().items() if k not in DATE_PARTS}
+
+
+def _check_format(where: str, spec: dict) -> None:
+    """칸·필드의 format: 알려진 형식이고, 손으로 쓰는 칸에만 (인쇄된 칸·체크·서명에는 형식이 없다)."""
+    fmt = spec.get("format")
+    if fmt is None:
+        return
+    if fmt not in FORMATS:
+        raise TemplateError(f"{where}: 알 수 없는 format {fmt!r} (가능: {', '.join(FORMATS)})")
+    if spec.get("kind") not in FORMAT_KINDS:
+        raise TemplateError(f"{where}: format 은 손으로 쓰는 칸({' | '.join(FORMAT_KINDS)})에만 — kind 가 {spec.get('kind')!r}")

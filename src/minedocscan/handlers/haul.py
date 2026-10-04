@@ -161,9 +161,10 @@ class HaulHandler(FormHandler):
 
 
 def _table_number(c) -> bool:
-    """덩어리 배정·숫자 인식으로 다루는 숫자 칸. 날짜의 월·일 칸(표 밖, date.month·date.day)은 표의 칸이 아니라
+    """덩어리 배정·숫자 인식으로 다루는 숫자 칸 (형식 integer — 소수·시각 칸은 읽지 않는다, tasks/0005 4.1). 날짜의 월·일 칸(표 밖, date.month·date.day)은 표의 칸이 아니라
     덩어리 배정이 닿지 않는다 — 다른 자유 필드처럼 잉크로 값 유무를 정한다 (모델이 있으면 파이프라인이 먼저 읽는다)."""
-    return c.kind == "handwritten_number" and not (c.region == "fields" and c.col_meta.get("meta_key") in DATE_PARTS)
+    return (c.kind == "handwritten_number" and c.fmt == "integer"
+            and not (c.region == "fields" and c.col_meta.get("meta_key") in DATE_PARTS))
 
 
 def _as_trips(text: str | None) -> int | None:

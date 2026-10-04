@@ -60,7 +60,7 @@
   'use strict';
   const qs = new URLSearchParams(location.search);
   const state = { items: [], idx: 0, done: 0, total: 0, showMachine: false, entered: {}, templates: {}, busy: false, renderedAt: 0, candidates: {},
-                  queue: '', checked: {} };
+                  queue: '', checked: {}, formats: {} };
   // ✓ 행(checks)의 답: 키 → 서버의 answer, 보이는 이름 (tasks/0004 4.9 — 두 칸의 판정으로 저장된다)
   const CHECK = { '1': ['yes', '유'], '2': ['no', '무'], 'Enter': ['none', '표시 없음'], '?': ['unknown', '모름'] };
   const $ = (id) => document.getElementById(id);
@@ -75,6 +75,7 @@
     state.items = q.items; state.done = q.done; state.total = q.total; state.showMachine = q.show_machine;
     state.templates = q.templates || {};
     state.candidates = q.candidates || {};
+    state.formats = q.formats || {};    // 형식마다 받는 글자·안내 (forms/formats.py — 서버가 다시 검사한다)
     state.queue = q.name;
     $('qname').textContent = '대기열 ' + q.name + ' · ' + (q.site || '');
     // 숫자 정답을 만드는 대기열: 이 규칙이 인식기의 "빈 칸"과 "거절"의 정답이 된다 (tasks/0003 4.3, docs/DATA.md)
@@ -123,7 +124,8 @@
     let h = '<div class="item"><h1>' + esc(titleOf(item)) + '</h1>';
     item.cells.forEach((c, i) => {
       const prev = state.entered[c.field_id] || c.review;
-      const isNum = c.kind === 'handwritten_number';
+      const fmt = fmtOf(c);
+      const isNum = fmt === 'integer';
       h += '<div class="cell">';
       h += '<div class="label">' + esc(c.label) + '</div>';
       h += '<div class="row"><img data-crop="/crop?field_id=' + encodeURIComponent(c.field_id) + '&kind=row" alt="행"></div>';
@@ -137,10 +139,12 @@
         else if (state.showMachine && c.machine && c.machine.value_raw) init = c.machine.value_raw;
         const cands = c.meta_key ? (state.candidates[c.meta_key] || []) : null;
         const listId = cands ? ('dl-' + i) : '';
-        h += '<input class="val ' + (isNum ? 'num' : 'text') + '" data-i="' + i + '" data-fid="' + esc(c.field_id) + '"'
+        h += '<input class="val ' + (isNum ? 'num' : (fmt ? 'fmt' : 'text')) + '" data-i="' + i + '" data-fid="' + esc(c.field_id) + '"'
+          + (fmt ? ' data-fmt="' + esc(fmt) + '"' : '')
           + (c.meta_key ? ' data-meta="' + esc(c.meta_key) + '"' : '') + (listId ? ' list="' + listId + '"' : '')
           + (c.human ? ' data-human="' + esc(c.human.value) + '" data-machine="' + esc(c.machine ? c.machine.value_raw : '') + '"' : '')
-          + (isNum ? ' inputmode="numeric"' : '') + ' value="' + esc(init) + '" autocomplete="off" spellcheck="false">';
+          + (isNum ? ' inputmode="numeric"' : (fmt === 'decimal' ? ' inputmode="decimal"' : '')) + ' value="' + esc(init) + '" autocomplete="off" spellcheck="false">';
+        if (fmt && !isNum && state.formats[fmt]) h += '<span class="label">' + esc(state.formats[fmt].hint) + '</span>';
         if (cands) {   // 후보 목록: 행렬 머리글 + 지금까지의 라벨·검수. 외부 자원 없이 <datalist> 로
           h += '<datalist id="' + listId + '">' + cands.map(v => '<option value="' + esc(v) + '"></option>').join('') + '</datalist>';
           h += '<span class="label">Alt+1–9 로 고를 수 있습니다: ' + cands.slice(0, 9).map((v, k) => (k + 1) + ' ' + esc(v)).join(' · ') + '</span>';
@@ -162,6 +166,10 @@
     inputs.forEach(inp => {
       inp.addEventListener('keydown', onKey);
       if (inp.classList.contains('num')) inp.addEventListener('input', () => { inp.value = inp.value.replace(/[^0-9?]/g, ''); });
+      if (inp.classList.contains('fmt')) {   // 형식마다 받는 글자만 (서버가 형식을 다시 검사한다 — 맞지 않으면 아무것도 저장하지 않는다)
+        const f = state.formats[inp.dataset.fmt];
+        if (f) { const bad = new RegExp('[^' + f.chars + '?]', 'g'); inp.addEventListener('input', () => { inp.value = inp.value.replace(bad, ''); }); }
+      }
     });
     if (inputs.length) { inputs[0].focus(); inputs[0].select(); }
     state.renderedAt = performance.now();
@@ -233,9 +241,12 @@
     return { verdict: 'value', value: raw };
   }
 
-  async function post(fid, p) {
-    const r = await fetch('/api/review', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ field_id: fid, verdict: p.verdict, value: p.value, note: '' }) });
+  function fmtOf(c) { return c.format || (c.kind === 'handwritten_number' ? 'integer' : null); }
+
+  async function postAll(plans) {
+    // 한 항목의 칸을 한 번에: 서버가 전부 검사한 뒤에야 저장한다 — 한 칸이라도 형식에 맞지 않으면 아무것도 남지 않는다
+    const r = await fetch('/api/reviews', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: plans.map(([fid, p]) => ({ field_id: fid, verdict: p.verdict, value: p.value, note: '' })) }) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || ('저장 실패 ' + r.status));
     return j;
@@ -260,13 +271,13 @@
     }
     state.busy = true;
     try {
-      for (const [fid, p] of plans) {
-        await post(fid, p);
+      const res = await postAll(plans);
+      plans.forEach(([fid, p], k) => {
         if (!state.entered[fid]) {               // 처음 저장한 항목만 진행 수에 더한다
           if (item.cells.length === 1) state.done += 1;
         }
-        state.entered[fid] = { verdict: p.verdict, value: p.value };
-      }
+        state.entered[fid] = { verdict: p.verdict, value: res.saved[k].value };   // 정규화한 표기 (8-17 → 08:00~17:00)
+      });
       if (item.cells.length > 1 && item.cells.every(c => state.entered[c.field_id] || c.review) && !item._counted) { item._counted = true; state.done += 1; }
       next();
       msg('저장했습니다', true);

@@ -130,6 +130,9 @@ def read_crops(root: str | Path, *, allow_test: bool = False, only_split: str | 
                 if line.get("kind") not in kinds:
                     skipped["other_kind"] += 1
                     continue
+                if line.get("format") not in (None, "integer"):  # 소수·시각·계기 칸: 정수 숫자 모델의 학습 데이터가 아니다 (tasks/0005)
+                    skipped["other_format"] += 1
+                    continue
             elif line.get("meta_key") not in meta_keys:
                 skipped["other_key"] += 1
                 continue

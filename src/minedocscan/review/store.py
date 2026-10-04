@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ..forms.formats import normalize, try_normalize
 from ..store.db import upsert
 
 VERDICTS = ("value", "empty", "illegible")
@@ -237,9 +238,23 @@ def page_meta(con: sqlite3.Connection, site, source_name: str, page_no: int, pag
 
 
 # ── 저장 ───────────────────────────────────────────────────────────────────
+def field_format(site, template_name: str | None, region: str, field_name: str) -> str | None:
+    """그 칸의 값의 형식 (템플릿의 format, 없으면 칸 종류의 기본). 템플릿이나 칸을 모르면 None — 형식 검사를 하지 않는다."""
+    tpl = site.templates.get(template_name) if template_name else None
+    return tpl.format_of(region, field_name) if tpl is not None else None
+
+
+def normalized_value(site, row, review: Review) -> str:
+    """verdict=value 의 값을 그 칸의 형식으로 정규화한다 (tasks/0005 4.1). 맞지 않으면 FormatError — 파일에 쓰기 전에."""
+    if review.verdict != "value" or row is None:
+        return review.value
+    return normalize(field_format(site, row["template_name"], row["region"], row["field_name"]), review.value)
+
+
 def save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
     """검수 한 건을 저장한다: 파일 추가 → doc_review → doc_field → 핸들러의 on_review(업무 테이블·그 날짜의 교차검증)
     → 문서 상태. 파이프라인을 다시 돌리지 않아도 DB 가, 같은 파일로 처음부터 돌린 것과 같아진다 (불변식, 테스트로 고정).
+    값은 그 칸의 형식으로 정규화해서 남긴다. 형식에 맞지 않으면 FormatError 이고 파일에 아무것도 쓰지 않는다.
     """
     from ..handlers import get_handler
     from ..pipeline.runner import update_document_status
@@ -248,6 +263,7 @@ def save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
     row = con.execute("SELECT f.*, p.template_name, p.document_id, p.page_no, d.source_name FROM doc_field f "
                       "JOIN doc_page p ON f.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
                       "WHERE f.field_id = ?", (review.field_id,)).fetchone()
+    review.value = normalized_value(site, row, review)          # 형식에 맞지 않으면 여기서 멈춘다 (파일에 쓰기 전)
     if row is not None and not review.source:                   # 문맥이 비어 있으면 DB 에서 채운다 (파일만 봐도 알 수 있게)
         review.source, review.template, review.region = f"{row['source_name']}#{row['page_no']}", row["template_name"] or "", row["region"]
         review.field_name, review.row_no, review.row_key = row["field_name"], row["row_no"], row["row_key"] or ""
@@ -335,11 +351,14 @@ def export_answers(con: sqlite3.Connection, out: str | Path, split: str = "all",
     if split != "all" and site is None:
         raise ValueError("--split 에는 사이트 팩이 필요합니다")
     items = []
+    fmts = dict(con.execute("SELECT field_id, format FROM doc_field"))
     for rv, sp, _d in effective_with_split(con, site):
         if rv.verdict == "illegible" or not rv.source or (split != "all" and sp != split):
             continue
+        # 정규화한 표기로 (칸의 형식 — 예전 검수 줄은 정규화 전일 수 있다. 맞지 않으면 그대로 둔다)
+        text = try_normalize(fmts.get(rv.field_id), rv.value) if rv.verdict == "value" else ""
         items.append({"source": rv.source, "template": rv.template, "region": rv.region, "field_name": rv.field_name,
-                      "row_key": rv.row_key, "text": rv.value if rv.verdict == "value" else ""})
+                      "row_key": rv.row_key, "text": text})
     items.sort(key=lambda a: (a["source"], a["template"], a["region"], a["row_key"], a["field_name"]))
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)

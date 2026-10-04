@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS doc_field (
   row_no          INTEGER NOT NULL,          -- 자유 필드는 -1
   field_name      TEXT NOT NULL,
   kind            TEXT NOT NULL,             -- printed | handwritten_text | handwritten_number | checkmark | signature
+  format          TEXT,                      -- 값의 형식: integer | decimal | time | time_range | reading | NULL(글자) — 템플릿에서
   row_key         TEXT,
   x0 INTEGER, y0 INTEGER, x1 INTEGER, y1 INTEGER,   -- 템플릿 좌표계 bbox → 출처 추적
   ink             REAL,                      -- 잉크 비율

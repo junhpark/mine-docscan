@@ -56,7 +56,7 @@ def field_row(ctx: PageContext, o: CellObs, *, has_value: bool | None, value_raw
     x0, y0, x1, y1 = o.cell.bbox
     return {
         "field_id": field_id(ctx, o), "page_id": ctx.page_id, "region": o.cell.region, "row_no": o.cell.row,
-        "field_name": o.cell.name, "kind": o.cell.kind, "row_key": o.cell.row_key,
+        "field_name": o.cell.name, "kind": o.cell.kind, "format": o.cell.fmt, "row_key": o.cell.row_key,
         "x0": x0, "y0": y0, "x1": x1, "y1": y1, "ink": o.ink,
         "has_value_raw": None if has_value is None else int(has_value),
         "has_value": None if has_value is None else int(has_value),
@@ -153,12 +153,15 @@ class FormHandler:
         return {"fields": len(rows), "pending": sum(r["review_status"] == "pending" for r in rows)}
 
     def load_handwritten(self, ctx: PageContext, hw: list[CellObs]) -> list[dict]:
-        filled = [o for o in hw if o.ink >= self.text_ink_min]
+        inked = [o for o in hw if o.ink >= self.text_ink_min]
+        filled = [o for o in inked if readable(o.cell)]
         recs = dict(zip([id(o) for o in filled], recognize(ctx, filled), strict=True))
         rows = []
         for o in hw:
             r = recs.get(id(o))
-            if r is None:        # 잉크가 없으면 빈 셀로 확정
+            if r is None and o.ink >= self.text_ink_min:   # 잉크는 있는데 읽지 않는 형식(소수·시각 …): 검수 대기 (tasks/0005 4.1)
+                rows.append(unread_row(ctx, o))
+            elif r is None:      # 잉크가 없으면 빈 셀로 확정
                 rows.append(field_row(ctx, o, has_value=False, value_raw="", value_final="", confidence=1.0,
                                       candidates=None, backend="ink", review_status="auto"))
             else:
@@ -184,6 +187,18 @@ class FormHandler:
         """검수를 저장한 직후 호출된다: 이 필드로 만든 업무 행을 파이프라인을 다시 돌리지 않고 갱신한다.
         기본은 아무것도 하지 않는다 (업무 테이블이 없는 핸들러)."""
         return None
+
+
+def readable(cell) -> bool:
+    """인식기에 보내는 칸인가: 형식이 없거나(글자) integer 인 칸만. 소수·시각·계기 칸은 지금의 숫자 모델이 읽지 못한다 —
+    보내지 않고, 잉크가 있으면 검수 대기다 (tasks/0005 4.1. 소수·시각을 읽는 것은 0006)."""
+    return cell.fmt in (None, "integer")
+
+
+def unread_row(ctx: PageContext, o: CellObs) -> dict:
+    """잉크는 있지만 읽지 않은 칸: 값 있음 + 검수 대기, 기계 값 없음 (value_raw·value_final NULL — machine_final 과 같다)."""
+    return field_row(ctx, o, has_value=True, value_raw=None, value_final=None, confidence=None, candidates=None,
+                     backend="ink", review_status="pending")
 
 
 def _printed_value(o: CellObs) -> str | None:
