@@ -1,6 +1,6 @@
 # 작업 지시서 0004 — 표 밖 필드 읽기와 ✓ 판정의 정답
 
-상태: **시작 전** (2026-10-04 작성). 범위나 순서를 바꾸려면 코드보다 이 파일을 먼저 고친다.
+상태: **진행 중** (2026-10-04 작성, 브랜치 `feat/page-fields`). 범위나 순서를 바꾸려면 코드보다 이 파일을 먼저 고친다.
 관련: [ROADMAP.md](../ROADMAP.md) M2·M3, [0002](0002-full-archive-and-evalset.md), [0003](0003-digit-recognizer.md),
 [ADR 0004](../decisions/0004-slot-as-join-key.md), [ADR 0006](../decisions/0006-show-discrepancies.md),
 [ADR 0008](../decisions/0008-review-records.md), [ADR 0011](../decisions/0011-recognizer-input-and-runtime.md),

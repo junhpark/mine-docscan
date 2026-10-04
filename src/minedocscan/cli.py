@@ -173,7 +173,10 @@ def _need_site(s: Settings):
 
     if s.site is None:
         raise SystemExit("사이트 팩이 지정되지 않았습니다: --site 또는 MINEDOCSCAN_SITE")
-    return SitePack(s.site)
+    try:
+        return SitePack(s.site)
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from e
 
 
 # ── 명령 ───────────────────────────────────────────────────────────────────
@@ -628,13 +631,18 @@ COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "pages": cmd
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .config import ConfigError
+    from .forms.template import TemplateError
     from .store.db import SchemaVersionError
 
     args = build_parser().parse_args(argv)
     try:
         return COMMANDS[args.command](args)
-    except SchemaVersionError as e:                 # 안내문만 보이면 된다. 트레이스백은 필요 없다
-        raise SystemExit(str(e)) from e
+    except (SchemaVersionError, ConfigError, TemplateError) as e:   # 안내문만 보이면 된다. 트레이스백은 필요 없다
+        raise SystemExit(f"{_ERROR_TITLE.get(type(e).__name__, '오류')}: {e}") from e
+
+
+_ERROR_TITLE = {"ConfigError": "설정 오류", "TemplateError": "템플릿 오류", "SchemaVersionError": "DB 오류"}
 
 
 if __name__ == "__main__":

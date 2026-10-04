@@ -39,3 +39,57 @@ def test_damaged_pdf_policy(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError):
         load_settings(cfg)
+
+
+def test_bad_values_are_one_line_config_errors(tmp_path, monkeypatch):
+    """틀린 설정 값은 ConfigError 한 줄 — 어느 항목이 왜 틀렸는지 (tasks/0004 단계 1)."""
+    import pytest
+
+    from minedocscan.config import ConfigError
+
+    monkeypatch.delenv("MINEDOCSCAN_DAMAGED_PDF", raising=False)
+    cases = {
+        '[pipeline]\ndpi = "two hundred"\n': r"\[pipeline\] dpi",
+        "[pipeline]\nauto_accept_conf = 1.5\n": r"auto_accept_conf",
+        "[pipeline]\nauto_accept_conf = true\n": r"auto_accept_conf",
+        "[pipeline]\nclassify_min_margin = -1\n": r"classify_min_margin",
+        '[pipeline]\nsave_aligned = "yes"\n': r"save_aligned",
+        "[review]\nsource_dpi = 30\n": r"source_dpi",
+        '[pipeline]\ndamaged_pdf = "ignore"\n': r"damaged_pdf",
+        "[recognize]\nby_kind = 3\n": r"by_kind",
+        "pipeline = 3\n": r"\[pipeline\]",
+        "[pipeline\ndpi = 200\n": r"설정 파일을 읽을 수 없습니다",
+    }
+    for i, (text, pat) in enumerate(cases.items()):
+        cfg = tmp_path / f"c{i}.toml"
+        cfg.write_text(text, encoding="utf-8")
+        with pytest.raises(ConfigError, match=pat) as ei:
+            load_settings(cfg)
+        assert "\n" not in str(ei.value).strip() or "TOML" in str(ei.value) or "읽을 수 없" in str(ei.value)
+
+
+def test_cli_reports_config_errors_without_traceback(tmp_path, monkeypatch, capsys):
+    """어느 명령이든 틀린 설정 값이면 트레이스백 없이 한 줄로 끝나고 종료 코드가 0 이 아니다."""
+    import pytest
+
+    from minedocscan.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MINEDOCSCAN_DAMAGED_PDF", "maybe")
+    for argv in (["info"], ["report", "--work-root", str(tmp_path / "w")], ["run", str(tmp_path)],
+                 ["review", "stats", "--site", str(tmp_path)], ["recognizer", "list", "--site", str(tmp_path)]):
+        with pytest.raises(SystemExit) as ei:
+            main(argv)
+        msg = str(ei.value.code)
+        assert msg.startswith("설정 오류:") and "MINEDOCSCAN_DAMAGED_PDF" in msg and "Traceback" not in msg, argv
+    monkeypatch.delenv("MINEDOCSCAN_DAMAGED_PDF")
+    cfg = tmp_path / "bad.toml"
+    cfg.write_text("[pipeline]\ndpi = 0\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match=r"설정 오류: \[pipeline\] dpi"):
+        main(["info", "--config", str(cfg)])
+    # 사이트 팩의 site.toml 이 깨졌을 때도
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "site.toml").write_text("[site\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match=r"설정 오류: site\.toml"):
+        main(["review", "stats", "--site", str(site), "--work-root", str(tmp_path / "w2")])
