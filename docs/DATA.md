@@ -222,6 +222,7 @@ minedocscan review stats                                       #    분할별 �
 minedocscan review export-crops ~/meta --meta --split train    # 2. OUT/train/meta/<키>/ + OUT/train/meta/labels.jsonl (사람·파일명 값만)
 minedocscan recognizer train --crops ~/meta --meta-key vehicle_no --name veh-v1 --cv 5    # 숫자: 읽고 목록에서 고른다
 minedocscan recognizer train --crops ~/meta --meta-key operator   --name op-v1  --cv 5    # 이름: 분류기
+minedocscan recognizer eval  --crops ~/meta --model op-v1 --split val --errors            # 묶음 교차 읽기에서 틀린 쪽 (저장소 밖)
 minedocscan recognizer list                                    # 기준·상한은 묶음 교차 읽기 전체에서 (카드)
 # 설정: [recognize.meta] vehicle_no = "veh-v1", operator = "op-v1"   → minedocscan info 로 기준(상한) 확인
 minedocscan run DB_scans --fresh                               # 3. 기계가 빈 쪽을 채운다. 라벨·검수가 있는 쪽은 대조만
@@ -239,8 +240,8 @@ minedocscan pages --meta-mismatch --meta-key date.day          # (월·일 필�
 - **정답이 적다.** 쪽마다 한 칸이라 20일치가 약 200쪽이고, 검증으로 20 % 를 떼면 기준(자동 적재된 검증 읽기 100개)이 나오지 않는다.
   `--cv 5` 는 train 날짜를 다섯 묶음으로 나눠 묶음마다 "나머지로 학습 → 그 묶음 읽기"를 하고, 모은 읽기 전체로 온도·기준을 정한다 (ADR 0014).
   내보내는 모델은 train 날짜 전부로 학습한 것이다. 목표 오류율 기본 2 % (`--target-auto-error`).
-  그래서 `--cv` 모델은 `recognizer eval --split val` 이 없다 (묶음마다의 모델은 남기지 않는다). 틀린 칸을 그림으로 보려면 `--cv` 없이 학습한
-  모델(검증 날짜 20 %)로 `recognizer eval --split val --errors` 를 보거나, 마지막에 `--split test --errors` 를 한 번 본다.
+  묶음마다의 모델은 남기지 않으므로 `--cv` 모델의 `recognizer eval --split val` 은 학습 때 묶음 교차로 읽은 결과(모델 폴더의 `cv-reads.jsonl`,
+  값 없이)로 표를 내고, `--errors` 는 그 필드의 크롭을 `--crops` 폴더에서 찾아 그린다.
 - **목록은 학습 때 정해진다.** 새 차·새 사람은 다시 학습하기 전에는 "목록에 없는 값"이나 기준 미만으로 남아 `page-fields` 로 온다 — 그 쪽은
   검수로 채우고, 쌓이면 다시 학습한다. 분류기는 학습 날짜에 예가 3개 미만인 사람을 종류로 두지 않는다.
 - **차량번호는 글씨체가 아니라 숫자로 읽는다.** 학습 데이터에서는 번호마다 쓰는 사람이 거의 정해져 있어서, 글씨체로 번호를 외운 모델도
