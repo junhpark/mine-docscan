@@ -42,7 +42,7 @@ class CheckRow:
 
 def check_rows(con: sqlite3.Connection, site, page_id: str | None = None) -> list[CheckRow]:
     """inspection 핸들러 양식의 쪽마다 장비 행(여백 행 제외 — insp_daily 로 가는 행만). 날짜 → 쪽 → 행 순서."""
-    from ..handlers.inspection import is_equipment_row, layout
+    from ..forms.equipment import is_equipment_row, layout
 
     out: list[CheckRow] = []
     for tpl in site.templates.values():

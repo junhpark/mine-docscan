@@ -102,6 +102,15 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--page", type=int, default=1)
     t.add_argument("--handler", default="generic")
     t.add_argument("--overwrite", action="store_true")
+    t = tsub.add_parser("preview", parents=[common],
+                        help="칸·필드의 테두리와 이름·종류·형식·역할·행 번호를 기준 이미지(또는 정합한 스캔) 위에 그린 PNG")
+    t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
+    t.add_argument("--scan", help="이 스캔의 쪽을 정합해서 그 위에 그린다 (칸이 실제 글씨에 맞는지)")
+    t.add_argument("--page", type=int, default=1, help="--scan 의 쪽 번호 (1부터)")
+    t.add_argument("--out", help="출력 폴더 (기본 WORK_ROOT/template-preview). 저장소 안은 거절한다")
+    t = tsub.add_parser("check", parents=[common],
+                        help="템플릿의 오류를 전부: 읽기 오류, 겹치는 칸, 쪽 밖의 칸, 역할에 필요한 칸, 형식과 종류의 불일치 …")
+    t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
 
     p = sub.add_parser("synth", parents=[common], help="합성 사이트 팩 + 스캔 문서 + 정답 생성")
     p.add_argument("out", help="출력 폴더 (site/, scans/, truth.json, answers.json)")
@@ -112,14 +121,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--meta-fields", action="store_true",
                    help="일보의 차량번호(네 자리)·작성자를 사람마다 다른 획으로, 날짜 줄에 월·일 필드 (메타 필드 인식기 시험용)")
     p.add_argument("--mix-pages", action="store_true", help="--meta-fields 와 함께: 마지막 날의 묶음에 첫날의 일보 한 쪽을 섞는다")
+    p.add_argument("--usage-logs", action="store_true",
+                   help="장비 가동 일보 두 종(작업 표 + 계기 / 작업량 표 + 근무 시각 + 계기)을 날마다 묶음 끝에 붙인다")
+    p.add_argument("--usage-only", action="store_true", help="가동 일보만 (점검표·운반 쪽 없이)")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
     r = rsub.add_parser("serve", parents=[common], help="로컬 검수 화면 (127.0.0.1)")
     r.add_argument("--queue", default="haul-numbers",
-                   choices=["haul-numbers", "mismatch", "pending", "page-fields", "meta-check", "checks"])
+                   choices=["haul-numbers", "mismatch", "pending", "page-fields", "meta-check", "checks", "readings",
+                            "usage-check"])
     r.add_argument("--audit", type=int, metavar="N",
-                   help="page-fields: 기계의 상태와 상관없이 날짜별로 고르게 뽑은 쪽 N 개 (기계 값 없이) — 자동 적재된 쪽의 정답")
+                   help="page-fields·readings: 기계의 상태(잉크)와 상관없이 날짜별로 고르게 뽑은 쪽 N 개 (기계 값 없이) — "
+                        "자동 적재된(빈 칸으로 본) 쪽의 오류를 잴 정답")
     r.add_argument("--n", type=int, help="표본 크기: haul-numbers 기본 1500, checks(점검표 행) 기본 300")
     r.add_argument("--seed", type=int, default=0, help="표본의 순서를 정하는 씨앗. 같은 값이면 같은 표본")
     r.add_argument("--empty-share", type=float, default=0.1, help="표본 중 빈 칸 비율 (기본 0.1)")
@@ -173,6 +187,9 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--cv", type=int, metavar="K",
                    help="--meta-key: train 날짜를 K 묶음으로 나눠 돌려 가며 읽은 것 전체로 온도·기준을 정한다 (정답이 적을 때)")
     n.add_argument("--min-examples", type=int, default=3, help="--reader choice: 종류가 되려면 필요한 예의 수 (기본 3)")
+    n.add_argument("--extra-digits", metavar="DIR",
+                   help="--meta-key (숫자 모델): 숫자 칸(운반 횟수)을 export-crops 로 내보낸 폴더 — 그 칸의 숫자를 학습에만 더한다 "
+                        "(후보·기준에는 쓰지 않는다. test 줄이 있거나 규격이 다르면 거절)")
     n.add_argument("--synthetic-meta", type=int, metavar="DAYS",
                    help="--meta-key, --crops 없이: 합성 메타 필드 DAYS 일치로 학습 (시험용 모델, tools/synth_meta)")
     nsub.add_parser("list", parents=[common], help="사이트 팩의 모델과 카드 요약")
@@ -251,8 +268,13 @@ def cmd_info(a) -> int:
                  "cells": len(t.cells()) + len(t.fields), "status": "cells" if t.has_cells else "classify_only",
                  "family": t.family, "valid_from": t.valid_from, "valid_to": t.valid_to}
                 for t in site.templates.values()]
-        data["site"] = {"name": site.name, "templates": tpls, "labels": len(site.labels)}
-        lines.append(f"사이트 팩: {site.name} — 템플릿 {len(tpls)}종, 페이지 라벨 {len(site.labels)}개")
+        from .forms.equipment import master_keys
+
+        n_master = len(master_keys(site.templates.values()))
+        data["site"] = {"name": site.name, "templates": tpls, "labels": len(site.labels),
+                        "equipment_aliases": len(site.equipment_aliases), "equipment_master": n_master}
+        lines.append(f"사이트 팩: {site.name} — 템플릿 {len(tpls)}종, 페이지 라벨 {len(site.labels)}개, "
+                     f"장비명 대응표 {len(site.equipment_aliases)}개 (마스터 {n_master}대)")
         for t in tpls:
             valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}" if t["family"] else "")
             lines.append(f"  {t['name']:<24} handler={t['handler']:<11} 표 {t['regions']}개, 셀 {t['cells']}개"
@@ -360,7 +382,14 @@ def _hms(sec: float) -> str:
 
 
 def cmd_report(a) -> int:
-    from .report import build_report, by_month, format_by_month, format_report, xcheck_by_date
+    from .report import (
+        build_report,
+        by_month,
+        format_by_month,
+        format_report,
+        xcheck_by_date,
+        xcheck_usage_by_date,
+    )
     from .store.db import open_db
 
     s = _settings(a)
@@ -369,8 +398,12 @@ def cmd_report(a) -> int:
         rows = by_month(con, s.classify_min_margin)
         _emit(a, {"by_month": rows}, format_by_month(rows))
         return 0
-    rep, by_date = build_report(con), xcheck_by_date(con)
-    _emit(a, {"report": rep, "xcheck_by_date": by_date}, format_report(rep, by_date))
+    rep, by_date, usage_by_date = build_report(con), xcheck_by_date(con), xcheck_usage_by_date(con)
+    text = format_report(rep, by_date)
+    if usage_by_date:
+        text += "\n날짜별 가동 일보 검산:\n" + "\n".join(
+            f"  {d['work_date']}: " + ", ".join(f"{k} {v}" for k, v in d.items() if k != "work_date") for d in usage_by_date)
+    _emit(a, {"report": rep, "xcheck_by_date": by_date, "xcheck_usage_by_date": usage_by_date}, text)
     return 0
 
 
@@ -496,6 +529,28 @@ def cmd_regress(a) -> int:
 def cmd_template(a) -> int:
     from .tools.mktemplate import init_template
 
+    if a.template_command == "check":
+        from .tools.tpltools import check_template
+
+        errs = check_template(a.template_dir)
+        _emit(a, {"template": a.template_dir, "problems": errs},
+              "\n".join(f"- {e}" for e in errs) + f"\n오류 {len(errs)}개" if errs else "오류 없음")
+        return 1 if errs else 0
+    if a.template_command == "preview":
+        from .tools.tpltools import preview
+
+        s = _settings(a)
+        out = Path(a.out) if a.out else s.work_root / "template-preview"
+        try:
+            r = preview(a.template_dir, out, scan=a.scan, page=a.page, dpi=s.dpi)
+        except (ValueError, OSError) as e:                     # TemplateError 는 ValueError — 오류 목록은 template check 로
+            raise SystemExit(f"{e}\n(오류를 전부 보려면: minedocscan template check {a.template_dir})") from e
+        al = r["aligned"]
+        _emit(a, r, f"그렸습니다: {r['out']} — 테두리 {r['boxes']}개 (칸 + 필드)"
+              + ("" if al is None else f"\n정합: {'통과' if al['ok'] else '실패'}, 인라이어 {al['inliers']}, "
+                 f"괘선 오차 {al['grid_err']} px")
+              + "\n저장소에 넣지 마세요 — 실제 양식의 이름·차량번호가 보입니다.")
+        return 0
     s = _settings(a)
     if s.site is None:
         raise SystemExit("사이트 팩이 지정되지 않았습니다: --site 또는 MINEDOCSCAN_SITE")
@@ -513,7 +568,8 @@ def cmd_synth(a) -> int:
 
     if a.mix_pages and not a.meta_fields:
         raise SystemExit("--mix-pages 는 --meta-fields 와 같이 씁니다")
-    r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages)
+    r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
+                 usage_logs=a.usage_logs, usage_only=a.usage_only)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")
@@ -579,6 +635,9 @@ def cmd_review(a) -> int:
                  "분할별(value·empty): " + (", ".join(f"{k} {v['fields']}셀/{v['dates']}일" for k, v in st["by_split"].items()) or "-")
                  + f"  (소금값 {site.split_salt}, test 비율 {site.test_share})",
                  f"✓ 검수: 점검표 행 {st['checks']['rows']}개 (체크 칸 {st['checks']['fields']}개)",
+                 "값의 형식별: " + kv(st["by_format"]),
+                 "대기열별(끝남/모집단, 기본 설정): " + (", ".join(f"{k} {v['done']}/{v['total']}" for k, v in st["by_queue"].items()
+                                                         if v["total"]) or "-"),
                  f"템플릿 좌표가 달라진 기록 {st['bbox_changed']}개, 이 DB 에 없는 필드 {st['fields_not_in_db']}개"]
         _emit(a, {"reviews": imported, "stats": st}, "\n".join(lines))
         return 0
@@ -668,8 +727,8 @@ def cmd_recognizer(a) -> int:
 
         if not _MODEL_NAME.match(a.name):
             raise SystemExit(f"--name 은 영문·숫자·.-_ (64자 이하): {a.name}")
-        if a.cv or a.reader:
-            raise SystemExit("--cv, --reader 는 메타 필드 모델(--meta-key)에서만 씁니다")
+        if a.cv or a.reader or a.extra_digits:
+            raise SystemExit("--cv, --reader, --extra-digits 는 메타 필드 모델(--meta-key)에서만 씁니다")
         site = _need_site(s) if (s.site or not a.out) else None
         out = Path(a.out) if a.out else models_dir(site.root) / a.name
         args = TrainArgs(name=a.name, steps=a.steps or 2500, synthetic=a.synthetic, seed=a.seed, val_share=a.val_share,
@@ -719,7 +778,7 @@ def _recognizer_train_meta(a, s: Settings) -> int:
     args = MetaTrainArgs(name=a.name, steps=a.steps,                     # None: 읽는 법마다 기본값 (train_meta)
                          synthetic=a.synthetic, seed=a.seed, val_share=a.val_share, min_val_auto=a.min_val_auto,
                          target_auto_error=0.02 if a.target_auto_error is None else a.target_auto_error, keys=keys,
-                         reader=a.reader, cv=a.cv, min_examples=a.min_examples,
+                         reader=a.reader, cv=a.cv, min_examples=a.min_examples, extra_digits=a.extra_digits,
                          template_values={k: template_values(site, k) for k in keys} if site else {})
     try:
         with tempfile.TemporaryDirectory(prefix="minedocscan-synth-meta-") as tmp:
@@ -727,7 +786,10 @@ def _recognizer_train_meta(a, s: Settings) -> int:
             if a.synthetic_meta:
                 from .tools.synth_meta import write_meta_crops
 
-                write_meta_crops(tmp, keys, a.synthetic_meta, seed=a.seed)
+                try:
+                    write_meta_crops(tmp, keys, a.synthetic_meta, seed=a.seed)
+                except ValueError as e:                         # 합성 값이 없는 키
+                    raise SystemExit(f"--synthetic-meta: {e}") from e
                 crops = tmp
             card = train_meta(crops, out, args, split_salt=site.split_salt if site else "synthetic",
                               allow_in_repo=a.allow_in_repo)

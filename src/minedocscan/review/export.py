@@ -100,8 +100,10 @@ def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split
             handles[sp].write(json.dumps({
                 "field_id": rv.field_id, "file": rel.as_posix(), "text": rv.value if rv.verdict == "value" else "",
                 "verdict": rv.verdict, "template": r["template_name"], "region": r["region"], "field_name": r["field_name"],
-                "row_key": r["row_key"], "kind": r["kind"], "work_date": d, "split": sp, "spec": spec.to_dict(),
-                "inked": (r["backend"] or "") != "ink",               # 잉크 판정이 값 있음 → 인식기에 가는 칸
+                "row_key": r["row_key"], "kind": r["kind"], "format": r["format"], "work_date": d, "split": sp,
+                "spec": spec.to_dict(),
+                # 잉크 판정이 값 있음 → 인식기에 가는 칸. 읽지 않는 형식(소수·시각)의 칸은 기계의 값 유무 그대로 (tasks/0005)
+                "inked": ((r["backend"] or "") != "ink") if r["format"] in (None, "integer") else r["has_value_raw"] == 1,
                 "resolution": src, "out_scale": out_scale, "pad": pd, "bbox": [r["x0"], r["y0"], r["x1"], r["y1"]],
                 "reviewer": rv.reviewer, "reviewed_at": rv.reviewed_at}, ensure_ascii=False) + "\n")
             written += 1
@@ -165,7 +167,8 @@ def export_meta_crops(con: sqlite3.Connection, site, settings, out: str | Path, 
                 "field_id": r["field_id"], "file": rel.as_posix(), "meta_key": r["meta_key"],
                 "text": r["value"] if verdict == "value" else "", "verdict": verdict, "label_source": r["source"],
                 "template": f["template_name"], "region": f["region"], "field_name": f["field_name"], "kind": f["kind"],
-                "work_date": r["work_date"], "split": sp, "spec": spec.to_dict(), "inked": (f["ink"] or 0) > 0,
+                "format": f["format"], "work_date": r["work_date"], "split": sp, "spec": spec.to_dict(),
+                "inked": (f["ink"] or 0) > 0,
                 "resolution": spec.res, "out_scale": out_scale, "pad": pad, "bbox": [f["x0"], f["y0"], f["x1"], f["y1"]],
                 "reviewer": rv.reviewer if rv is not None else None,
                 "reviewed_at": rv.reviewed_at if rv is not None else None}, ensure_ascii=False) + "\n")

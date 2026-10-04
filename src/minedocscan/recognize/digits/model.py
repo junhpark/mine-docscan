@@ -18,6 +18,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import re
+import shutil
 from pathlib import Path
 
 import cv2
@@ -191,7 +194,8 @@ def resolve_model(ref: str, site_root: str | Path | None) -> Path:
     if missing:
         have = ""
         if site_root is not None and models_dir(site_root).is_dir():
-            names = sorted(x.name for x in models_dir(site_root).iterdir() if (x / "card.json").is_file())
+            names = sorted(x.name for x in models_dir(site_root).iterdir()
+                           if (x / "card.json").is_file() and not x.name.startswith("."))      # 학습 중의 임시 폴더는 빼고
             have = f" — 사이트 팩에 있는 모델: {', '.join(names) if names else '없음'}"
         raise FileNotFoundError(f"모델 폴더에 {', '.join(missing)} 이(가) 없습니다: {d}{have}")
     return d
@@ -219,13 +223,66 @@ def card_threshold(card: dict) -> float:
     return math.inf if t is None else float(t)
 
 
+# 학습 중의 임시 폴더: 모델 폴더와 같은 부모에 `.<이름>.tmp-<pid>`. 다 만든 뒤 <이름> 으로 바꾼다 (반쯤 쓴 모델이 보이지 않게)
+STAGING = re.compile(r"^\.(?P<name>.+)\.tmp-(?P<pid>\d+)$")
+
+
+def staging_dir(out_dir: str | Path) -> Path:
+    """학습 결과를 쓸 임시 폴더를 새로 만든다. 그 전에 같은 부모의 주인 없는 임시 폴더를 치운다 — 학습을 중간에 끊으면
+    (창을 닫거나 프로세스를 죽이면 정리 코드가 돌지 않는다) 남는다 (tasks/0005 단계 1)."""
+    out_dir = Path(out_dir)
+    clean_orphan_staging(out_dir.parent)
+    tmp = out_dir.parent / f".{out_dir.name}.tmp-{os.getpid()}"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    return tmp
+
+
+def clean_orphan_staging(parent: str | Path) -> list[str]:
+    """parent 의 `.<이름>.tmp-<pid>` 중 그 pid 의 프로세스가 없는 것을 지운다. 지운 폴더 이름의 목록.
+    살아 있는 프로세스의 것(다른 창에서 학습 중)은 두고, 알 수 없으면 둔다 (지우는 쪽으로 틀리지 않게)."""
+    parent = Path(parent)
+    removed = []
+    if not parent.is_dir():
+        return removed
+    for p in sorted(parent.iterdir()):
+        m = STAGING.match(p.name)
+        if m and p.is_dir() and int(m["pid"]) != os.getpid() and not _pid_alive(int(m["pid"])):
+            shutil.rmtree(p, ignore_errors=True)
+            removed.append(p.name)
+    return removed
+
+
+def _pid_alive(pid: int) -> bool:
+    """그 pid 의 프로세스가 있는가. Windows 에서 os.kill(pid, 0) 은 프로세스를 끝내 버리므로 쓰지 않는다 (OpenProcess 로 본다)."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)       # PROCESS_QUERY_LIMITED_INFORMATION
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        return kernel32.GetLastError() == 5                    # ERROR_ACCESS_DENIED: 있지만 볼 권한이 없다
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:                                            # 권한 없음 등: 있다고 본다
+        return True
+    return True
+
+
 def list_models(site_root: str | Path) -> list[dict]:
-    """사이트 팩의 모델과 카드 요약 (recognizer list). 카드를 읽을 수 없는 폴더는 error 를 단다."""
+    """사이트 팩의 모델과 카드 요약 (recognizer list). 카드를 읽을 수 없는 폴더는 error 를 단다.
+    점으로 시작하는 폴더(학습 중이거나 끊긴 학습의 임시 폴더 `.<이름>.tmp-<pid>`)는 모델이 아니다 — 내지 않는다."""
     from ...imaging.cropspec import CropSpec
 
     root = models_dir(site_root)
     out = []
-    for d in sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []:
+    for d in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")) if root.is_dir() else []:
         row = {"name": d.name, "path": str(d), "created_at": None, "spec": "-", "threshold": "-", "train_cells": 0,
                "train_dates": 0, "synthetic_cells": 0, "val_source": "-", "val_cells": 0, "val_value_acc": None,
                "val_empty_acc": None}

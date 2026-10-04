@@ -79,11 +79,36 @@ LETTERS: dict[str, list[Stroke]] = {
 }
 
 
+# ── 계기 값·시각에 쓰는 기호 (tasks/0005 4.6): 소수점, 콜론, 물결표, 붙임표 ───────────────────
+# 점은 작은 고리로 그린다 (굵기만큼 뭉쳐 점이 된다). 글자 상자 안의 높이(y)가 숫자와 다르므로 놓을 때 glyph_offset 만큼 내린다
+def _dot(cx: float, cy: float, r: float = 0.035) -> Stroke:
+    return _arc(cx, cy, r, r, 0, 360, 8)
+
+
+PUNCT: dict[str, list[Stroke]] = {
+    ".": [_dot(0.1, 0.94)],
+    ":": [_dot(0.1, 0.34), _dot(0.1, 0.9)],
+    "~": [[(0.0, 0.6), (0.08, 0.5), (0.18, 0.47), (0.3, 0.56), (0.42, 0.62), (0.52, 0.58), (0.6, 0.48)]],
+    "-": [[(0.02, 0.56), (0.42, 0.54)]],
+}
+
+
+def glyph_offset(ch: str) -> float:
+    """글자의 획이 차지하는 높이의 가운데 − 0.5 (글자 높이 대비). 숫자는 0 에 가깝다. 기호를 숫자 줄에 맞춰 놓을 때 쓴다
+    (draw_glyph 의 그림은 획의 둘레로 잘리므로 가운데에 놓으면 소수점이 공중에 뜬다)."""
+    if ch not in PUNCT:
+        return 0.0
+    ys = [p[1] for st in PUNCT[ch] for p in st]
+    return (min(ys) + max(ys)) / 2 - 0.5
+
+
 def strokes_for(ch: str, style: dict) -> list[Stroke]:
-    """글자의 획. 숫자는 쓰는 사람의 꼴(variants)로, 모르는 글자는 작은 고리."""
+    """글자의 획. 숫자는 쓰는 사람의 꼴(variants)로, 기호(. : ~ -), 모르는 글자는 작은 고리."""
     if ch in DIGITS:
         forms = DIGITS[ch]
         return forms[style.get("variants", {}).get(ch, 0) % len(forms)]
+    if ch in PUNCT:
+        return PUNCT[ch]
     return LETTERS.get(ch.lower(), [_O])
 
 

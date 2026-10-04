@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS doc_field (
   row_no          INTEGER NOT NULL,          -- 자유 필드는 -1
   field_name      TEXT NOT NULL,
   kind            TEXT NOT NULL,             -- printed | handwritten_text | handwritten_number | checkmark | signature
+  format          TEXT,                      -- 값의 형식: integer | decimal | time | time_range | reading | NULL(글자) — 템플릿에서
   row_key         TEXT,
   x0 INTEGER, y0 INTEGER, x1 INTEGER, y1 INTEGER,   -- 템플릿 좌표계 bbox → 출처 추적
   ink             REAL,                      -- 잉크 비율
@@ -94,7 +95,7 @@ CREATE INDEX IF NOT EXISTS ix_doc_page_meta_check ON doc_page_meta(check_result)
 -- (WORK_ROOT 는 언제든 지울 수 있어야 하므로). 한 필드에 여러 건이면 reviewed_at 이 가장 늦은 것이 유효하다.
 -- field_id 에 외래 키를 걸지 않는다: 파일을 읽어 들이는 시점에 그 페이지가 아직 DB 에 없을 수 있다.
 CREATE TABLE IF NOT EXISTS doc_review (
-  review_id       TEXT PRIMARY KEY,          -- field_id, reviewed_at, reviewer 에서 결정된다
+  review_id       TEXT PRIMARY KEY,          -- field_id, reviewed_at, reviewer (note 가 있으면 note 도) 에서 결정된다
   field_id        TEXT NOT NULL,
   page_id         TEXT NOT NULL,             -- field_id 의 앞부분 (조회용)
   seq             INTEGER NOT NULL,          -- 파일에서의 줄 번호. 같은 시각이면 뒤의 것이 유효
@@ -199,3 +200,86 @@ CREATE TABLE IF NOT EXISTS xcheck_haul (
   status       TEXT NOT NULL,                -- match | mismatch | missing_log | missing_matrix
   PRIMARY KEY (work_date, slot, material, level)
 );
+
+-- 장비 가동 일보 (tasks/0005 4.3): 쪽 하나에 한 행. 한 장비가 하루에 두 장을 내면 두 행이다 — 합치지 않는다 (읽는 쪽의 일).
+-- 값은 검수를 적용한 최종 필드 행에서 만든다. *_raw 는 기계가 읽은 값(지금은 소수·시각을 읽는 모델이 없어 NULL — 0006).
+-- hours 는 적힌 값에서 계산한 것이고 무엇으로 계산했는지가 hours_basis 다: meter(종료 − 시작) > total(총 칸) > clock(시각)
+-- > shifts(근무 시각 범위의 합) > NULL. 추정하지 않는다 — 앞의 근거에 아직 모르는 칸(검수 대기)이 있거나 계기 칸에 숫자와
+-- 시각이 섞였으면 NULL. equipment_id 는 사이트 팩의 대응표([equipment.aliases])로만 정한다 (없으면 NULL, 이름은 남는다).
+-- equipment_id 에 외래 키를 걸지 않는다: 마스터 행(eq_equipment)은 점검표 쪽을 적재할 때 생기므로 가동 일보만 돌린 DB 에는 없다.
+CREATE TABLE IF NOT EXISTS eq_usage_daily (
+  page_id         TEXT PRIMARY KEY REFERENCES doc_page(page_id),
+  work_date       TEXT,
+  source_form     TEXT NOT NULL,             -- 템플릿 이름
+  equipment       TEXT,                      -- 적힌 장비명 (쪽 메타 equipment 의 최종 값)
+  equipment_id    TEXT,                      -- 대응표로 정한 장비 ID (eq_equipment.equipment_id 와 같은 UUID). 모르면 NULL
+  operator        TEXT,                      -- 쪽 메타 operator 의 최종 값
+  reading_kind    TEXT NOT NULL,             -- 계기 칸: meter(계기 값) | clock(시각) | mixed(섞임) | empty(빈 칸) | pending(모르는 칸) | none(계기 표 없음)
+  meter_start     REAL,                      -- 계기 값 (reading_kind 가 meter 일 때)
+  meter_end       REAL,
+  meter_total     REAL,
+  clock_start     TEXT,                      -- 계기 칸에 적은 시각 HH:MM (reading_kind 가 clock 일 때)
+  clock_end       TEXT,
+  meter_start_raw TEXT,                      -- 기계가 읽은 계기 칸 (value_raw). 검수해도 바뀌지 않는다
+  meter_end_raw   TEXT,
+  meter_total_raw TEXT,
+  shifts          TEXT,                      -- 근무 시각 범위 JSON {"<행 키>": "08:00~12:00", …} (값이 있는 칸만). 근무 표가 없으면 NULL
+  shift_minutes   INTEGER,                   -- 범위 길이의 합(분). 모르는 칸이 있거나 값이 없으면 NULL
+  activity_rows   INTEGER,                   -- 작업 표에서 글씨가 있는 줄의 수 (소계 줄 제외). 작업 표가 없으면 NULL
+  signed          INTEGER,                   -- 서명 칸에 잉크가 있는가 (서명 칸이 없으면 NULL)
+  hours           REAL,                      -- 가동 시간 (시간)
+  hours_basis     TEXT,                      -- meter | total | clock | shifts | NULL
+  start_field_id  TEXT REFERENCES doc_field(field_id),   -- 출처: 계기 칸 셋
+  end_field_id    TEXT REFERENCES doc_field(field_id),
+  total_field_id  TEXT REFERENCES doc_field(field_id),
+  review_status   TEXT NOT NULL              -- 계기·근무 칸 중 하나라도 pending 이면 pending, 아니고 reviewed 가 있으면 reviewed, 아니면 auto
+);
+CREATE INDEX IF NOT EXISTS ix_eq_usage_daily_date ON eq_usage_daily(work_date);
+
+-- 작업량 표 (role tally): 숫자 칸 하나에 한 행. 소계 칸(is_subtotal)도 적힌 대로 남긴다 — 합칠 때 빼는 것은 읽는 쪽.
+CREATE TABLE IF NOT EXISTS prod_tally (
+  tally_id        TEXT PRIMARY KEY,          -- source_field_id 와 같다
+  work_date       TEXT,
+  page_id         TEXT NOT NULL REFERENCES doc_page(page_id),
+  source_form     TEXT NOT NULL,
+  equipment       TEXT,                      -- 쪽 메타 (eq_usage_daily 와 같다)
+  equipment_id    TEXT,
+  item            TEXT NOT NULL,             -- 행 메타 item (없으면 행 키)
+  place           TEXT,                      -- 행 메타 place (하단 / 저광장 …)
+  column_name     TEXT NOT NULL,             -- 열 이름
+  shift           TEXT,                      -- 열 메타 shift
+  is_subtotal     INTEGER NOT NULL,          -- 소계 칸 (열이나 행의 subtotal: true)
+  has_value_raw   INTEGER,
+  has_value       INTEGER NOT NULL,
+  count           INTEGER,                   -- 최종 값
+  count_raw       INTEGER,                   -- 기계가 읽은 값. 검수해도 바뀌지 않는다
+  confidence      REAL,
+  source_field_id TEXT REFERENCES doc_field(field_id),
+  review_status   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_prod_tally_page ON prod_tally(page_id);
+
+-- 가동 일보의 검산 (tasks/0005 4.4): 한 행 = 검산 하나. 보여 주기만 한다 — eq_usage_daily 의 값을 고치지 않는다 (ADR 0006).
+--   total       쪽 안: 총 = 종료 − 시작. value_a = 총 칸, value_b = 종료 − 시작                         match | mismatch
+--   subtotal    쪽 안: 소계 = 합 (item = 소계 칸의 field_id). value_a = 소계, value_b = 합              match | mismatch | unknown
+--   continuity  날짜 사이: value_a = 이 기록의 시작, value_b = 같은 장비의 바로 앞 기록의 종료 (other_page_id 의 쪽)
+--               match | gap(시작이 더 크다) | overlap(더 작다) | first(앞 기록 없음) | unknown(장비를 모른다, 검수 대기)
+-- diff = value_a − value_b. 허용 오차 0.05 시간 (소수 한 자리의 반올림). days_between: 두 기록 사이에 낀 날 수.
+CREATE TABLE IF NOT EXISTS xcheck_usage (
+  page_id        TEXT NOT NULL,
+  check_kind     TEXT NOT NULL,              -- total | subtotal | continuity
+  item           TEXT NOT NULL,              -- subtotal: 소계 칸의 field_id. 그 밖은 '' (PK 에 NULL 을 두지 않는다)
+  work_date      TEXT,
+  equipment_ref  TEXT,                       -- continuity: 같은 장비의 기준 — "id:<장비 ID>" 또는 "name:<적힌 이름>". 모르면 NULL
+  value_a        REAL,
+  value_b        REAL,
+  diff           REAL,
+  days_between   INTEGER,
+  result         TEXT NOT NULL,
+  other_page_id  TEXT,                       -- continuity: 비교 상대(앞 기록)의 쪽
+  field_a        TEXT,                       -- 비교한 칸 (출처): 이 쪽의 칸
+  field_b        TEXT,                       -- 상대 칸 (앞 기록의 종료 칸, 이 쪽의 종료 칸)
+  PRIMARY KEY (page_id, check_kind, item)
+);
+CREATE INDEX IF NOT EXISTS ix_xcheck_usage_ref ON xcheck_usage(equipment_ref);
+CREATE INDEX IF NOT EXISTS ix_xcheck_usage_result ON xcheck_usage(result);

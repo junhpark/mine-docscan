@@ -13,6 +13,7 @@
   손글씨를 읽는 부분만 교체 가능한 백엔드로 분리했습니다.
 - **모든 값에 출처가 남습니다.** 어느 문서 몇 쪽의 어느 좌표에서 나왔는지, 원문과 최종값, 신뢰도, 검수 상태.
 - **맞지 않는 값은 숨기지 않습니다.** 같은 운반 횟수가 두 양식에 적히면 둘을 비교해 불일치를 날짜별로 보여 줍니다.
+  장비 가동 일보의 계기는 같은 장비의 어제 종료와 오늘 시작을 비교합니다.
 
 ## 빨리 돌려 보기
 
@@ -60,8 +61,8 @@ src/minedocscan/
   forms/       템플릿, 사이트 팩, 양식 분류
   recognize/   인식 백엔드 (인터페이스 + null, oracle)
   correct/     교정 백엔드 (인터페이스 + none)
-  handlers/    양식의 의미: 셀 → 업무 테이블 (generic, inspection, haul)
-  validate/    양식 간 교차검증
+  handlers/    양식의 의미: 셀 → 업무 테이블 (generic, inspection, haul, usage)
+  validate/    양식 간 교차검증, 가동 일보의 계기 검산
   store/       스키마와 쓰기 도우미
   pipeline/    실행기
   evaluate/    지표, 정답 비교, 실데이터 회귀

@@ -66,6 +66,45 @@ def build_report(con: sqlite3.Connection) -> dict:
         # 쪽 메타 (tasks/0004): 키마다 출처별·대조 결과별 쪽 수, 기계의 상태별 수. 일보 중 자리가 정해진 쪽과 그 출처
         "page_meta": page_meta_summary(con),
         "log_slots": log_slots(con),
+        # 장비 가동 일보 (tasks/0005): 양식별 쪽 수, 계기 칸의 종류별, 가동 시간의 근거별, 장비 ID 가 정해진 쪽, 작업량 칸
+        "usage": usage_summary(con),
+        # 가동 일보의 검산 (tasks/0005 4.4): 종류(total | subtotal | continuity)별 결과별 수
+        "xcheck_usage": xcheck_usage_summary(con),
+    }
+
+
+def xcheck_usage_summary(con: sqlite3.Connection) -> dict:
+    out: dict = {}
+    for k, res, n in con.execute("SELECT check_kind, result, COUNT(*) FROM xcheck_usage GROUP BY 1, 2 ORDER BY 1, 2"):
+        out.setdefault(k, {})[res] = n
+    return out
+
+
+def xcheck_usage_by_date(con: sqlite3.Connection) -> list[dict]:
+    """날짜별 가동 일보 검산: {work_date, "<종류>.<결과>": 수 …}. 계기가 어디서 이어지지 않는가를 날마다."""
+    out: dict[str, dict] = {}
+    for d, k, res, n in con.execute("SELECT work_date, check_kind, result, COUNT(*) FROM xcheck_usage GROUP BY 1, 2, 3 "
+                                    "ORDER BY 1, 2, 3"):
+        out.setdefault(d or "unknown", {"work_date": d or "unknown"})[f"{k}.{res}"] = n
+    return list(out.values())
+
+
+def usage_summary(con: sqlite3.Connection) -> dict:
+    """가동 기록: 수만 (값·이름 없이). reading = 계기 칸 meter(계기 값) | clock(시각) | empty(빈 칸) | pending(검수 대기) |
+    mixed | none(계기 표 없음), hours_basis = meter | total | clock | shifts | none(가동 시간 NULL)."""
+    one = lambda sql: con.execute(sql).fetchone()[0] or 0      # noqa: E731
+    return {
+        "pages": one("SELECT COUNT(*) FROM eq_usage_daily"),
+        "by_form": _pairs(con, "SELECT source_form, COUNT(*) FROM eq_usage_daily GROUP BY 1 ORDER BY 1"),
+        "reading": _pairs(con, "SELECT reading_kind, COUNT(*) FROM eq_usage_daily GROUP BY 1 ORDER BY 1"),
+        "hours_basis": {("none" if k == "unknown" else k): v for k, v in _pairs(
+            con, "SELECT hours_basis, COUNT(*) FROM eq_usage_daily GROUP BY 1 ORDER BY 1").items()},
+        "pending": one("SELECT COUNT(*) FROM eq_usage_daily WHERE review_status = 'pending'"),
+        "with_equipment": one("SELECT COUNT(*) FROM eq_usage_daily WHERE equipment IS NOT NULL"),
+        "with_equipment_id": one("SELECT COUNT(*) FROM eq_usage_daily WHERE equipment_id IS NOT NULL"),
+        "tally": {"cells": one("SELECT COUNT(*) FROM prod_tally"),
+                  "filled": one("SELECT COUNT(*) FROM prod_tally WHERE has_value = 1"),
+                  "with_count": one("SELECT COUNT(*) FROM prod_tally WHERE count IS NOT NULL")},
     }
 
 
@@ -253,6 +292,16 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
             continue
         lines.append(f"쪽 메타 {k}: {d['pages']}쪽 — 출처 {kv(d['by_source'])}; 대조 {kv(d['by_check'])}"
                      + (f"; 기계 {kv(d['machine'])}" if d["machine"] else ""))
+    u = rep.get("usage") or {}
+    if u.get("pages"):
+        lines += [
+            f"가동 기록 {u['pages']}쪽 ({kv(u['by_form'])}) — 계기 칸: {kv(u['reading'])}; 검수 대기 {u['pending']}",
+            f"  가동 시간의 근거: {kv(u['hours_basis'])}; 장비명 있음 {u['with_equipment']}, 장비 ID 정해짐 {u['with_equipment_id']}",
+            f"  작업량 칸 {u['tally']['cells']}개 — 값 있음 {u['tally']['filled']}, 수 {u['tally']['with_count']}",
+        ]
+        names = {"total": "총 = 종료 − 시작", "subtotal": "소계 = 합", "continuity": "계기의 연속성"}
+        for k, d in (rep.get("xcheck_usage") or {}).items():
+            lines.append(f"  검산 {names.get(k, k)}: {kv(d)}")
     if by_date:
         lines.append("날짜별 교차검증:")
         for d in by_date:

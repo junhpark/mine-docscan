@@ -33,6 +33,8 @@ STRANGERS = ("ECHO", "MIKE", "OSCAR", "ROMEO", "VICTOR")                   # 학
 VEHICLES = ("4127", "4183", "4135", "5260", "4172", "5216")               # 시험용 숫자 모델·목록이 아는 차
 NEW_VEHICLES = ("7391", "6048", "3825")                                   # 목록에 없는 차 (새 차)
 META_KEYS = ("vehicle_no", "operator", "date.month", "date.day")
+EQUIPMENT = ("LOADER", "SHOVEL", "TRUCK", "DRILL", "PUMP", "DOZER")       # 가동 일보의 장비명 (tools/synth_usage.py 와 같은 이름)
+DIGIT_KEYS = ("vehicle_no", "date.month", "date.day")                     # 숫자로 쓰는 키. 그 밖(작성자·장비명)은 이어 쓴 이름
 LETTERS = set("abcdefhiklmnoprstuvwx")                                     # handfont 에 있는 소문자 (이름은 이 글자로만)
 
 
@@ -182,7 +184,7 @@ def make_field_crop(rng: np.random.Generator, text: str, kind: str, fspec: Field
 
 
 def kind_of(meta_key: str) -> str:
-    return "name" if meta_key == "operator" else "digits"
+    return "digits" if meta_key in DIGIT_KEYS else "name"
 
 
 def random_text(rng: np.random.Generator, meta_key: str) -> str:
@@ -208,7 +210,7 @@ def write_meta_crops(out, keys: tuple[str, ...], days: int, seed: int = 0, start
                      spec: CropSpec = META_SPEC, split: str = "train", swap_share: float = 0.0) -> dict:
     """`review export-crops --meta` 가 만드는 폴더와 같은 모양의 합성 폴더: OUT/<split>/meta/<키>/*.png + OUT/<split>/meta/labels.jsonl.
     날마다 writers 의 사람이 한 쪽씩 쓴다 — 자기 이름, 자기 차(vehicles: 사람 → 번호, 기본은 ROSTER[i] ↔ VEHICLES[i]),
-    그날의 월·일. swap_share: 다른 사람의 차를 탄 쪽의 몫 (0 이면 번호마다 쓰는 사람이 정해져 있다).
+    자기 장비(EQUIPMENT[i]), 그날의 월·일. swap_share: 다른 사람의 차를 탄 쪽의 몫 (0 이면 번호마다 쓰는 사람이 정해져 있다).
     돌려주는 값: {"written", "by_key", "dates"}."""
     import json
     from datetime import date, timedelta
@@ -216,8 +218,12 @@ def write_meta_crops(out, keys: tuple[str, ...], days: int, seed: int = 0, start
 
     from ..imaging.io import imwrite
 
+    known = (*META_KEYS, "equipment")
+    if any(k not in known for k in keys):
+        raise ValueError(f"합성 값이 없는 키: {[k for k in keys if k not in known]} (가능: {', '.join(known)})")
     out = Path(out)
     vehicles = vehicles or {w: VEHICLES[i % len(VEHICLES)] for i, w in enumerate(writers)}
+    equipment = {w: EQUIPMENT[i % len(EQUIPMENT)] for i, w in enumerate(writers)}
     d0 = date.fromisoformat(start)
     rng = np.random.default_rng([seed, 4004])
     lines, by_key, dates = [], {}, []
@@ -230,9 +236,10 @@ def write_meta_crops(out, keys: tuple[str, ...], days: int, seed: int = 0, start
             if swap_share and rng.random() < swap_share:
                 veh = str(rng.choice([v for v in vehicles.values() if v != vehicles[w]]))
             _y, m, dd = day.split("-")
-            vals = {"vehicle_no": veh, "operator": w, "date.month": str(int(m)), "date.day": str(int(dd))}
+            vals = {"vehicle_no": veh, "operator": w, "date.month": str(int(m)), "date.day": str(int(dd)),
+                    "equipment": equipment[w]}
             for key in keys:
-                bw, bh = DEFAULT_BOX[key]
+                bw, bh = DEFAULT_BOX.get(key, (390, 65))
                 text = vals[key]
                 written = f"0{text}" if key.startswith("date.") and len(text) == 1 and rng.random() < 0.25 else text
                 img = make_field_crop(rng, written, kind_of(key), FieldSpec(bw, bh, spec), style)

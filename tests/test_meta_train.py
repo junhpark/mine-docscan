@@ -206,3 +206,42 @@ def test_regenerated_meta_fixtures_meet_stage5(tmp_path):
     print(f"다시 만든 메타 모델: 자동 적재 {len(auto)}/{len(rows)}, 틀린 것 {wrong}; 자리 같은 쪽 {same}/{len(want)}")
     assert len(auto) >= 0.85 * len(rows) and wrong <= 0.02 * len(auto)
     assert same >= 0.95 * len(want)
+
+
+# ── tasks/0005 단계 1 ─────────────────────────────────────────────────────────
+def test_extra_digits_go_into_training_and_an_orphan_staging_folder_does_not_block_the_name(tmp_path):
+    """끊긴 학습의 임시 폴더가 있어도 같은 이름으로 다시 학습이 된다 (그 폴더는 치운다). --extra-digits 의 숫자 칸 수가 카드에 적히고,
+    후보 목록(classes.json)·읽기 수에는 들어가지 않는다."""
+    from test_recognizer_tidy import dead_pid, write_digit_crops
+
+    synth_meta.write_meta_crops(tmp_path / "c", ("vehicle_no",), 6, seed=0)
+    n = write_digit_crops(tmp_path / "digits", 60, seed=1)
+    models = tmp_path / "models"
+    orphan = models / f".veh.tmp-{dead_pid()}"
+    orphan.mkdir(parents=True)
+    card = train_meta(tmp_path / "c", models / "veh", MetaTrainArgs(name="veh", keys=("vehicle_no",), steps=30, eval_every=30,
+                                                                     synthetic=200, extra_digits=str(tmp_path / "digits")))
+    assert not orphan.exists() and (models / "veh" / "model.onnx").is_file()
+    assert card["data"]["extra_digits"]["cells"] == n and "extra_digits" not in card["train_args"]
+    plain = train_meta(tmp_path / "c", models / "veh2", MetaTrainArgs(name="veh2", keys=("vehicle_no",), steps=30, eval_every=30,
+                                                                       synthetic=200))
+    assert "extra_digits" not in plain["data"]
+    assert card["validation"]["reads"] == plain["validation"]["reads"]          # 읽기(기준의 근거)에는 들어가지 않는다
+    classes = json.loads((models / "veh" / "classes.json").read_text(encoding="utf-8"))["values"]["vehicle_no"]
+    assert set(classes) == set(synth_meta.VEHICLES)                              # 후보 목록에도 (운반 횟수는 차량번호가 아니다)
+
+
+def test_equipment_key_trains_without_code_for_the_key(tmp_path, capsys):
+    """tasks/0005 단계 3: equipment 는 새 키일 뿐이다 — `recognizer train --meta-key equipment` 가 코드 변경 없이 분류기(choice)를
+    만들고, 카드·출력에 장비명이 없다."""
+    out = tmp_path / "m"
+    assert main(["recognizer", "train", "--meta-key", "equipment", "--synthetic-meta", "6", "--steps", "40",
+                 "--name", "eq-x", "--out", str(out), "--json"]) == 0
+    io = capsys.readouterr()
+    card = json.loads(io.out)["card"]
+    assert card["meta"]["keys"] == ["equipment"] and card["meta"]["reader"] == "choice"
+    m = MetaModel(out)
+    assert set(m.values("equipment")) <= set(synth_meta.EQUIPMENT) and m.values("equipment")
+    text = (out / "card.json").read_text(encoding="utf-8") + io.out + io.err
+    for name in synth_meta.EQUIPMENT:
+        assert name not in text and name.lower() not in text, name

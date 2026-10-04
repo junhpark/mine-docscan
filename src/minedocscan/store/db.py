@@ -19,7 +19,8 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 # 3: 전체 묶음 운용(prod_haul.has_value_raw, 오류 격리, 호모그래피 …) — docs/tasks/0002-full-archive-and-evalset.md
 # 4: 숫자 인식기(doc_document.warning, doc_field.status_raw) — docs/tasks/0003-digit-recognizer.md
 # 5: 쪽 메타의 출처(doc_page_meta) — docs/tasks/0004-page-fields-and-checks.md
-SCHEMA_VERSION = 5
+# 6: 값의 형식(doc_field.format), 장비 가동 일보(eq_usage_daily, prod_tally, xcheck_usage) — docs/tasks/0005-usage-logs.md
+SCHEMA_VERSION = 6
 
 # 테이블별 기본 키 (upsert 의 충돌 대상)
 PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
@@ -34,6 +35,9 @@ PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "insp_daily": ("inspection_id",),
     "prod_haul": ("haul_id",),
     "xcheck_haul": ("work_date", "slot", "material", "level"),
+    "eq_usage_daily": ("page_id",),
+    "prod_tally": ("tally_id",),
+    "xcheck_usage": ("page_id", "check_kind", "item"),
 }
 
 

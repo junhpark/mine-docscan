@@ -67,6 +67,13 @@ minedocscan synth out/meta --meta-fields [--mix-pages]   # 사람마다 다른 �
 minedocscan review serve … --queue checks --n 300 --reviewer jp   # 1 유 / 2 무 / Enter 표시 없음 / ? 모름 → 두 칸의 검수 두 건
 minedocscan eval --checks [--split test]    # 기계의 답 × 정답 표, 정확도(구간), 판정 불가, column_unused
 
+# 장비 가동 일보 (tasks/0005, ADR 0015·0016) — 값의 형식, 표의 역할, 계기 검산
+minedocscan template check   <site>/templates/<양식>          # 오류를 전부 목록으로 (역할에 필요한 칸, 형식과 종류, 겹치는 칸, 쪽 밖 …)
+minedocscan template preview <site>/templates/<양식> [--scan F --page N]   # 칸·필드·형식·역할을 그린 PNG → WORK_ROOT/template-preview
+minedocscan review serve … --queue readings --reviewer jp      # 계기 칸: 쪽마다 시작·종료·총을 한 번에 (기계 값·앞날 값 없이, --audit N)
+minedocscan review serve … --queue usage-check --reviewer jp   # 계기가 이어지지 않는 곳: 두 칸을 같이 — 고치면 빠지고, 고치지 않으면 확인
+minedocscan synth out/usage --usage-logs [--usage-only]       # 가동 일보 두 종 (하루 두 장, 빠진 날, 시각, 빈 계기, 대응표에 없는 이름 …)
+
 minedocscan run DB_scans --skip-existing    # 전체 묶음: 깨진 파일은 failed 로 격리, 한 것은 건너뜀 (템플릿·인식기를 바꾼 뒤엔 --fresh)
 minedocscan report --by-month               # 양식 × 월 진단 (개정판의 흔적)
 minedocscan pages --status unknown_form --thumbs   # 양식을 못 찾은 쪽 + 미리보기 (WORK_ROOT/thumbs)
@@ -101,8 +108,10 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 | `imaging/blobs.py` | 괘선 제거 + RLSA 로 글씨 덩어리를 셀에 배정, 여러 칸에 걸친 메모 구분 |
 | `imaging/cropspec.py` | 인식기에 넘기는 크롭의 규격(`CropSpec`: 해상도 aligned/source·배율·여유)과 자르는 구현 하나 — 파이프라인·내보내기·검수 화면이 같이 쓴다 |
 | `imaging/hires.py` | 원본 쪽 렌더링 (몇 장 캐시). 원본 해상도 크롭은 쪽의 호모그래피로 그 셀만 다시 정합 |
-| `forms/template.py` | 템플릿 로더·검증 (`meta_key`, `family`/`valid_from`/`valid_to`) |
-| `forms/sitepack.py` | 사이트 팩 (템플릿·현장 옵션·페이지 라벨·평가셋 소금값), `templates_for(date)` |
+| `forms/template.py` | 템플릿 로더·검증 (`meta_key`, `format`, 표의 `role`, 나눔 선 `split_ys`/`split_xs`, `subtotal`, `family`/`valid_from`/`valid_to`). `problems()` 는 오류 전부 |
+| `forms/formats.py` | 값의 형식(ADR 0015): `integer`·`decimal`·`time`·`time_range`·`reading`. 정규화 한 곳 — 검수 저장·서버·정답 내보내기·평가·핸들러가 같이 쓴다. 화면이 받는 글자와 안내 |
+| `forms/equipment.py` | 장비 마스터(점검표 템플릿의 장비 행), `equipment_id`, 장비명 메타 키 `equipment` |
+| `forms/sitepack.py` | 사이트 팩 (템플릿·현장 옵션·페이지 라벨·평가셋 소금값), `templates_for(date)`, 장비명 대응표 `[equipment.aliases]`(마스터에 없는 키면 오류), `known_values(key)`(후보 목록) |
 | `forms/classify.py` | 페이지가 어느 양식인지 (그날 유효한 판만 후보) |
 | `recognize/` | 인식 백엔드 인터페이스와 등록소 (`null`, `oracle`, `digits`), 칸 종류별 백엔드(`ByKindRecognizer`, `[recognize.by_kind]`) |
 | `pagemeta.py` | 쪽 메타(`doc_page_meta`): 키마다 최종 값과 출처(검수 > 라벨 > 파일명 > 기계 값), 기계 값의 대조, 날짜의 월·일 대조 |
@@ -110,17 +119,21 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 | `recognize/meta/` | 메타 필드 모델 (ADR 0013): `model.py`(카드·`classes.json`·후보 목록, `[recognize.meta]` → `build_meta_readers`), `choose.py`(CTC 우도로 닫힌 목록에서 고르기, 목록에 없는 값), `calib.py`(온도·기준·묶음 교차 읽기 `cv-reads.jsonl`), `train.py`(`--cv K`, 숫자 모델), `evaluate.py` |
 | `recognize/choice/` | 이름 필드의 닫힌 집합 분류기 (종류 0 = "그 밖"): `model.py`(OpenCV 추론), `train.py`(torch) |
 | `correct/` | 교정 백엔드 인터페이스와 등록소 (`none`) |
-| `handlers/` | 양식의 의미: 셀 → `doc_field` → 업무 테이블 (`generic`, `inspection`, `haul`). 숫자 칸의 자동 적재 표는 `base.number_status` (ADR 0012) |
+| `handlers/` | 양식의 의미: 셀 → `doc_field` → 업무 테이블 (`generic`, `inspection`, `haul`, `usage`). 숫자 칸의 자동 적재 표는 `base.number_status` (ADR 0012), 정수 칸의 행은 `base.number_row`(운반·작업량), 읽지 않는 형식은 `base.unread_row` |
+| `handlers/usage.py` | 장비 가동 일보(ADR 0016): 표의 역할 `meter`·`shifts`·`tally`·`activities` → `eq_usage_daily`(쪽 하나에 한 행, 가동 시간과 근거) + `prod_tally`. 업무 행은 `usage_rows` 하나(load·on_review) |
 | `validate/crosscheck.py` | 양식 간 교차검증, 그날의 실제 배차 관측 (날짜 지정 재계산 가능) |
-| `review/` | 검수: `store.py`(추가 전용 `reviews.jsonl` ↔ `doc_review`, `save()`), `queue.py`(대기열 6종: `haul-numbers`·`mismatch`·`pending`·`page-fields`(`--audit`)·`meta-check`·`checks`), `checks.py`(✓ 행의 답 ↔ 두 칸의 판정), `crops.py`(원본/정합, 두 칸 띠), `export.py`(크롭 내보내기, `--meta`), `server.py` + `static/index.html`(표준 라이브러리, 127.0.0.1) |
+| `validate/usage.py` | 가동 일보의 검산 → `xcheck_usage`: 쪽 안(총 = 종료 − 시작, 소계 = 합), 계기의 연속성(같은 장비의 어제 종료 = 오늘 시작). 장비 단위 재계산 |
+| `review/` | 검수: `store.py`(추가 전용 `reviews.jsonl` ↔ `doc_review`, `save()`), `queue.py`(대기열 8종: `haul-numbers`·`mismatch`·`pending`·`page-fields`(`--audit`)·`meta-check`·`checks`·`readings`(`--audit`)·`usage-check`), `checks.py`(✓ 행의 답 ↔ 두 칸의 판정), `crops.py`(원본/정합, 두 칸 띠), `export.py`(크롭 내보내기, `--meta`), `server.py` + `static/index.html`(표준 라이브러리, 127.0.0.1) |
 | `store/` | `schema.sql`, `upsert()`, 스키마 버전 |
 | `pipeline/runner.py` | 단계 순서와 상태 기록만 안다. 오류 격리(`failed`/`error`), `--skip-existing` |
 | `evaluate/` | CER·필드 정확도·자동 적재율·자동 적재 오류율(`status_raw`), 값 유무 정밀도·재현율, 날짜 분할(`split.py`), 비율의 구간(`stats.py`), 쪽 메타(`meta.py`), ✓ 판정(`checks.py`), 실데이터 회귀(검수 없이, 기준에 없던 묶음은 따로 알림) |
 | `report.py` | DB 현황 요약 (회귀 테스트가 비교하는 수치), `by_month`, `list_pages` |
-| `tools/synth.py` | 합성 양식·스캔·정답 생성기 (같은 seed 면 바이트까지 같다, 행렬 개정판 선택, `low_cells` 낮은 칸 양식) |
+| `tools/synth.py` | 합성 양식·스캔·정답 생성기 (같은 seed 면 바이트까지 같다, 행렬 개정판 선택, `low_cells` 낮은 칸 양식, `usage_logs` 가동 일보) |
+| `tools/synth_usage.py` | 합성 가동 일보 두 종: 계기(소수·시각·빈 칸), 하루 두 장, 빠진 날, 잘못 적은 시작, 총·소계 어긋남, 대응표에 없는 이름, 작업량 표 위의 메모. 난수는 따로 |
+| `tools/tpltools.py` | `template preview`(칸·필드·형식·역할을 그린 PNG, 저장소 밖에만), `template check`(오류를 전부) |
 | `tools/synth_meta.py` | 메타 필드 합성: 사람마다 다른 획(기울기·굵기·크기·간격)의 네 자리 차량번호·이름·월·일, 크롭 폴더 (메타 모델의 학습·시험용) |
 | `tools/synth_cells.py` | 어려운 합성 숫자 칸: 값·X 표·덧칠·메모·이웃 칸 글씨를 크롭 규격대로 (숫자 인식기의 학습·시험용) |
-| `tools/handfont.py` | 합성 손글씨의 획 정의 (숫자 꼴 몇 가지, 메모용 이어 쓴 글자). OpenCV 내장 글꼴을 쓰지 않는다 |
+| `tools/handfont.py` | 합성 손글씨의 획 정의 (숫자 꼴 몇 가지, 소수점·콜론·물결표·붙임표, 메모용 이어 쓴 글자). OpenCV 내장 글꼴을 쓰지 않는다 |
 | `tools/thumbs.py` | 쪽 미리보기 (1/4, WORK_ROOT/thumbs) |
 | `tools/mktemplate.py` | 새 양식의 템플릿 뼈대 |
 | `cli.py` | `minedocscan` 명령 |
@@ -156,8 +169,9 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 
 ## 확장하는 법 (요약)
 
-- **새 양식** (같은 종류의 기록): `minedocscan template init <이미지> --name <이름> --roi …` → `template.yaml` 의 열·행을 채운다.
-  코드 변경 없음. `docs/SITE_PACK.md`.
+- **새 양식** (같은 종류의 기록): `minedocscan template init <이미지> --name <이름> --roi …` → `template.yaml` 의 열·행을 채운다 →
+  `template check`·`template preview` 로 확인. 코드 변경 없음. `docs/SITE_PACK.md`.
+  가동 일보는 표마다 `role`(meter·shifts·tally·activities), 칸마다 `format`, 장비명 대응표 `[equipment.aliases]`.
 - **새 종류의 업무 기록**: `handlers/<이름>.py` 에 `FormHandler` 를 상속해 `load()` 를 쓰고 `handlers/__init__.py` 의 `REGISTRY` 에 등록,
   `store/schema.sql` 에 테이블과 `store/db.py` 의 `PRIMARY_KEYS` 를 추가, `tools/synth.py` 에 그 양식의 합성판과 테스트를 추가.
 - **새 인식 백엔드**: `recognize/<이름>.py` 에 `recognize(crops, contexts) -> list[Recognition]` 을 구현하고 `register()`.
@@ -199,6 +213,20 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 - 메타 필드는 쪽마다 한 칸이라 정답이 적다 (20일치 ≈ 200쪽). 검증 날짜 20 % 로는 기준이 안 나온다 → 날짜 묶음 교차(`--cv 5`), 자동 적재된 쪽은 표본 감사 (ADR 0014).
 - 괘선 제거가 세로획 하나짜리 "1" 을 거의 다 지운다 (잉크 비율이 0 에 가깝다). 모델이 있는 메타 필드는 잉크가 전혀 없을 때만 건너뛴다.
 - `cv2.HOGDescriptor` 는 OpenCV 5.0 에 없다. OpenCV 의 부가 기능에 기대지 않는다.
+- **가동 일보** 셋(중기운행일보·점보 작업일보·로우더 작업일보)은 장비 한 대의 하루다. 계기 칸에 가동 시간계의 값을 소수 한 자리로 적고(1234.5),
+  "총"은 거의 비어 있다. 같은 장비의 어제 종료 = 오늘 시작이다 (네 대에서 이어졌다). 계기가 없는 장비는 같은 칸에 **시각**을 적는다 — 점으로 쓰기도 한다(08.00).
+  1234.5 와 08.00 은 모양으로 갈리지 않는다 → 사람이 콜론으로 가른다 (ADR 0015). 34쪽 중 계기 12, 시각 3, 나머지 빈 칸.
+- 작업 표는 자유롭게 쓴다 (작업내용에 시간대, 운행시간 칸에 이름, 〃 표시). 칸의 뜻대로 나눠 읽을 수 없다 → 글씨 있는 줄의 수만 업무 테이블에.
+- 로우더 작업일보의 작업량 칸에는 "하단: _ 대 / 저광장: _ 대" 가 **인쇄되어** 있다 — 인쇄된 줄마다 행을 나누되, 그 선은 괘선이 아니다(`split_ys`).
+  괘선 목록(`ys`)에 넣으면 정합이 없는 괘선을 찾다가 실패한다. 칸 안의 인쇄된 글자는 늘 잉크로 보인다.
+  **양옆에 인쇄가 있는 칸("하단: _ 대")에서는 인쇄를 따로 떼어 `printed` 칸으로 두는 것으로 숫자를 잡지 못한다** — 쓴 숫자가 양옆의 인쇄와,
+  인쇄는 이웃 칸의 인쇄와 이어져 덩어리 배정이 줄 전체를 메모로 보고 칸을 다 비웠다 (숫자를 쓴 칸 48개 중 0개; 인쇄를 나눔 선으로 떼어도
+  한 자리 45/48, 두 자리 0/48). 작업량 칸은 덩어리 배정 **또는** 잉크 비율 중 하나라도 "있음"이면 인식기·검수로 (빈 칸 자동 적재 없음).
+- 계기 값은 길다(1234.5). 이웃한 칸의 값끼리 칸 폭의 절반보다 가까우면 덩어리 배정(RLSA)이 한 덩어리로 묶고, 폭이 1.6칸을 넘으면 메모로 판정해
+  **두 칸 다 빈 칸**이 된다 → 가동 일보의 표 칸(읽지 않는 칸, 작업량 정수 칸)은 잉크 비율로도 보고, 둘 중 하나라도 "있음"이면 인식기·검수 대기
+  (빈 칸 자동 적재로 값이 사라지지 않게). 운반(`haul`) 칸은 덩어리 배정만 그대로.
+- 괘선 지우기는 세로획뿐인 글씨("1", "drill" 같은 낱말)를 거의 다 지운다 — 잉크 비율로 보는 작업 표 칸은 빈 칸이 된다. 합성 작업 표는 그런 글씨를 쓰지 않는다.
+- 합성 글씨의 폭을 문턱(0.2)으로 재면 OpenCV 판마다 안티에일리어싱이 달라 1 px 차이가 나고 뒤의 글자가 다 밀린다 → 잉크 질량으로 잰다.
 
 ## 하지 말 것
 

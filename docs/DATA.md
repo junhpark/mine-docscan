@@ -99,10 +99,14 @@ mine-docscan/                 ← MINEDOCSCAN_ARCHIVE_ROOT
 
 ```
 <폴더>/site/           합성 사이트 팩
-<폴더>/scans/          하루에 PDF 한 개 (점검표 → 차량별 일보 → 행렬)
-<폴더>/truth.json      날짜별 정답과 기대 수치
+<폴더>/scans/          하루에 PDF 한 개 (점검표 → 차량별 일보 → 행렬 [→ 가동 일보])
+<폴더>/truth.json      날짜별 정답과 기대 수치 (--usage-logs 면 "usage": 쪽마다 eq_usage_daily 의 정답)
 <폴더>/answers.json    오라클 백엔드·eval 용 정답
 ```
+
+`--usage-logs` 는 날마다 묶음 끝에 장비 가동 일보 두 종(세로: 작업 표 + 계기, 가로: 작업량 표 + 근무 시각 + 계기)을 붙인다
+(`--usage-only` 면 가동 일보만). 계기가 이어지는 장비, 하루 두 장, 며칠 빠진 장비, 시작을 잘못 적은 날, 총 ≠ 종료 − 시작, 계기 대신 시각
+(점으로 쓴 08.00 포함), 계기가 빈 장비, 대응표에 없는 장비명, 작업량 표 위의 메모가 들어 있다. 기본 합성 데이터는 그대로다.
 
 한계: 글자가 영문 내장 글꼴이거나 자체 획(`tools/handfont.py` — 숫자 칸)이다. 이 데이터로 **한글 손글씨 인식률을 말할 수 없다.** 잴 수 있는 것은 기하와 논리다.
 나중에 양식을 다양하게 늘리는 작업(유류일지, 환경일지 등의 가상 양식)도 이 생성기를 확장하는 방식으로 한다.
@@ -249,6 +253,34 @@ minedocscan pages --meta-mismatch --meta-key date.day          # (월·일 필�
 - 라벨이 틀렸으면 기계 값과 `mismatch` 로 드러난다 (`report`, `pages --meta-mismatch`). `meta-check` 화면에서 종이를 보고 입력한다 — 입력한 값이
   검수가 되어 라벨을 이긴다. 라벨 파일도 고친다.
 
+### 장비 가동 일보: 템플릿에서 계기 검산까지
+
+가동 일보(중기운행일보·점보·로우더 작업일보)의 템플릿을 만드는 순서와 입력 (tasks/0005, ADR 0015·0016).
+
+```bash
+minedocscan template init <빈 양식 PDF> --name <이름> --roi …    # 뼈대 → 표마다 role, 칸마다 format, 장비명·운전자 필드에 meta_key
+minedocscan template check   <site>/templates/<이름>            # 오류를 전부 (역할에 필요한 칸, 형식과 종류, 겹치는 칸, 쪽 밖 …)
+minedocscan template preview <site>/templates/<이름> --scan <PDF> --page N   # 칸이 실제 글씨에 맞는지 (WORK_ROOT/template-preview)
+# site.toml [equipment.aliases]: 일보에 적는 이름 → 점검표의 장비 키 (모르는 것은 비워 둔다)
+minedocscan run DB_scans --fresh                                # 스키마 6
+minedocscan review serve --queue page-fields --reviewer jp      # 장비명·운전자 (후보 = 대응표의 이름 + 라벨·검수에 나온 값)
+minedocscan review serve --queue readings --reviewer jp         # 계기 칸: 쪽마다 시작·종료·총을 한 번에
+minedocscan report                                              # 가동 기록: 계기 칸의 종류별, 가동 시간의 근거별, 검산(이어짐 / 어긋남 …)
+minedocscan review serve --queue usage-check --reviewer jp      # 계기가 이어지지 않는 곳: 어제의 종료 칸과 오늘의 시작 칸을 같이
+minedocscan review stats                                        # 형식별·대기열별
+```
+
+- **계기 칸의 규칙**: 계기 값은 숫자 그대로(1234.5), 시각은 콜론으로(08:00) — 점으로 쓴 시각(08.00)도 콜론으로 입력. 숫자인지 시각인지는 사람이 정한다
+  (코드는 콜론만 본다). 빈 칸은 비워 두고 `Enter`. 형식에 맞지 않는 값(12:75, 1234,5)은 화면과 서버가 거절하고 검수 파일에 남지 않는다.
+- `readings` 는 **기계 값도 앞날의 값도 보여 주지 않는다** — 보여 주면 그 값을 따라 적는다. 어제와 오늘을 같이 보는 것은 `usage-check` 에서만.
+  `--audit N` 은 잉크와 상관없이 날짜별로 고르게 N 쪽 — 빈 칸으로 넘어간 계기 칸을 잴 정답.
+- `usage-check`: 종이와 다르게 입력된 칸만 고치고 `Enter` — 검산이 맞게 되면 빠진다. 한 칸을 고쳐도 여전히 어긋나면 남는다.
+  아무것도 고치지 않고 `Enter` 하면 "종이에 적힌 대로"를 확인한 것이고 끝난다 — 어긋남은 `xcheck_usage` 와 리포트에 그대로 남는다
+  (값을 맞춰 넣지 않는다, ADR 0006). 빠진 날이 있는 장비의 `gap` 은 확인하고 넘어가는 것이 맞다.
+- 장비명을 고치면 예전 장비와 새 장비 양쪽의 계기 검산이 바로 다시 계산된다.
+- **돌려줄 수치**(이름·번호 없이): 양식별 쪽 수와 정합 통과율, 계기 칸이 있는 쪽 / 시각 / 빈 쪽, 장비 수, 연속성 검산의 결과별 수와 어긋난 것의 원인
+  (빠진 날 / 잘못 적음 / 다른 장비), 한 시간에 입력한 쪽 수, 작업량 표에 값이 있는 칸의 비율 (tasks/0005 8절).
+
 ### ✓ 판정의 정답
 
 점검표의 이상 유/무 체크(✓)가 맞게 판정되었는지 잴 정답이다 (tasks/0004 단계 6).
@@ -281,6 +313,8 @@ minedocscan review stats                                       # ✓ 검수 행 
 
 `source`(`<파일명>#<페이지>`)는 같은 날 같은 양식이 여러 장일 때, `work_date` 는 한 장뿐일 때 쓴다.
 어떤 표에 정답이 하나라도 있으면 그 표의 수기 셀 전부를 평가하고, 정답에 없는 셀은 빈 칸이 정답이다.
+형식이 있는 칸(`format`)의 `text` 는 정규화한 표기다 (`1234.5`, `08:00`, `08:00~12:00`). `export-answers` 와 `eval` 은 비교할 때 다시 정규화하므로
+`8:00` 과 `08:00` 은 같은 값이다. 기본 형식이 아닌 칸은 `eval` 에서 `<양식>/<종류>/<형식>` 으로 따로 묶인다.
 
 점검표 CSV — 기존 연구팀 형식. 파일명 `YYMMDD.csv`, cp949, 머리 3줄 뒤에 양식의 행 순서대로 `구분,형식,등록번호,점검내역`.
 

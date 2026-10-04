@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from ..forms.formats import default_format, try_normalize
 from .metrics import auto_rate, corpus_cer, field_accuracy, normalize
 from .stats import wilson
 
@@ -41,7 +42,7 @@ def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final
     seen: set = set()
     for r in con.execute(
             "SELECT d.source_name, p.page_no, p.work_date, p.template_name, f.region, f.field_name, f.row_key, "
-            f"f.kind, {col}, f.review_status, f.status_raw, f.backend, f.has_value_raw, f.value_raw "
+            f"f.kind, {col}, f.review_status, f.status_raw, f.backend, f.has_value_raw, f.value_raw, f.format "
             "FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id "
             "JOIN doc_document d ON p.document_id = d.document_id WHERE f.kind LIKE 'handwritten%'"):
         source, work_date, template, region = f"{r[0]}#{r[1]}", r[2], r[3], r[4]
@@ -55,12 +56,15 @@ def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final
             seen.add(key)
         elif only_listed:
             continue
-        g = groups.setdefault(f"{template}/{r[7]}", {"pairs": [], "statuses": [], "machine": []})
-        truth = answers.get(key, "")
-        g["pairs"].append((r[8] or "", truth))
+        fmt = r[14] or default_format(r[7])               # 형식이 비어 있으면 칸 종류의 기본 형식
+        # 칸 종류의 기본 형식이면 묶음 이름은 예전과 같다 ("<양식>/<종류>"). 다른 형식이면 "/<형식>" 을 붙인다
+        gkey = f"{template}/{r[7]}" + ("" if fmt == default_format(r[7]) else f"/{fmt}")
+        g = groups.setdefault(gkey, {"pairs": [], "statuses": [], "machine": []})
+        truth = try_normalize(fmt, answers.get(key, "")) or ""   # 정규화한 표기로 비교한다 (8:00 = 08:00, 01234.5 = 1234.5)
+        g["pairs"].append((try_normalize(fmt, r[8] or "") or "", truth))
         g["statuses"].append(r[10] or r[9])                     # 자동 적재율은 기계가 정한 상태(status_raw)로 — 검수와 무관
         machine = (r[13] or "") if r[12] else ""                 # 기계가 값 없음으로 정했으면 빈 칸
-        g["machine"].append((r[10], r[11], machine, truth))
+        g["machine"].append((r[10], r[11], try_normalize(fmt, machine) or "", truth))
 
     def summarize(pairs, statuses, machine) -> dict:
         valued = [p for p in pairs if normalize(p[1])]

@@ -43,6 +43,7 @@ from .model import (
     N_CLASSES,
     N_INPUT_CHANNELS,
     OnnxNet,
+    clean_orphan_staging,
     encode,
     log_softmax,
     normalize,
@@ -50,6 +51,7 @@ from .model import (
     read_answers,
     resize_input,
     sha256_file,
+    staging_dir,
 )
 
 INSTALL_HINT = ('학습에는 torch 와 onnx 가 필요합니다: pip install -e ".[train]" '
@@ -237,6 +239,7 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
     out_dir = Path(out_dir)
     if out_dir.exists() and any(out_dir.iterdir()):
         raise TrainError(f"같은 이름의 모델이 있습니다: {out_dir} — 덮어쓰지 않습니다. 다른 --name 을 주세요")
+    clean_orphan_staging(out_dir.parent)                      # 끊긴 학습이 남긴 주인 없는 임시 폴더 (시작할 때 치운다)
     if inside_git_tree(out_dir.parent if not out_dir.exists() else out_dir) and not allow_in_repo:
         raise TrainError(f"{out_dir} 은 git 작업 트리 안입니다. 현장 글씨로 학습한 모델은 사이트 팩에 둡니다 "
                          "(합성 셀만으로 만든 시험용 모델이면 --allow-in-repo)")
@@ -314,9 +317,7 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
                                                         progress)
 
     # 4. ONNX 로 내보내고 OpenCV 로 다시 읽어 검증
-    tmp = out_dir.parent / f".{out_dir.name}.tmp-{os.getpid()}"
-    shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True)
+    tmp = staging_dir(out_dir)                              # 끊긴 학습의 주인 없는 임시 폴더도 여기서 치운다
     try:
         exporter = export_onnx(torch, net, tmp / "model.onnx")
         onnx_net = OnnxNet(tmp / "model.onnx")

@@ -378,14 +378,23 @@ def _blank_forms(low: bool = False, meta: bool = False) -> dict:
     return {T_INSP: build_inspection(), T_LOG: build_haul_log(low), T_MATRIX: build_haul_matrix(low=low)}
 
 
-def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low: bool = False, meta: bool = False) -> Path:
+def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low: bool = False, meta: bool = False,
+                    usage: bool = False) -> Path:
     """합성 사이트 팩(site.toml + 템플릿 세 종)을 쓴다. revision_from(날짜)을 주면 행렬 양식이 두 판이 된다:
     그 전날까지 v1, 그날부터 v2 (같은 계열, 유효 기간으로 가린다). low: 운반 양식 두 종이 낮은 칸.
-    meta: 일보에 월·일 필드, 차량번호가 네 자리 숫자인 행렬 머리글 (tasks/0004 단계 2)."""
+    meta: 일보에 월·일 필드, 차량번호가 네 자리 숫자인 행렬 머리글 (tasks/0004 단계 2).
+    usage: 가동 일보 두 종(tools/synth_usage.py)과 장비명 대응표 [equipment.aliases] (tasks/0005)."""
     site = Path(site_dir)
     site.mkdir(parents=True, exist_ok=True)
-    (site / "site.toml").write_text(SITE_TOML, encoding="utf-8")
+    toml = SITE_TOML
+    if usage:
+        from . import synth_usage
+
+        toml += synth_usage.USAGE_TOML
+    (site / "site.toml").write_text(toml, encoding="utf-8")
     built = _blank_forms(low, meta)
+    if usage:
+        built.update({name: b() for name, b in synth_usage.BUILDERS.items()})
     if revision_from:
         last_v1 = (date.fromisoformat(revision_from) - timedelta(days=1)).isoformat()
         built[T_MATRIX] = build_haul_matrix(SLOTS, T_MATRIX, (None, last_v1), low=low)
@@ -689,6 +698,18 @@ def _meta_answers(source: str, day: str, t: dict) -> list[dict]:
             for k, v in vals.items()]
 
 
+def _add_usage_pages(add, plans: list, blanks: dict, rng, stem: str, day: str, answers: list, truth: list) -> None:
+    """그날의 가동 일보 쪽을 묶음에 붙인다 (그리기·스캔 효과 모두 가동 일보의 난수로). 정답과 쪽 정답을 모은다."""
+    from . import synth_usage
+
+    for p in plans:
+        img = synth_usage.fill_page(*blanks[p.template], p, rng)
+        n = add(img, p.template, _rng=rng, equipment=p.equipment)
+        source = f"{stem}#{n}"
+        answers += synth_usage.answers_of(source, p)
+        truth.append(synth_usage.truth_of(source, day, p))
+
+
 @dataclass
 class SynthResult:
     root: Path
@@ -701,7 +722,8 @@ class SynthResult:
 
 def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "2030-01-07",
              strength: float = 1.0, matrix_revision: bool = False, low_cells: bool = False,
-             meta_fields: bool = False, mix_pages: bool = False) -> SynthResult:
+             meta_fields: bool = False, mix_pages: bool = False, usage_logs: bool = False,
+             usage_only: bool = False) -> SynthResult:
     """out_dir 에 합성 사이트 팩(site/)과 스캔 문서(scans/), 정답(truth.json, answers.json)을 만든다.
 
     하루에 PDF 한 개: 점검표 1장 → 차량별 일보(일보를 낸 차량 수) → 행렬 1장.
@@ -710,13 +732,17 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     — 잉크로는 값이 있어 보이므로 그 날의 truth["expected"] 의 교차검증 수치와는 맞지 않는다.
     meta_fields=True 면 일보의 메타 필드가 사람마다 다른 획 (tasks/0004 단계 2), mix_pages=True 면 마지막 날의 묶음에
     첫날의 일보 한 쪽이 섞인다 — truth["documents"] 에 mixed_from 으로 표시한다. 정답(answers.json)에 메타 필드의 값이 들어간다.
+    usage_logs=True 면 날마다 묶음 끝에 가동 일보(tools/synth_usage.py)를 붙인다 — 난수를 따로 쓰므로 앞의 쪽은 그대로다.
+    usage_only=True 면 가동 일보만 (점검표·운반 쪽 없이 — 시험 시간을 아낀다. 사이트 팩의 템플릿은 그대로 다 쓴다).
+    가동 일보의 정답: truth["usage"] (쪽마다 eq_usage_daily 의 정답), answers.json 에 그 칸들.
     """
     if mix_pages and not meta_fields:
         raise ValueError("mix_pages 는 meta_fields 와 같이 쓴다")
+    usage_logs = usage_logs or usage_only
     root = Path(out_dir)
     d0 = date.fromisoformat(start)
     revision_from = (d0 + timedelta(days=1)).isoformat() if matrix_revision else None
-    site = write_site_pack(root / "site", revision_from=revision_from, low=low_cells, meta=meta_fields)
+    site = write_site_pack(root / "site", revision_from=revision_from, low=low_cells, meta=meta_fields, usage=usage_logs)
     scans = root / "scans"
     rng = np.random.default_rng(seed)
     blanks = _blank_forms(low_cells, meta_fields)
@@ -725,20 +751,33 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
 
     day_truths, labels, answers, documents = [], {}, [], {}
     insp_blank = build_inspection() if meta_fields else None
+    usage_plan, usage_truth = None, []
+    if usage_logs:
+        from . import synth_usage
+
+        rng_u = np.random.default_rng([seed, 5005])               # 가동 일보는 따로 — 앞의 쪽의 난수 흐름을 건드리지 않는다
+        usage_blanks = {name: b() for name, b in synth_usage.BUILDERS.items()}
+        usage_plan = synth_usage.plan_days([(d0 + timedelta(days=d)).isoformat() for d in range(days)], rng_u)
     for d in range(days):
         day = (d0 + timedelta(days=d)).isoformat()
         v2 = bool(revision_from) and day >= revision_from
         matrix_name, slots = (T_MATRIX_V2, SLOTS_V2) if v2 else (T_MATRIX, SLOTS)
         if meta_fields:
             slots = SLOTS_META
-        dt = _day_truth(d, day, rng, slots, meta=meta_fields)
         stem = f"scan_{day}"
         pages, page_info = [], []
 
-        def add(img, template, _pages=pages, _info=page_info, **extra):
-            _pages.append(scan_effect(img, rng, strength))
+        def add(img, template, _pages=pages, _info=page_info, _rng=rng, **extra):
+            _pages.append(scan_effect(img, _rng, strength))
             _info.append({"page": len(_pages), "template": template, **extra})
             return len(_pages)
+
+        if usage_only:
+            _add_usage_pages(add, usage_plan[d], usage_blanks, rng_u, stem, day, answers, usage_truth)
+            _write_pdf(scans / f"{stem}.pdf", pages)
+            documents[stem] = page_info
+            continue
+        dt = _day_truth(d, day, rng, slots, meta=meta_fields)
 
         if meta_fields:                # 점검표 쪽은 넣지 않지만 난수는 같은 만큼 쓴다 (나머지 쪽의 글씨가 그대로이게)
             scan_effect(_fill_inspection(*insp_blank, dt, rng), rng, strength)
@@ -772,6 +811,8 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
             answers.append({"source": f"{stem}#{n}", "template": matrix_name, "region": "matrix",
                             "field_name": f"slot_{r['slot']}", "row_key": f"{r['material']}|{r['level']}",
                             "text": str(r["trips"])})
+        if usage_logs:
+            _add_usage_pages(add, usage_plan[d], usage_blanks, rng_u, stem, day, answers, usage_truth)
         _write_pdf(scans / f"{stem}.pdf", pages)
         documents[stem] = page_info
         day_truths.append(dt)
@@ -802,6 +843,8 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     }
     if meta_fields:                                   # 기본 데이터의 truth.json 은 바이트까지 그대로
         truth["meta_fields"] = True
+    if usage_logs:
+        truth["usage"] = usage_truth
     truth_path, answers_path = root / "truth.json", root / "answers.json"
     truth_path.write_text(json.dumps(truth, ensure_ascii=False, indent=1), encoding="utf-8")
     answers_path.write_text(json.dumps(answers, ensure_ascii=False, indent=1), encoding="utf-8")

@@ -101,8 +101,37 @@ DB             운영에서는 PostgreSQL (예정). 지금은 WORK_ROOT 의 SQLi
 | `generic` | 아무 양식 | 없음 (`doc_field` 만) |
 | `inspection` | 행 = 장비, 열 = 점검내역 + 이상 유/무 체크 | `eq_equipment`, `insp_daily` |
 | `haul` | 운반 횟수. `role: log`(차량별 일보) 또는 `role: matrix`(편×차량 행렬) | `prod_haul`, 그리고 `finalize` 에서 `xcheck_haul`, `eq_assignment_obs` |
+| `usage` | 장비 한 대의 하루 (중기운행일보·점보 작업일보·로우더 작업일보). 표마다 역할(`role`) | `eq_usage_daily`(쪽 하나에 한 행), `prod_tally`, `xcheck_usage` |
 
 열의 종류(`kind`): `printed`(템플릿 값 사용) · `handwritten_text` · `handwritten_number` · `checkmark` · `signature`.
+
+**값의 형식** (`format`, `forms/formats.py`, ADR 0015). 손으로 쓰는 칸·필드에 `integer`(숫자 칸의 기본) · `decimal` · `time` · `time_range` ·
+`reading`(계기 값 또는 시각 — 콜론이 있으면 시각). 정규화는 한 곳이고(검수 저장·서버·정답 내보내기·평가·핸들러), DB·검수 파일에는 정규화한
+표기만 남는다(`1234.5`, `08:00`, `08:00~17:00`). 형식에 맞지 않는 입력은 저장 전에 거절한다. 정수가 아닌 형식의 칸은 인식기에 보내지 않는다 —
+잉크가 있으면 값 없이 검수 대기다 (소수·시각을 기계가 읽는 것은 다음 지시서).
+
+**가동 일보의 표의 역할** (`usage`, ADR 0016). 새 양식이 이 조합이면 코드를 고치지 않는다.
+
+| `role` | 칸 | 가는 곳 |
+|---|---|---|
+| `meter` | 시작·종료·총 (열 이름 또는 행 키 `start`·`end`·`total`, 형식 `reading`·`decimal`·`time`) | `eq_usage_daily` 의 계기 값 또는 시각 |
+| `shifts` | 근무 구분(행) × 시각 범위(`time_range`) | `eq_usage_daily.shifts`(JSON), 가동 분의 합 |
+| `tally` | 구분(행 메타 `item`·`place`) × 근무조(열 메타 `shift`)의 정수. 소계 칸은 열·행 메타 `subtotal: true` | `prod_tally` |
+| `activities` | 작업 표의 글자 칸 | `doc_field` 에만. 글씨가 있는 줄의 수만 `activity_rows` 에 |
+
+- 값 유무: `meter`·`shifts`·`tally` 의 형식 있는 칸은 운반 칸과 같은 덩어리 배정(`imaging/blobs.py`, 기준 면적 그대로). 그 밖은 잉크 비율.
+  읽지 않는 칸(소수·시각)은 두 판정 중 하나라도 "있음"이면 검수 대기 — 긴 계기 값 두 개가 한 덩어리로 묶이면 덩어리 배정은 메모로 보고
+  두 칸을 다 비었다고 하는데, 그대로 빈 칸으로 자동 적재하면 값이 조용히 사라지기 때문이다. 새 임계값은 없다.
+- 작업량의 정수 칸은 지금의 숫자 인식 경로(`by_kind`, 자동 적재 표 — `handlers/base.number_row`, 운반 칸과 같은 함수)를 탄다. 인식기에 보내는
+  칸은 읽지 않는 칸과 같은 규칙(두 판정 중 하나라도 "있음")으로 고른다 — 칸 안에 "하단: _ 대" 가 인쇄되어 있으면 쓴 숫자가 양옆의 인쇄와,
+  인쇄가 이웃 칸의 인쇄와 이어져 덩어리 배정이 줄 전체를 메모로 본다. 운반(`haul`) 칸은 덩어리 배정만 (ADR 0012 그대로).
+- 장비명·운전자는 쪽 메타(`equipment`, `operator`). 장비 ID 는 사이트 팩의 대응표 `[equipment.aliases]` 로만 정한다 (`forms/equipment.py` —
+  마스터 = 점검표 템플릿의 장비 행, ID 는 `eq_equipment` 와 같은 UUID).
+- 가동 시간(`hours`)과 근거(`hours_basis`): `meter`(종료 − 시작) > `total`(총 칸이 수일 때) > `clock`(계기 칸의 시각) > `shifts`(범위의 합) > NULL.
+  앞선 근거에 모르는 칸(검수 대기, "읽을 수 없음" 포함)이 있거나 시작·종료가 계기 값과 시각으로 섞였으면 NULL. 추정하지 않는다.
+  총(가동시간)은 길이라 시각 옆에 수로 적혀도 섞인 것이 아니다.
+- 칸 안의 인쇄된 줄(로우더 작업일보의 하단 / 저광장)은 `grid.split_ys`(인쇄되지 않은 나눔 선)로 행을 나눈다. 칸만 자르고 정합 판정·괘선 지우기에는
+  쓰지 않는다 — 없는 괘선을 찾으려 하면 정합 오차가 커져 쪽이 `align_failed` 가 된다.
 
 표 밖 자유 필드에 `meta_key`(`vehicle_no`, `operator` …)를 주면 그 필드의 값이 쪽의 메타가 된다.
 
@@ -137,13 +166,17 @@ erDiagram
   eq_equipment ||--o{ insp_daily : equipment_id
   prod_haul }o--o{ xcheck_haul : "work_date, slot, material, level"
   eq_assignment_obs }o--o{ xcheck_haul : "work_date, slot"
+  doc_page ||--o| eq_usage_daily : page_id
+  doc_field ||--o| prod_tally : source_field_id
+  eq_usage_daily ||--o{ xcheck_usage : page_id
+  eq_equipment ||--o{ eq_usage_daily : "equipment_id (대응표, FK 없음)"
 ```
 
 | 층 | 테이블 | 내용 |
 |---|---|---|
 | 문서 | `doc_document` | 원본 파일. ID = SHA-256 앞 16자리 → 같은 스캔의 중복 접수 차단. `source_rel`(archive_root 기준)로 다른 컴퓨터에서도 원본을 찾는다. 상태·오류·경고(`warning` — 복구해서 연 PDF, `[pipeline] damaged_pdf = "warn"`) |
 | | `doc_page` | 페이지별 양식, 분류 여유, 정합 품질, 정합 이미지 경로, 호모그래피(렌더링한 쪽 픽셀 → 템플릿 픽셀)와 렌더링 dpi, 상태, 오류 |
-| | `doc_field` | 셀 하나. 좌표(bbox), 잉크, 값 유무(기계 `has_value_raw` / 최종 `has_value`), 원문 `value_raw`, 최종값 `value_final`, 신뢰도, 후보, 값을 만든 주체, 검수 상태(`review_status`)와 기계가 정한 상태(`status_raw` — 자동 적재 오류율의 분모) |
+| | `doc_field` | 셀 하나. 좌표(bbox), 값의 형식(`format`, 스키마 6), 잉크, 값 유무(기계 `has_value_raw` / 최종 `has_value`), 원문 `value_raw`, 최종값 `value_final`, 신뢰도, 후보, 값을 만든 주체, 검수 상태(`review_status`)와 기계가 정한 상태(`status_raw` — 자동 적재 오류율의 분모) |
 | | `doc_page_meta` | 쪽 × 메타 키(`vehicle_no`, `operator`, `date`, `date.month`, `date.day` …): 최종 값과 출처(`review`·`label`·`filename`·`machine`), 그 키를 적는 필드, 기계가 읽은 값·신뢰도·상태(`auto`·`pending`·`unlisted`·`empty`), 대조 결과 (§5, 스키마 5) |
 | | `doc_review` | 사람이 입력한 값 한 건. 원본은 사이트 팩의 `reviews/reviews.jsonl` 이고 이 테이블은 사본이다 (ADR 0008) |
 | | `meta_schema` | 스키마 버전. 버전이 다른 DB 파일은 열지 않는다 (`run --fresh` 로 다시 만든다) |
@@ -152,6 +185,9 @@ erDiagram
 | 업무 | `insp_daily` | 일일 장비 점검: 날짜 × 장비 → 이상 유/무, 점검내역 |
 | | `prod_haul` | 운반 실적: 날짜 × 자리(차량) × 광종 × 편 × 근무조 → 횟수. 두 양식에서 각각 들어온다. `trips` 는 최종, `trips_raw` 는 기계가 읽은 값 |
 | | `xcheck_haul` | 두 양식의 같은 값 비교: `match` / `mismatch` / `missing_log` / `missing_matrix`. 판정은 최종 값, 기계 값의 합도 `*_trips_raw` 에 같이 둔다 |
+| | `eq_usage_daily` | 장비 가동 기록: 쪽 하나에 한 행 (하루 두 장이면 두 행). 날짜, 양식, 장비명·장비 ID(대응표, 없으면 NULL), 운전자, 계기 칸의 종류(`reading_kind`), 계기 시작·종료·총(수), 시각 시작·종료, 근무 시각 범위(JSON)와 분의 합, 작업 줄 수, 서명 유무, 가동 시간과 근거(`hours_basis`), 기계 값(`meter_*_raw`), 상태, 출처 칸 셋 (스키마 6) |
+| | `prod_tally` | 작업량 표의 정수 칸 하나에 한 행: 구분(`item`)·장소(`place`)·열·근무조, 소계 칸 표시, 최종 수 `count` 와 기계 값 `count_raw` |
+| | `xcheck_usage` | 가동 일보의 검산 한 행 = 검산 하나: 종류(`total` 총 = 종료 − 시작, `subtotal` 소계 = 합, `continuity` 계기의 연속성), 비교한 값 둘과 차이, 결과, 사이에 낀 날 수, 비교 상대의 쪽, 비교한 칸 (§7) |
 
 규칙:
 - 쓰기는 `store.db.upsert()` 만 쓴다 (`INSERT … ON CONFLICT … DO UPDATE`). 재실행은 덮어쓴다.
@@ -185,6 +221,23 @@ erDiagram
 일치율(`report` 의 `xcheck_agreement`)은 양쪽 다 횟수가 있는 칸 중 횟수가 같은 비율이다. 최종 값 기준과 기계 값 기준을 따로 내고 분모를 같이 본다.
 정확도가 아니다 — 두 문서를 같은 방식으로 틀리게 읽으면 일치로 잡힌다 (ADR 0007).
 
+**가동 일보의 검산** (`validate/usage.py` → `xcheck_usage`, ADR 0016). 운반 횟수처럼 같은 값이 두 문서에 적히지는 않지만, 계기는 날짜를 넘어 이어진다.
+
+```
+쪽 안     total       총 = 종료 − 시작 (셋 다 계기 값일 때)            match | mismatch
+          subtotal    소계 = 합 (작업량 표의 subtotal 칸)               match | mismatch | unknown
+날짜 사이 continuity  같은 장비의 바로 앞 기록의 종료 = 이 기록의 시작   match | gap | overlap | first | unknown
+```
+
+- 같은 장비 = 장비 ID 가 있으면 ID, 없으면 적힌 이름. 이름이 없으면 `unknown`. 허용 오차 0.05 시간(소수 한 자리의 반올림).
+- 기록의 순서는 날짜 → 계기 시작 값 → 문서 → 쪽 (하루 두 장은 시작 값이 작은 쪽이 먼저). 계기 값이 없는 기록(시각·빈 칸)은 건너뛴다.
+  비교하지 못하면 `unknown` 이다 — 바로 앞 계기 기록의 종료를 모른다(검수 대기, 시작만 적혔다), 같은 날 시작 값을 아직 모르는 다른 장이 있다,
+  날짜를 모른다. 일부만 검수한 중에 가짜 `gap` 이 생기지 않게 (더 앞의 기록과 비교하면 있는 날을 빠진 날로 탓한다).
+- 차이와 사이에 낀 날 수를 같이 남긴다: 며칠 빠진 장비는 `gap` 과 낀 날 수, 시작을 잘못 적은 날은 `gap`/`overlap` 과 차이.
+- 적재할 때 그 쪽의 쪽 안 검산, 마무리에서 전부. 검수를 저장하면 그 쪽과 **그 장비의** 연속성만(장비명이 바뀌었으면 예전·새 장비 둘 다) —
+  장비마다 그 장비의 기록만으로 정해지는 함수라 마무리의 전체 계산과 같다.
+- 검산은 값을 고치지 않는다. 어긋난 쪽의 `eq_usage_daily` 는 적힌 그대로이고 가동 시간도 4.3 의 순서대로다. 사람은 `usage-check` 에서 두 칸을 같이 본다.
+
 ### 7.1 검수 흐름
 
 검수는 **옮겨 적기**다. 검수자는 종이에 적힌 그대로 입력하고, 두 문서가 달라도 각각 적힌 대로 적는다. 어느 쪽이 맞는지는 정하지 않는다 (ADR 0006).
@@ -196,15 +249,22 @@ minedocscan review serve --queue haul-numbers --reviewer jp      # 127.0.0.1:876
       1. <site>/reviews/reviews.jsonl 에 한 줄 추가 (원본, 추가 전용)
       2. doc_review (사본)
       3. doc_field: value_final·has_value·review_status 를 덮는다. 기계 값은 그대로
-      4. 핸들러의 on_review(): 그 셀의 업무 행(prod_haul / insp_daily)과 그 날짜의 교차검증만 다시 계산
+      0. 값을 칸의 형식으로 정규화 (맞지 않으면 400, 파일에 아무것도 쓰지 않는다)
+      4. 핸들러의 on_review(): 그 셀의 업무 행(prod_haul / insp_daily / eq_usage_daily·prod_tally)과
+         그 날짜의 교차검증 / 그 장비의 계기 검산만 다시 계산
       5. 문서 상태(needs_review) 갱신
 ```
 
 - 대기열(`review/queue.py`): `haul-numbers`(운반 숫자 표본, 기계 값 숨김), `mismatch`(교차검증 불일치 칸의 일보·행렬 셀 묶음, 기계 값 숨김),
   `pending`(검수 대기 필드 전부, 기계 값을 미리 채움), `page-fields`(차량번호·작성자 같은 쪽 메타 — 항목 = 쪽 하나, 행렬 머리글과 지금까지의
   값이 후보 목록으로 붙는다. 기계가 채운 키는 묻지 않는다), `meta-check`(기계 값과 라벨·검수 값이 다른 쪽 — 두 값을 같이 보여 준다),
-  `checks`(점검표의 장비 행 표본 — 항목 = 유·무 두 칸, 기계 판정 숨김). 정답을 만드는 대기열에서 기계 값을 숨기는 이유는 보여 주면
-  그 값에 끌리기 때문이다.
+  `checks`(점검표의 장비 행 표본 — 항목 = 유·무 두 칸, 기계 판정 숨김), `readings`(가동 일보의 계기 칸 — 항목 = 쪽 하나, 시작·종료·총을
+  한 번에. 기계 값도 앞날의 값도 보여 주지 않는다 — 보여 주면 따라 적는다), `usage-check`(가동 일보의 검산이 어긋난 것 — 항목 = 검산 하나,
+  비교한 칸들과 지금 값·차이. 고친 칸만 저장하고, 맞게 되면 빠진다. 아무것도 고치지 않고 저장하면 "적힌 대로"를 확인한 것이고 끝난다 —
+  어긋남은 그대로 남는다. 확인 = 비교한 칸 전부가 그 검산의 항목에서 저장되었고 지금 값이 그때와 같다 — 한 칸(종료)이 두 검산에 걸쳐 있어도
+  둘 다 끝낼 수 있다). 정답을 만드는 대기열에서 기계 값을 숨기는 이유는 보여 주면 그 값에 끌리기 때문이다.
+- 형식이 있는 칸은 화면이 형식마다 받는 글자와 안내를 바꾸고, 서버가 다시 검사한다. 한 항목의 여러 칸(`readings` 의 세 칸)은 `POST /api/reviews`
+  하나로 — 전부 검사한 뒤에야 저장한다 (한 칸이라도 틀리면 아무것도 남지 않는다).
 - `page-fields --audit N`: 모델이 메타를 채우기 시작하면 사람은 기계가 못 정한 쪽만 보게 되고, 자동 적재된 쪽의 오류를 잴 정답이 생기지 않는다.
   그래서 기계의 상태와 상관없이 날짜별로 고르게 뽑은 쪽 N 개를 기계 값 없이 다시 보여 준다 (씨앗으로 고정, ADR 0014).
 - ✓ 정답(`checks`): 행의 답(유 / 무 / 표시 없음 / 모름)을 새 판정 종류로 만들지 않고 **두 체크 칸의 기존 판정**으로 적는다 —
@@ -225,7 +285,7 @@ minedocscan review serve --queue haul-numbers --reviewer jp      # 127.0.0.1:876
 | 채광 (갱내 운반) | 차량별 운반 일보 ↔ 상차 장비 행렬 | 구현 (`xcheck_haul`) |
 | 선광 | 선광 작업일지 | 양식 미정의 |
 | 출하 | 갱외 상차 일보, 경비 근무일지 | 분류만 |
-| 장비 | 일일 점검표, 중기 운행일보, 전기 안전일지 | 점검표 구현, 나머지 분류만 또는 미정의 |
+| 장비 | 일일 점검표, 중기 운행일보·점보·로우더 작업일보, 전기 안전일지 | 점검표 구현, 가동 일보 구현(`eq_usage_daily` — 계기의 연속성 `xcheck_usage`, 실제 템플릿은 사이트 팩에서), 전기 안전일지 미정의 |
 | 굴진 | 천공 작업 내역 (엑셀) | 미착수 |
 
 ## 8. 인식과 교정 (플러그인)
@@ -346,7 +406,9 @@ class Corrector(Protocol):
 
 | 하려는 일 | 손대는 곳 | 코드 변경 |
 |---|---|---|
-| 같은 종류의 새 양식 | 사이트 팩의 `templates/<이름>/` | 없음 |
+| 같은 종류의 새 양식 | 사이트 팩의 `templates/<이름>/` (`template preview`·`template check` 로 확인) | 없음 |
+| 가동 일보의 새 양식 (계기·근무 시각·작업량·작업 표의 조합) | 템플릿의 표마다 `role`, 칸의 `format`, 장비명 대응표 `[equipment.aliases]` | 없음 |
+| 값의 새 형식 | `forms/formats.py` (정규화·받는 글자·안내 — 화면과 서버가 같이 쓴다) | 있음 |
 | 다른 현장 | 새 사이트 팩 | 없음 |
 | 새 종류의 업무 기록 | `handlers/` + `store/schema.sql` + `tools/synth.py` + 테스트 | 있음 |
 | 새 인식 백엔드 | `recognize/<이름>.py` + `register()`, 원하는 크롭 규격은 `crop_spec`/`crop_spec_for` 로 선언 | 있음 (파이프라인은 그대로) |

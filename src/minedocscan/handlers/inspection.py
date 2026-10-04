@@ -13,32 +13,11 @@ insp_daily 행은 검수를 적용한 **최종** 필드 행(유 체크, 무 체�
 """
 from __future__ import annotations
 
-import uuid
-
+from ..forms.equipment import equipment_id, is_equipment_row, layout
 from ..forms.template import row_key as _row_key
 from ..imaging.marks import decide_mark_pairs
 from ..store.db import upsert
 from .base import FormHandler, PageContext, apply_reviews, field_id, field_row
-
-EQ_NAMESPACE = uuid.UUID("5f1c2a2e-7d0b-4a7f-9a3e-2b1e2c3d4e5f")
-
-
-def equipment_id(equipment_key: str) -> str:
-    """같은 장비 키는 언제 어디서 돌려도 같은 UUID 가 된다."""
-    return str(uuid.uuid5(EQ_NAMESPACE, equipment_key))
-
-
-def layout(tpl) -> tuple[str, str, str, str]:
-    """점검표 템플릿의 (표, 유 칸, 무 칸, 점검내역 칸) 이름 — handler_options 와 기본값."""
-    opt = tpl.handler_options
-    return (opt.get("region") or tpl.regions[0]["name"], opt.get("yes_column", "abnormal_yes"),
-            opt.get("no_column", "abnormal_no"), opt.get("text_column", "remark"))
-
-
-def is_equipment_row(r: dict) -> bool:
-    """장비 행인가: 행 키가 있고 모델이나 등록번호가 있다. 아니면 양식의 여백 행 (insp_daily 로 가지 않는다)."""
-    model, reg = str(r.get("model", "") or ""), str(r.get("registration", "") or "")
-    return bool(str(r.get("key", ""))) and bool(model or reg.strip("-"))
 
 
 class InspectionHandler(FormHandler):

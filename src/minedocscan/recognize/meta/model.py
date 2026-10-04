@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ...config import ConfigError
 from ...forms.template import DATE_PARTS
 from ...imaging.cropspec import CropSpec
 from .calib import status_of
@@ -124,6 +125,10 @@ class MetaModel:
                 "method": (m.get("cv") or {}).get("method", "val_dates"), "classes": m.get("classes")}
 
 
+# [recognize.meta] 에 쓰면 오류인 항목 — 숫자 칸 모델([recognize.digits])에는 있는 설정이라 헷갈려 쓰기 쉽다
+NOT_MODEL_KEYS = ("auto_accept_conf", "model", "threshold")
+
+
 def build_meta_readers(settings, site) -> dict[str, MetaModel]:
     """설정 [recognize.meta] <키> = "<모델 이름|경로>" (설정 파일 > site.toml). 같은 모델 폴더는 한 번만 읽는다.
     카드에 그 키가 없으면 시작할 때 오류 — 다른 키에 꽂은 모델은 받지 않는다."""
@@ -132,13 +137,17 @@ def build_meta_readers(settings, site) -> dict[str, MetaModel]:
     conf = _flatten(dict((getattr(settings, "recognizer_options", None) or {}).get("meta", {}) or {}))
     if site is not None:
         conf = _flatten(dict(site.option("recognize", "meta", {}) or {})) | conf
-    conf = {k: v for k, v in conf.items() if k != "auto_accept_conf"}
+    for key, ref in sorted(conf.items()):
+        # [recognize.meta] 의 항목은 "키 = 모델 이름" 뿐이다. 기준 같은 다른 항목은 조용히 무시되던 것을 설정 오류로 (tasks/0005 단계 1)
+        if key in NOT_MODEL_KEYS:
+            raise ConfigError(f"[recognize.meta] {key}: 이 표에는 \"메타 키 = 모델 이름\" 만 씁니다 — 메타 필드 모델의 자동 적재 "
+                              "기준은 모델 카드에서만 옵니다 (기준을 바꾸려면 --target-auto-error 로 다시 학습)")
+        if not isinstance(ref, str) or not ref:
+            raise ConfigError(f"[recognize.meta] {key} 는 모델 이름(문자열)이어야 합니다: {ref!r}")
     out: dict[str, MetaModel] = {}
     loaded: dict[Path, MetaModel] = {}
     site_root = site.root if site is not None else getattr(settings, "site", None)
     for key, ref in sorted(conf.items()):
-        if not isinstance(ref, str) or not ref:
-            raise MetaModelError(f"[recognize.meta] {key} 는 모델 이름(문자열)이어야 합니다")
         try:
             d = resolve_model(ref, site_root)
         except FileNotFoundError as e:

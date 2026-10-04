@@ -12,13 +12,7 @@ from minedocscan.review.queue import build_queue
 from minedocscan.review.server import ReviewApp
 from minedocscan.review.store import Review, field_id_of, save
 from minedocscan.tools.synth import SLOTS, T_LOG, expected_xcheck, generate
-
-TABLES = ("doc_field", "prod_haul", "insp_daily", "xcheck_haul", "eq_assignment_obs", "doc_document", "doc_page_meta")
-
-
-def _dump(con, table):
-    cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})") if r[1] != "created_at"]
-    return sorted(tuple(r) for r in con.execute(f"SELECT {', '.join(cols)} FROM {table}"))
+from test_review_store import TABLES, _dump  # noqa: E402
 
 
 @pytest.fixture(scope="module")

@@ -60,7 +60,7 @@
   'use strict';
   const qs = new URLSearchParams(location.search);
   const state = { items: [], idx: 0, done: 0, total: 0, showMachine: false, entered: {}, templates: {}, busy: false, renderedAt: 0, candidates: {},
-                  queue: '', checked: {} };
+                  queue: '', checked: {}, formats: {} };
   // ✓ 행(checks)의 답: 키 → 서버의 answer, 보이는 이름 (tasks/0004 4.9 — 두 칸의 판정으로 저장된다)
   const CHECK = { '1': ['yes', '유'], '2': ['no', '무'], 'Enter': ['none', '표시 없음'], '?': ['unknown', '모름'] };
   const $ = (id) => document.getElementById(id);
@@ -68,13 +68,15 @@
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
   function msg(t, ok) { const m = $('msg'); m.textContent = t || ''; m.style.color = ok ? 'var(--ok)' : 'var(--bad)'; }
 
-  async function loadQueue() {
+  async function loadQueue(keep) {
+    const at = state.idx;
     const r = await fetch('/api/queue?' + qs.toString());
     const q = await r.json();
     if (!r.ok) { msg(q.error || '대기열을 받지 못했습니다'); return; }
     state.items = q.items; state.done = q.done; state.total = q.total; state.showMachine = q.show_machine;
     state.templates = q.templates || {};
     state.candidates = q.candidates || {};
+    state.formats = q.formats || {};    // 형식마다 받는 글자·안내 (forms/formats.py — 서버가 다시 검사한다)
     state.queue = q.name;
     $('qname').textContent = '대기열 ' + q.name + ' · ' + (q.site || '');
     // 숫자 정답을 만드는 대기열: 이 규칙이 인식기의 "빈 칸"과 "거절"의 정답이 된다 (tasks/0003 4.3, docs/DATA.md)
@@ -86,11 +88,17 @@
           ? '<b>행의 유·무 두 칸을 보고 표시된 칸을 고릅니다.</b> <kbd>1</kbd> 유 &nbsp; <kbd>2</kbd> 무 &nbsp; <kbd>Enter</kbd> 표시 없음 &nbsp; '
             + '<kbd>?</kbd> 모름 — 누르면 바로 저장하고 다음 행. ✓ 가 경계선을 넘었으면 <b>시작한 칸</b>이 표시한 칸입니다. '
             + '<kbd>PgUp</kbd>/<kbd>PgDn</kbd> 이전/다음 (전에 고른 답이 보이고, 다시 고르면 고쳐 저장합니다)'
-          : ''));
+          : (q.name === 'readings'
+            ? '<b>쪽의 계기 칸 셋(시작·종료·총)을 한 번에 입력합니다.</b> ' + esc((state.formats.reading || {}).hint || '')
+              + ' — 빈 칸은 비워 두고 <kbd>Enter</kbd>. 앞날의 값은 보여 주지 않습니다 (따라 적지 않게)'
+            : (q.name === 'usage-check'
+              ? '<b>검산이 어긋난 칸들입니다.</b> 종이와 다르게 입력된 칸만 고치고 <kbd>Enter</kbd> — 맞게 되면 빠집니다. '
+                + '아무것도 고치지 않고 <kbd>Enter</kbd> 하면 "종이에 적힌 대로"를 확인한 것입니다 (어긋남은 그대로 남습니다 — 값을 맞춰 넣지 않습니다)'
+              : ''))));
     $('ghint').style.display = q.name === 'checks' ? 'none' : '';
     $('reviewer').textContent = q.reviewer;
     document.title = 'minedocscan 검수 — ' + q.name;
-    state.idx = 0;
+    state.idx = keep ? Math.min(at, state.items.length) : 0;
     if (q.name === 'checks') {          // 검수한 행도 목록에 있다 (다시 열면 전에 고른 답) — 아직 안 한 첫 행부터
       const k = state.items.findIndex(it => !it.answer);
       state.idx = k < 0 ? state.items.length : k;
@@ -115,37 +123,50 @@
     const v = $('view');
     if (!state.items.length || state.idx >= state.items.length) {
       v.innerHTML = '<div class="done">이 대기열은 끝났습니다. <button id="reload">다시 받기</button></div>';
-      $('reload').onclick = loadQueue;
+      $('reload').onclick = () => loadQueue(false);
       return;
     }
     const item = state.items[state.idx];
     if (state.queue === 'checks') { renderCheck(v, item); return; }
+    const fixing = state.queue === 'usage-check';
     let h = '<div class="item"><h1>' + esc(titleOf(item)) + '</h1>';
+    if (fixing && item.check) {        // 검산: 비교한 두 값과 차이 (계기 값은 시간, 소계는 개수)
+      const k = item.check;
+      h += '<div class="prev">비교: <b>' + esc(k.value_a) + '</b> 대 <b>' + esc(k.value_b == null ? '-' : k.value_b) + '</b>'
+        + (k.diff == null ? '' : ' · 차이 <b>' + esc(k.diff) + '</b>')
+        + (k.days_between ? ' · 사이에 낀 날 ' + esc(k.days_between) + '일' : '') + '</div>';
+    }
     item.cells.forEach((c, i) => {
       const prev = state.entered[c.field_id] || c.review;
-      const isNum = c.kind === 'handwritten_number';
+      const fmt = fmtOf(c);
+      const isNum = fmt === 'integer';
       h += '<div class="cell">';
       h += '<div class="label">' + esc(c.label) + '</div>';
       h += '<div class="row"><img data-crop="/crop?field_id=' + encodeURIComponent(c.field_id) + '&kind=row" alt="행"></div>';
       h += '<div class="big"><img data-crop="/crop?field_id=' + encodeURIComponent(c.field_id) + '&kind=cell&scale=3" alt="셀">';
-      if (c.review && !state.entered[c.field_id] && item.cells.length > 1) {
+      if (!fixing && c.review && !state.entered[c.field_id] && item.cells.length > 1) {
         // 묶음에서 이미 검수된 셀은 참고용으로만 보여 준다 (다시 입력하지 않는다)
         h += '<div class="ro">' + esc(shown(c.review)) + ' <span class="label">(검수됨 · ' + esc(c.review.reviewer) + ')</span></div>';
       } else {
         let init = '';
-        if (prev) init = prev.verdict === 'value' ? prev.value : (prev.verdict === 'illegible' ? '?' : '');
+        if (fixing && c.current) init = c.current.has_value ? (c.current.value == null ? '' : c.current.value) : '';
+        else if (prev) init = prev.verdict === 'value' ? prev.value : (prev.verdict === 'illegible' ? '?' : '');
         else if (state.showMachine && c.machine && c.machine.value_raw) init = c.machine.value_raw;
         const cands = c.meta_key ? (state.candidates[c.meta_key] || []) : null;
         const listId = cands ? ('dl-' + i) : '';
-        h += '<input class="val ' + (isNum ? 'num' : 'text') + '" data-i="' + i + '" data-fid="' + esc(c.field_id) + '"'
+        h += '<input class="val ' + (isNum ? 'num' : (fmt ? 'fmt' : 'text')) + '" data-i="' + i + '" data-fid="' + esc(c.field_id) + '"'
+          + (fmt ? ' data-fmt="' + esc(fmt) + '"' : '')
           + (c.meta_key ? ' data-meta="' + esc(c.meta_key) + '"' : '') + (listId ? ' list="' + listId + '"' : '')
           + (c.human ? ' data-human="' + esc(c.human.value) + '" data-machine="' + esc(c.machine ? c.machine.value_raw : '') + '"' : '')
-          + (isNum ? ' inputmode="numeric"' : '') + ' value="' + esc(init) + '" autocomplete="off" spellcheck="false">';
+          + (isNum ? ' inputmode="numeric"' : (fmt === 'decimal' ? ' inputmode="decimal"' : '')) + ' data-init="' + esc(init) + '"'
+          + ' value="' + esc(init) + '" autocomplete="off" spellcheck="false">';
+        if (fmt && !isNum && state.formats[fmt]) h += '<span class="label">' + esc(state.formats[fmt].hint) + '</span>';
         if (cands) {   // 후보 목록: 행렬 머리글 + 지금까지의 라벨·검수. 외부 자원 없이 <datalist> 로
           h += '<datalist id="' + listId + '">' + cands.map(v => '<option value="' + esc(v) + '"></option>').join('') + '</datalist>';
           h += '<span class="label">Alt+1–9 로 고를 수 있습니다: ' + cands.slice(0, 9).map((v, k) => (k + 1) + ' ' + esc(v)).join(' · ') + '</span>';
         }
-        if (prev) h += '<span class="prev">입력했던 값: <b>' + esc(shown(prev)) + '</b></span>';
+        if (fixing && c.current) h += '<span class="prev">지금 값: <b>' + esc(c.current.has_value ? c.current.value : '(빈 칸)') + '</b></span>';
+        else if (prev) h += '<span class="prev">입력했던 값: <b>' + esc(shown(prev)) + '</b></span>';
         if (c.human && c.machine) {   // meta-check: 두 값을 같이 보여 준다 (어느 쪽이 맞는지는 종이를 보고 정한다)
           const conf = (c.machine.confidence == null) ? '' : ' · 신뢰도 ' + Number(c.machine.confidence).toFixed(2);
           h += '<span class="prev">라벨·검수(' + esc(c.human.source) + '): <b>' + esc(c.human.value) + '</b> · 기계: <b>'
@@ -161,7 +182,11 @@
     const inputs = v.querySelectorAll('input.val');
     inputs.forEach(inp => {
       inp.addEventListener('keydown', onKey);
-      if (inp.classList.contains('num')) inp.addEventListener('input', () => { inp.value = inp.value.replace(/[^0-9?]/g, ''); });
+      if (inp.classList.contains('num')) inp.addEventListener('input', () => { inp.value = ascii(inp.value).replace(/[^0-9?]/g, ''); });
+      if (inp.classList.contains('fmt')) {   // 형식마다 받는 글자만 (서버가 형식을 다시 검사한다 — 맞지 않으면 아무것도 저장하지 않는다)
+        const f = state.formats[inp.dataset.fmt];
+        if (f) { const bad = new RegExp('[^' + f.chars + '?]', 'g'); inp.addEventListener('input', () => { inp.value = ascii(inp.value).replace(bad, ''); }); }
+      }
     });
     if (inputs.length) { inputs[0].focus(); inputs[0].select(); }
     state.renderedAt = performance.now();
@@ -233,9 +258,15 @@
     return { verdict: 'value', value: raw };
   }
 
-  async function post(fid, p) {
-    const r = await fetch('/api/review', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ field_id: fid, verdict: p.verdict, value: p.value, note: '' }) });
+  // 한글 입력기의 전각 숫자·기호(８：００, ～)를 ASCII 로 바꾼 뒤에 거른다 — 그냥 거르면 지워져 빈 칸으로 저장된다 (forms/formats.py 와 같은 대응)
+  function ascii(v) { return v.normalize('NFKC').replace(/[〜–—]/g, m => (m === '〜' ? '~' : '-')); }
+
+  function fmtOf(c) { return c.format || (c.kind === 'handwritten_number' ? 'integer' : null); }
+
+  async function postAll(plans) {
+    // 한 항목의 칸을 한 번에: 서버가 전부 검사한 뒤에야 저장한다 — 한 칸이라도 형식에 맞지 않으면 아무것도 남지 않는다
+    const r = await fetch('/api/reviews', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: plans.map(([fid, p, note]) => ({ field_id: fid, verdict: p.verdict, value: p.value, note: note || '' })) }) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || ('저장 실패 ' + r.status));
     return j;
@@ -256,17 +287,30 @@
         const cands = state.candidates[inp.dataset.meta] || [];
         if (cands.length && !cands.includes(p.value) && !confirm('목록에 없는 값입니다: ' + p.value + ' — 그대로 저장합니까?')) { inp.focus(); inp.select(); return; }
       }
-      plans.push([inp.dataset.fid, p]);
+      plans.push([inp.dataset.fid, p, state.queue === 'usage-check' ? item.item_id : '', inp.value.trim() !== (inp.dataset.init || '')]);
+    }
+    if (state.queue === 'usage-check') {
+      // 고친 칸만 저장한다. 아무것도 고치지 않았으면 전부 — "종이에 적힌 대로"의 확인 (검수 note 에 검산 id)
+      const changed = plans.filter(x => x[3]);
+      const send = changed.length ? changed : plans;
+      state.busy = true;
+      try {
+        await postAll(send);
+        await loadQueue(true);                 // 검산이 다시 계산되었다 — 맞게 된 항목은 빠지고 진행 수는 서버가 센다
+        msg(changed.length ? '고친 칸을 저장했습니다 — 검산을 다시 계산했습니다' : '적힌 대로 확인했습니다', true);
+      } catch (e) { msg(e.message); }
+      finally { state.busy = false; }
+      return;
     }
     state.busy = true;
     try {
-      for (const [fid, p] of plans) {
-        await post(fid, p);
+      const res = await postAll(plans);
+      plans.forEach(([fid, p], k) => {
         if (!state.entered[fid]) {               // 처음 저장한 항목만 진행 수에 더한다
           if (item.cells.length === 1) state.done += 1;
         }
-        state.entered[fid] = { verdict: p.verdict, value: p.value };
-      }
+        state.entered[fid] = { verdict: p.verdict, value: res.saved[k].value };   // 정규화한 표기 (8-17 → 08:00~17:00)
+      });
       if (item.cells.length > 1 && item.cells.every(c => state.entered[c.field_id] || c.review) && !item._counted) { item._counted = true; state.done += 1; }
       next();
       msg('저장했습니다', true);
@@ -311,7 +355,7 @@
     }
   });
 
-  loadQueue();
+  loadQueue(false);
 })();
 </script>
 </body>
