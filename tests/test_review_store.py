@@ -134,7 +134,7 @@ from minedocscan.review.store import save  # noqa: E402
 from minedocscan.tools.synth import T_INSP, expected_xcheck  # noqa: E402
 
 TABLES = ("doc_field", "prod_haul", "insp_daily", "xcheck_haul", "eq_assignment_obs", "doc_document", "doc_page_meta",
-          "eq_usage_daily", "prod_tally")
+          "eq_usage_daily", "prod_tally", "xcheck_usage")
 
 
 def _dump(con, table):

@@ -363,7 +363,14 @@ def _hms(sec: float) -> str:
 
 
 def cmd_report(a) -> int:
-    from .report import build_report, by_month, format_by_month, format_report, xcheck_by_date
+    from .report import (
+        build_report,
+        by_month,
+        format_by_month,
+        format_report,
+        xcheck_by_date,
+        xcheck_usage_by_date,
+    )
     from .store.db import open_db
 
     s = _settings(a)
@@ -372,8 +379,12 @@ def cmd_report(a) -> int:
         rows = by_month(con, s.classify_min_margin)
         _emit(a, {"by_month": rows}, format_by_month(rows))
         return 0
-    rep, by_date = build_report(con), xcheck_by_date(con)
-    _emit(a, {"report": rep, "xcheck_by_date": by_date}, format_report(rep, by_date))
+    rep, by_date, usage_by_date = build_report(con), xcheck_by_date(con), xcheck_usage_by_date(con)
+    text = format_report(rep, by_date)
+    if usage_by_date:
+        text += "\n날짜별 가동 일보 검산:\n" + "\n".join(
+            f"  {d['work_date']}: " + ", ".join(f"{k} {v}" for k, v in d.items() if k != "work_date") for d in usage_by_date)
+    _emit(a, {"report": rep, "xcheck_by_date": by_date, "xcheck_usage_by_date": usage_by_date}, text)
     return 0
 
 

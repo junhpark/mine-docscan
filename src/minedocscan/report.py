@@ -68,7 +68,25 @@ def build_report(con: sqlite3.Connection) -> dict:
         "log_slots": log_slots(con),
         # 장비 가동 일보 (tasks/0005): 양식별 쪽 수, 계기 칸의 종류별, 가동 시간의 근거별, 장비 ID 가 정해진 쪽, 작업량 칸
         "usage": usage_summary(con),
+        # 가동 일보의 검산 (tasks/0005 4.4): 종류(total | subtotal | continuity)별 결과별 수
+        "xcheck_usage": xcheck_usage_summary(con),
     }
+
+
+def xcheck_usage_summary(con: sqlite3.Connection) -> dict:
+    out: dict = {}
+    for k, res, n in con.execute("SELECT check_kind, result, COUNT(*) FROM xcheck_usage GROUP BY 1, 2 ORDER BY 1, 2"):
+        out.setdefault(k, {})[res] = n
+    return out
+
+
+def xcheck_usage_by_date(con: sqlite3.Connection) -> list[dict]:
+    """날짜별 가동 일보 검산: {work_date, "<종류>.<결과>": 수 …}. 계기가 어디서 이어지지 않는가를 날마다."""
+    out: dict[str, dict] = {}
+    for d, k, res, n in con.execute("SELECT work_date, check_kind, result, COUNT(*) FROM xcheck_usage GROUP BY 1, 2, 3 "
+                                    "ORDER BY 1, 2, 3"):
+        out.setdefault(d or "unknown", {"work_date": d or "unknown"})[f"{k}.{res}"] = n
+    return list(out.values())
 
 
 def usage_summary(con: sqlite3.Connection) -> dict:
@@ -281,6 +299,9 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
             f"  가동 시간의 근거: {kv(u['hours_basis'])}; 장비명 있음 {u['with_equipment']}, 장비 ID 정해짐 {u['with_equipment_id']}",
             f"  작업량 칸 {u['tally']['cells']}개 — 값 있음 {u['tally']['filled']}, 수 {u['tally']['with_count']}",
         ]
+        names = {"total": "총 = 종료 − 시작", "subtotal": "소계 = 합", "continuity": "계기의 연속성"}
+        for k, d in (rep.get("xcheck_usage") or {}).items():
+            lines.append(f"  검산 {names.get(k, k)}: {kv(d)}")
     if by_date:
         lines.append("날짜별 교차검증:")
         for d in by_date:

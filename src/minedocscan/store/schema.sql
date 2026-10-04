@@ -258,3 +258,28 @@ CREATE TABLE IF NOT EXISTS prod_tally (
   review_status   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_prod_tally_page ON prod_tally(page_id);
+
+-- 가동 일보의 검산 (tasks/0005 4.4): 한 행 = 검산 하나. 보여 주기만 한다 — eq_usage_daily 의 값을 고치지 않는다 (ADR 0006).
+--   total       쪽 안: 총 = 종료 − 시작. value_a = 총 칸, value_b = 종료 − 시작                         match | mismatch
+--   subtotal    쪽 안: 소계 = 합 (item = 소계 칸의 field_id). value_a = 소계, value_b = 합              match | mismatch | unknown
+--   continuity  날짜 사이: value_a = 이 기록의 시작, value_b = 같은 장비의 바로 앞 기록의 종료 (other_page_id 의 쪽)
+--               match | gap(시작이 더 크다) | overlap(더 작다) | first(앞 기록 없음) | unknown(장비를 모른다, 검수 대기)
+-- diff = value_a − value_b. 허용 오차 0.05 시간 (소수 한 자리의 반올림). days_between: 두 기록 사이에 낀 날 수.
+CREATE TABLE IF NOT EXISTS xcheck_usage (
+  page_id        TEXT NOT NULL,
+  check_kind     TEXT NOT NULL,              -- total | subtotal | continuity
+  item           TEXT NOT NULL,              -- subtotal: 소계 칸의 field_id. 그 밖은 '' (PK 에 NULL 을 두지 않는다)
+  work_date      TEXT,
+  equipment_ref  TEXT,                       -- continuity: 같은 장비의 기준 — "id:<장비 ID>" 또는 "name:<적힌 이름>". 모르면 NULL
+  value_a        REAL,
+  value_b        REAL,
+  diff           REAL,
+  days_between   INTEGER,
+  result         TEXT NOT NULL,
+  other_page_id  TEXT,                       -- continuity: 비교 상대(앞 기록)의 쪽
+  field_a        TEXT,                       -- 비교한 칸 (출처): 이 쪽의 칸
+  field_b        TEXT,                       -- 상대 칸 (앞 기록의 종료 칸, 이 쪽의 종료 칸)
+  PRIMARY KEY (page_id, check_kind, item)
+);
+CREATE INDEX IF NOT EXISTS ix_xcheck_usage_ref ON xcheck_usage(equipment_ref);
+CREATE INDEX IF NOT EXISTS ix_xcheck_usage_result ON xcheck_usage(result);

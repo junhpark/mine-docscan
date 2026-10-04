@@ -20,6 +20,7 @@ from minedocscan.review.queue import build_queue
 from minedocscan.review.store import Review, load, save
 from minedocscan.tools import synth_meta
 from minedocscan.tools.synth_usage import T_LOADER, T_USAGE
+from minedocscan.validate.usage import TOLERANCE, check_usage
 from test_review_store import TABLES, _dump
 
 USAGE_TABLES = TABLES
@@ -70,8 +71,38 @@ def reviewed(usage_run, usage_synth, tmp_path_factory) -> dict:
                     "WHERE f.field_id = ?", (cell["tally_id"],)).fetchone()
     save(con, site, settings, Review(cell["tally_id"], "value",
                                      answers[(f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"])], "jp"))
-    return {"con": con, "settings": settings, "site": site, "n": n + 4, "root": root, "page_id": pid, "states": states,
-            "tally_id": cell["tally_id"]}
+    n += 4
+    states["checks"] = _checks(con)                     # 정답대로 검수한 뒤의 검산
+
+    # 단계 4: 계기 값 하나를 고치면 → 그 쪽(총)과 그 다음 기록(연속성)의 검산이 바로 바뀐다. 마무리의 전체 계산과 같다
+    usage = sorted((t for t in usage_synth.truth["usage"] if t["equipment"] == "LOADER"), key=lambda t: t["date"])
+    first, second = usage[0], usage[1]
+    end_fid = _by_source(con)[first["source"]]["end_field_id"]
+    save(con, site, settings, Review(end_fid, "value", f"{first['meter_end'] + 0.5:.1f}", "jp"))
+    states["meter_fixed"] = (_checks(con), _by_source(con), _full_recompute_equal(con, site))
+    save(con, site, settings, Review(end_fid, "value", f"{first['meter_end']:.1f}", "jp"))
+    # 장비명을 바꾸면 → 예전 장비와 새 장비 양쪽의 연속성이 다시 계산된다
+    drill = min((t for t in usage_synth.truth["usage"] if t["equipment"] == "DRILL"), key=lambda t: t["date"])
+    eq_fid = f"{_by_source(con)[drill['source']]['page_id']}:fields:equipment:-1"
+    save(con, site, settings, Review(eq_fid, "value", "TRUCK", "jp"))
+    states["renamed"] = (_checks(con), _full_recompute_equal(con, site))
+    save(con, site, settings, Review(eq_fid, "value", "DRILL", "jp"))
+    n += 4
+    return {"con": con, "settings": settings, "site": site, "n": n, "root": root, "page_id": pid, "states": states,
+            "tally_id": cell["tally_id"], "loader": (first["source"], second["source"]), "drill": drill["source"]}
+
+
+def _checks(con) -> dict:
+    return {(r["source"], r["check_kind"], r["item"]): dict(r) for r in con.execute(
+        "SELECT x.*, d.source_name || '#' || p.page_no AS source FROM xcheck_usage x JOIN doc_page p ON x.page_id = p.page_id "
+        "JOIN doc_document d ON p.document_id = d.document_id")}
+
+
+def _full_recompute_equal(con, site) -> bool:
+    """검수 직후의 검산(그 쪽·그 장비만 다시 계산한 것) == 마무리 단계의 전체 계산."""
+    other = clone_db(con)
+    check_usage(other, site)
+    return _dump(other, "xcheck_usage") == _dump(con, "xcheck_usage")
 
 
 # ── 기계만으로: 읽는 칸과 읽지 않는 칸 ──────────────────────────────────────
@@ -285,3 +316,82 @@ def test_synthetic_meta_crops_know_the_equipment_key(tmp_path):
 def test_default_synth_has_no_usage(synth, site):
     assert "usage" not in synth.truth
     assert not {T_USAGE, T_LOADER} & set(site.templates) and site.equipment_aliases == {}
+
+
+# ── 단계 4: 검산 ───────────────────────────────────────────────────────────
+def test_checks_follow_the_scenarios(reviewed, usage_synth):
+    """합성 정답대로 검수하면: 이어지는 장비는 match, 빠진 날은 gap 과 낀 날 수, 잘못 적은 시작은 overlap 과 차이, 첫 기록은 first,
+    시각을 적은 장비는 연속성 검산이 없다. 총 ≠ 종료 − 시작 인 쪽은 그 검산만 mismatch, 소계가 틀린 행은 mismatch."""
+    checks, truth = reviewed["states"]["checks"], usage_synth.truth["usage"]
+    by = {t["source"]: t for t in truth}
+    cont = {k[0]: v for k, v in checks.items() if k[1] == "continuity"}
+    meters = sorted((t for t in truth if t["meter_start"] is not None), key=lambda t: (t["date"], t["meter_start"]))
+    seen: dict[str, dict] = {}
+    for t in meters:                                        # 같은 장비의 앞 기록 — 시험 안에서 따로 센다
+        c, prev = cont[t["source"]], seen.get(t["equipment"])
+        if prev is None:
+            assert c["result"] == "first" and c["value_b"] is None, t["source"]
+        else:
+            d = round(t["meter_start"] - prev["meter_end"], 4)
+            want = "match" if abs(d) <= TOLERANCE else ("gap" if d > 0 else "overlap")
+            assert (c["result"], c["value_b"], c["other_page_id"]) == (want, prev["meter_end"], _pid(reviewed, prev)), t["source"]
+            assert c["diff"] == pytest.approx(d)
+        seen[t["equipment"]] = t
+    results = {s: c["result"] for s, c in cont.items()}
+    wrong = [t for t in truth if "TRUCK_wrong_start" in t["scenarios"]]
+    assert wrong and all(results[t["source"]] == "overlap" and cont[t["source"]]["diff"] == pytest.approx(-2.0) for t in wrong)
+    after = [t for t in truth if "DRILL_after_missing_day" in t["scenarios"]]
+    assert after and all(results[t["source"]] == "gap" and cont[t["source"]]["days_between"] == 1 for t in after)
+    two = [t for t in truth if "TRUCK_two_sheets" in t["scenarios"]]
+    assert sorted(results[t["source"]] for t in two) == ["first", "match"]                # 시작 값이 작은 장이 먼저
+    assert not any(by[s]["reading_kind"] in ("clock", "empty") for s in cont)              # 시각·빈 계기: 연속성 검산 없음
+    totals = {k[0]: v for k, v in checks.items() if k[1] == "total"}
+    assert {s: v["result"] for s, v in totals.items()} == {
+        t["source"]: "mismatch" if "TRUCK_total_mismatch" in t["scenarios"] else "match"
+        for t in truth if t["meter_total"] is not None}
+    sub = [v for k, v in checks.items() if k[1] == "subtotal"]
+    bad = [t for t in truth if "LOADER_subtotal_mismatch" in t["scenarios"]]
+    assert sorted(v["source"] for v in sub if v["result"] == "mismatch") == [t["source"] for t in bad]
+    assert all(v["result"] == "match" for v in sub if v["source"] not in {t["source"] for t in bad})
+    # 검산은 값을 고치지 않는다: 어긋난 쪽의 값은 적힌 그대로 (가동 시간은 4.3 의 순서대로 — 종료 − 시작)
+    rows = _by_source(reviewed["con"])
+    for t in wrong + [t for t in truth if "TRUCK_total_mismatch" in t["scenarios"]]:
+        u = rows[t["source"]]
+        assert (u["meter_start"], u["meter_end"], u["hours_basis"]) == (t["meter_start"], t["meter_end"], "meter")
+        assert u["hours"] == pytest.approx(t["meter_end"] - t["meter_start"])
+    assert build_report(reviewed["con"])["xcheck_usage"]["continuity"]["gap"] == len(after)
+
+
+def _pid(reviewed, t) -> str:
+    return _by_source(reviewed["con"])[t["source"]]["page_id"]
+
+
+def test_fixing_one_meter_value_moves_this_and_the_next_check(reviewed):
+    checks, rows, same = reviewed["states"]["meter_fixed"]
+    first, second = reviewed["loader"]
+    assert same                                                   # 그 장비만 다시 계산한 것 == 전체 계산
+    assert checks[(first, "total", "")]["result"] == "mismatch"   # 그 쪽: 총 = 종료 − 시작 이 어긋났다
+    c = checks[(second, "continuity", "")]                        # 그 다음 기록: 시작 < 고친 종료
+    assert c["result"] == "overlap" and c["diff"] == pytest.approx(-0.5)
+    before = reviewed["states"]["checks"]
+    assert before[(second, "continuity", "")]["result"] == "match" and before[(first, "total", "")]["result"] == "match"
+    assert rows[second]["meter_start"] == _by_source(reviewed["con"])[second]["meter_start"]   # 다음 쪽의 값은 그대로
+
+
+def test_renaming_moves_the_record_between_both_equipments(reviewed, usage_synth):
+    """DRILL 의 첫 기록을 TRUCK 이라고 고치면: DRILL 에 남은 기록은 앞 기록이 없어지고(first), 옮겨 간 기록은 TRUCK 의 사슬에서
+    그날 시작 값이 가장 작은 기록이 되어 TRUCK 의 주간 장이 그것과 비교된다 (계기 값이 크게 달라 gap)."""
+    checks, same = reviewed["states"]["renamed"]
+    before = reviewed["states"]["checks"]
+    assert same
+    truth = usage_synth.truth["usage"]
+    drill_after = next(t["source"] for t in truth if "DRILL_after_missing_day" in t["scenarios"])
+    assert before[(drill_after, "continuity", "")]["result"] == "gap"
+    assert checks[(drill_after, "continuity", "")]["result"] == "first"              # 예전 장비
+    moved = checks[(reviewed["drill"], "continuity", "")]
+    assert moved["equipment_ref"] == f"id:{equipment_id('EQ-0501')}" and moved["result"] == "first"
+    day0 = min(t["date"] for t in truth)
+    truck_day = min((t for t in truth if t["equipment"] == "TRUCK" and t["date"] == day0), key=lambda t: t["meter_start"])
+    assert before[(truck_day["source"], "continuity", "")]["result"] == "first"
+    c = checks[(truck_day["source"], "continuity", "")]                             # 새 장비
+    assert c["result"] == "gap" and c["other_page_id"] == _pid(reviewed, next(t for t in truth if t["source"] == reviewed["drill"]))

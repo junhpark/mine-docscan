@@ -24,6 +24,8 @@
   계기 칸에 계기 값과 시각이 섞였으면 NULL (tasks/0005 9절).
 
 업무 행은 검수를 적용한 최종 필드 행에서 만든다 (usage_rows — load 와 on_review 가 같은 함수). 장비 ID 는 사이트 팩의 대응표로만.
+검산(validate/usage.py → xcheck_usage): 쪽 안(총 = 종료 − 시작, 소계 = 합)은 적재할 때, 계기의 연속성은 마무리에서 전체를.
+검수를 저장하면 그 쪽의 검산과 그 장비(이름이 바뀌었으면 예전·새 장비)의 연속성만 다시 계산한다.
 """
 from __future__ import annotations
 
@@ -35,6 +37,7 @@ from ..forms.template import Template, meter_slot
 from ..imaging.blobs import assign_blobs
 from ..pagemeta import page_meta_of
 from ..store.db import upsert
+from ..validate.usage import check_usage, equipment_ref, recompute_continuity, write_page_checks
 from .base import (
     FormHandler,
     PageContext,
@@ -113,9 +116,14 @@ class UsageHandler(FormHandler):
         page = {"page_id": ctx.page_id, "work_date": ctx.work_date, "template_name": tpl.name}
         usage, tally = usage_rows(ctx.site, tpl, page, ctx.meta, rows)
         write_page(ctx.con, usage, tally)
+        write_page_checks(ctx.con, tpl, ctx.page_id)          # 쪽 안의 검산. 날짜 사이(연속성)는 마무리에서 전체를
         return {"fields": len(rows), "usage_pages": 1, "tally_cells": len(tally),
                 "tally_filled": sum(t["has_value"] for t in tally), "notes": n_notes,
                 "meter_pending": int(usage["reading_kind"] == "pending")}
+
+    def finalize(self, con, site, settings) -> dict:
+        """모든 쪽을 적재한 뒤: 검산 전부 (쪽 안 + 계기의 연속성)."""
+        return {"xcheck_usage": check_usage(con, site)}
 
     def machine_final(self, row: dict) -> str | None:
         """기계만으로 정했을 때의 value_final (load 와 같은 규칙): 필드·글자 칸은 기계 값 그대로, 정수 칸은 정수로, 소수·시각 칸은 NULL."""
@@ -133,8 +141,14 @@ class UsageHandler(FormHandler):
                         "ON f.page_id = p.page_id WHERE f.field_id = ?", (field_id,)).fetchone()
         if f is None or f["template_name"] not in site.templates:
             return
-        rebuild_page(con, site, site.templates[f["template_name"]],
-                     {"page_id": f["page_id"], "work_date": f["work_date"], "template_name": f["template_name"]})
+        tpl = site.templates[f["template_name"]]
+        before = rebuild_page(con, site, tpl, {"page_id": f["page_id"], "work_date": f["work_date"],
+                                               "template_name": f["template_name"]})
+        after = con.execute("SELECT * FROM eq_usage_daily WHERE page_id = ?", (f["page_id"],)).fetchone()
+        write_page_checks(con, tpl, f["page_id"])
+        # 그 장비의 연속성 — 장비명이 바뀌었으면 예전 장비와 새 장비 둘 다 (앞뒤 기록의 검산이 바로 바뀐다)
+        refs = {equipment_ref(after)} | ({equipment_ref(before)} if before is not None else set())
+        recompute_continuity(con, refs, {f["page_id"]})
 
 
 def rebuild_page(con, site, tpl: Template, page: dict) -> dict | None:
