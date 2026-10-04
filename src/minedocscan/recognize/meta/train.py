@@ -39,6 +39,7 @@ from ...imaging.cropspec import CropSpec
 from ...review.export import inside_git_tree
 from ...tools import synth_meta
 from ..digits import data
+from ..digits.model import staging_dir
 from ..digits.train import TrainArgs, TrainError, _log, check_torch, code_version
 from . import calib
 from .choose import UNLISTED_RATIO, choose, readable, truth_prob
@@ -65,6 +66,9 @@ class MetaTrainArgs(TrainArgs):
     # 배치 중 실제 크롭의 몫. 실제 크롭은 값이 몇 가지뿐이고(차가 열한 대) 같은 차는 같은 사람이 쓴다 — 아무 번호나 쓴 합성 크롭이
     # 대부분이어야 숫자를 읽는다 (글씨체로 번호를 외우지 않게)
     real_share: float = 0.2
+    # --extra-digits: 숫자 칸(운반 횟수)의 export-crops 폴더. 그 칸의 숫자열을 CTC 학습에만 더한다 (후보·기준·읽기에는 쓰지 않는다).
+    # 실제 일보에서 합성 숫자는 0.99 로 읽는데 실제 차량번호는 20쪽 중 7쪽만 맞았다 — 실제 숫자를 본 적이 거의 없어서 (tasks/0005 단계 1)
+    extra_digits: str | None = None
 
     def synthetic_n(self, n_real: int) -> int:
         return int(self.synthetic) if self.synthetic is not None else 3000
@@ -184,12 +188,32 @@ def train_meta(crops_dir, out_dir, args: MetaTrainArgs, *, split_salt: str = "sy
         args.steps = DEFAULT_STEPS[reader]
     if reader == "choice" and len(args.keys) != 1:
         raise TrainError("분류기(choice)는 키 하나만 (--meta-key operator)")
+    if args.extra_digits and reader != "digits":
+        raise TrainError("--extra-digits 는 숫자 모델(digits — 차량번호·월·일)에만 씁니다")
     check_torch()
     if reader == "digits":
         return _train_digits(crops, out_dir, args, split_salt, progress)
     from ..choice.train import train_choice
 
     return train_choice(crops, out_dir, args, split_salt=split_salt, progress=progress)
+
+
+def read_extra_digits(crops_dir, spec: CropSpec) -> tuple[list[data.Sample], dict]:
+    """--extra-digits: 0003 의 export-crops(숫자 칸) 폴더 → 숫자열이 정답인 칸 (빈 칸·읽을 수 없음은 뺀다)과 카드에 적을 요약.
+    test 줄이 있으면 거절(학습에 쓰지 않는다 — ADR 0009), 크롭 규격이 메타 필드 크롭과 다르면 거절(같은 모델의 입력이 하나여야 한다)."""
+    try:
+        extra = data.read_crops(crops_dir)                    # 표의 칸만 (메타 필드 줄은 뺀다), test 가 있으면 CropsError
+    except data.CropsError as e:
+        raise TrainError(f"--extra-digits: {e}") from e
+    if extra.spec is not None and extra.spec != spec:
+        pad = "" if spec.pad is None else f" --pad {spec.pad}"
+        raise TrainError(f"--extra-digits 의 크롭 규격({extra.spec.describe()})이 메타 필드 크롭의 규격({spec.describe()})과 "
+                         f"다릅니다 — 같은 규격으로 다시 내보내세요: review export-crops DIR --kind handwritten_number "
+                         f"--split train --res {spec.res} --scale {spec.scale:g}{pad}")
+    digits = [s for s in extra.samples if s.text.isdigit()]
+    return digits, {"cells": len(digits), "dates": len({s.work_date for s in digits if s.work_date}),
+                    "skipped": len(extra.samples) - len(digits), "spec": spec.describe(),
+                    "use": "CTC 학습에만 (후보 목록·온도·기준·읽기에는 쓰지 않는다)"}
 
 
 def plan_reads(samples: list[data.Sample], args: MetaTrainArgs, split_salt: str) -> tuple[list[tuple[list, list]], dict]:
@@ -256,6 +280,9 @@ def _train_digits(crops: data.Crops, out_dir: Path, args: MetaTrainArgs, split_s
     spec = crops.spec or META_SPEC
     geoms = {k: _geometry(samples, k) for k in args.keys}
     plans, method = plan_reads(samples, args, split_salt)
+    extra, extra_info = read_extra_digits(args.extra_digits, spec) if args.extra_digits else ([], None)
+    if extra_info:
+        progress(f"--extra-digits: 숫자 칸 {extra_info['cells']}개 ({extra_info['dates']}일)를 학습에 더한다 — 읽기·기준에는 쓰지 않는다")
     progress(f"메타 필드 {', '.join(args.keys)} (숫자 모델): 셀 {len(samples)} (날짜 {len({s.work_date for s in samples})}) · "
              f"규격 {spec.describe()} · 기준을 정하는 읽기: {method['method']} ({len(plans) if args.cv else 0}번 학습 + 최종 1번)")
     n_syn = args.synthetic_n(len(samples))
@@ -276,9 +303,7 @@ def _train_digits(crops: data.Crops, out_dir: Path, args: MetaTrainArgs, split_s
 
     torch = require_torch()
     _check_export(torch, args.channels)
-    tmp = out_dir.parent / f".{out_dir.name}.tmp-{os.getpid()}"
-    shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True)
+    tmp = staging_dir(out_dir)                              # 끊긴 학습의 주인 없는 임시 폴더도 여기서 치운다
     try:
         reads: list[calib.Read] = []
         def read_with(onnx, tr, va, f) -> list[calib.Read]:
@@ -291,15 +316,16 @@ def _train_digits(crops: data.Crops, out_dir: Path, args: MetaTrainArgs, split_s
             for f, (tr, va) in enumerate(plans):
                 progress(f"읽기 {f + 1}/{len(plans)}: 학습 {len(tr)}셀 → {len(va)}셀을 읽는다")
                 rng = np.random.default_rng([args.seed, 99, f])
-                net, *_rest = fit(torch, args, rng, _ink([small(s) for s in tr]), [s.text for s in tr], syn_ink, syn_y,
-                                  sval_xn, sval_y, progress=lambda *_a: None)
+                net, *_rest = fit(torch, args, rng, _ink([small(s) for s in tr + extra]), [s.text for s in tr + extra],
+                                  syn_ink, syn_y, sval_xn, sval_y, progress=lambda *_a: None)
                 export_onnx(torch, net, tmp / f"read{f}.onnx")
                 reads += read_with(OnnxNet(tmp / f"read{f}.onnx"), tr, va, f)
         # 최종 모델: train 날짜 전부 (--cv) 또는 검증 날짜를 뺀 것 (검증 날짜 방식 — 0003 과 같다: 그 모델로 검증 날짜를 읽는다)
         final_tr = samples if args.cv or not plans else plans[0][0]
         rng = np.random.default_rng([args.seed, 99])
-        net, best, log_lines, train_seconds, n_params = fit(torch, args, rng, _ink([small(s) for s in final_tr]),
-                                                            [s.text for s in final_tr], syn_ink, syn_y, sval_xn, sval_y, progress)
+        net, best, log_lines, train_seconds, n_params = fit(torch, args, rng, _ink([small(s) for s in final_tr + extra]),
+                                                            [s.text for s in final_tr + extra], syn_ink, syn_y, sval_xn, sval_y,
+                                                            progress)
         exporter = export_onnx(torch, net, tmp / "model.onnx")
         onnx = OnnxNet(tmp / "model.onnx")
         if not args.cv and plans:
@@ -327,7 +353,7 @@ def _train_digits(crops: data.Crops, out_dir: Path, args: MetaTrainArgs, split_s
             "architecture": {"layers": describe_net(args.channels), "channels": list(args.channels), "params": n_params,
                              "onnx_bytes": (tmp / "model.onnx").stat().st_size, "exporter": exporter, "batch": 1},
             "train_args": {k: v for k, v in asdict(args).items() if k not in ("name", "seed", "workers", "template_values",
-                                                                              "keys")}
+                                                                              "keys", "extra_digits")}
             | {"synthetic": len(syn_x), "geometry": {k: list(g) for k, g in geoms.items()},
                "mix": (f"실제:합성 = {args.real_share:g}:{1 - args.real_share:g} (배치 기준)" if final_tr and syn_x
                        else ("합성만" if syn_x else "실제만"))},
@@ -336,6 +362,7 @@ def _train_digits(crops: data.Crops, out_dir: Path, args: MetaTrainArgs, split_s
                                "splits": sorted(crops.splits)},
                      "train": count_summary(final_tr), "all": count_summary(samples),
                      "synthetic": {"cells": len(syn_x), "val_cells": len(sval_x)},
+                     **({"extra_digits": extra_info} if extra_info else {}),
                      "val_rule": {"salt": data.val_salt(split_salt), "share": args.val_share,
                                   "rule": "sha256(salt:날짜) 앞 32비트 / 2^32 < share 이면 검증 (evaluate/split.py)"}},
             "validation": {"source": method["method"], "reads": len(reads), "score": calib.score(preds, truths,

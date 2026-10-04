@@ -173,6 +173,9 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--cv", type=int, metavar="K",
                    help="--meta-key: train 날짜를 K 묶음으로 나눠 돌려 가며 읽은 것 전체로 온도·기준을 정한다 (정답이 적을 때)")
     n.add_argument("--min-examples", type=int, default=3, help="--reader choice: 종류가 되려면 필요한 예의 수 (기본 3)")
+    n.add_argument("--extra-digits", metavar="DIR",
+                   help="--meta-key (숫자 모델): 숫자 칸(운반 횟수)을 export-crops 로 내보낸 폴더 — 그 칸의 숫자를 학습에만 더한다 "
+                        "(후보·기준에는 쓰지 않는다. test 줄이 있거나 규격이 다르면 거절)")
     n.add_argument("--synthetic-meta", type=int, metavar="DAYS",
                    help="--meta-key, --crops 없이: 합성 메타 필드 DAYS 일치로 학습 (시험용 모델, tools/synth_meta)")
     nsub.add_parser("list", parents=[common], help="사이트 팩의 모델과 카드 요약")
@@ -668,8 +671,8 @@ def cmd_recognizer(a) -> int:
 
         if not _MODEL_NAME.match(a.name):
             raise SystemExit(f"--name 은 영문·숫자·.-_ (64자 이하): {a.name}")
-        if a.cv or a.reader:
-            raise SystemExit("--cv, --reader 는 메타 필드 모델(--meta-key)에서만 씁니다")
+        if a.cv or a.reader or a.extra_digits:
+            raise SystemExit("--cv, --reader, --extra-digits 는 메타 필드 모델(--meta-key)에서만 씁니다")
         site = _need_site(s) if (s.site or not a.out) else None
         out = Path(a.out) if a.out else models_dir(site.root) / a.name
         args = TrainArgs(name=a.name, steps=a.steps or 2500, synthetic=a.synthetic, seed=a.seed, val_share=a.val_share,
@@ -719,7 +722,7 @@ def _recognizer_train_meta(a, s: Settings) -> int:
     args = MetaTrainArgs(name=a.name, steps=a.steps,                     # None: 읽는 법마다 기본값 (train_meta)
                          synthetic=a.synthetic, seed=a.seed, val_share=a.val_share, min_val_auto=a.min_val_auto,
                          target_auto_error=0.02 if a.target_auto_error is None else a.target_auto_error, keys=keys,
-                         reader=a.reader, cv=a.cv, min_examples=a.min_examples,
+                         reader=a.reader, cv=a.cv, min_examples=a.min_examples, extra_digits=a.extra_digits,
                          template_values={k: template_values(site, k) for k in keys} if site else {})
     try:
         with tempfile.TemporaryDirectory(prefix="minedocscan-synth-meta-") as tmp:

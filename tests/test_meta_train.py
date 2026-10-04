@@ -206,3 +206,26 @@ def test_regenerated_meta_fixtures_meet_stage5(tmp_path):
     print(f"다시 만든 메타 모델: 자동 적재 {len(auto)}/{len(rows)}, 틀린 것 {wrong}; 자리 같은 쪽 {same}/{len(want)}")
     assert len(auto) >= 0.85 * len(rows) and wrong <= 0.02 * len(auto)
     assert same >= 0.95 * len(want)
+
+
+# ── tasks/0005 단계 1 ─────────────────────────────────────────────────────────
+def test_extra_digits_go_into_training_and_an_orphan_staging_folder_does_not_block_the_name(tmp_path):
+    """끊긴 학습의 임시 폴더가 있어도 같은 이름으로 다시 학습이 된다 (그 폴더는 치운다). --extra-digits 의 숫자 칸 수가 카드에 적히고,
+    후보 목록(classes.json)·읽기 수에는 들어가지 않는다."""
+    from test_recognizer_tidy import dead_pid, write_digit_crops
+
+    synth_meta.write_meta_crops(tmp_path / "c", ("vehicle_no",), 6, seed=0)
+    n = write_digit_crops(tmp_path / "digits", 60, seed=1)
+    models = tmp_path / "models"
+    orphan = models / f".veh.tmp-{dead_pid()}"
+    orphan.mkdir(parents=True)
+    card = train_meta(tmp_path / "c", models / "veh", MetaTrainArgs(name="veh", keys=("vehicle_no",), steps=30, eval_every=30,
+                                                                     synthetic=200, extra_digits=str(tmp_path / "digits")))
+    assert not orphan.exists() and (models / "veh" / "model.onnx").is_file()
+    assert card["data"]["extra_digits"]["cells"] == n and "extra_digits" not in card["train_args"]
+    plain = train_meta(tmp_path / "c", models / "veh2", MetaTrainArgs(name="veh2", keys=("vehicle_no",), steps=30, eval_every=30,
+                                                                       synthetic=200))
+    assert "extra_digits" not in plain["data"]
+    assert card["validation"]["reads"] == plain["validation"]["reads"]          # 읽기(기준의 근거)에는 들어가지 않는다
+    classes = json.loads((models / "veh" / "classes.json").read_text(encoding="utf-8"))["values"]["vehicle_no"]
+    assert set(classes) == set(synth_meta.VEHICLES)                              # 후보 목록에도 (운반 횟수는 차량번호가 아니다)

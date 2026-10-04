@@ -50,6 +50,7 @@ from .model import (
     read_answers,
     resize_input,
     sha256_file,
+    staging_dir,
 )
 
 INSTALL_HINT = ('학습에는 torch 와 onnx 가 필요합니다: pip install -e ".[train]" '
@@ -314,9 +315,7 @@ def train(crops_dir: str | Path | None, out_dir: str | Path, args: TrainArgs, *,
                                                         progress)
 
     # 4. ONNX 로 내보내고 OpenCV 로 다시 읽어 검증
-    tmp = out_dir.parent / f".{out_dir.name}.tmp-{os.getpid()}"
-    shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True)
+    tmp = staging_dir(out_dir)                              # 끊긴 학습의 주인 없는 임시 폴더도 여기서 치운다
     try:
         exporter = export_onnx(torch, net, tmp / "model.onnx")
         onnx_net = OnnxNet(tmp / "model.onnx")

@@ -28,6 +28,7 @@ import numpy as np
 
 from ...tools import synth_meta
 from ..digits import data
+from ..digits.model import staging_dir
 from ..digits.train import TrainError, _log, augment_batch, code_version, libraries, require_torch
 from ..meta import calib
 from ..meta.train import META_SPEC, MetaTrainArgs, _geometry, count_summary, plan_reads
@@ -183,9 +184,7 @@ def train_choice(crops: data.Crops, out_dir: Path, args: MetaTrainArgs, *, split
         ys = np.array([idx.get(s.text, OTHER) for s in tr] + [OTHER] * len(neg), np.int64)
         return xs, ys
 
-    tmp = out_dir.parent / f".{out_dir.name}.tmp-{os.getpid()}"
-    shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True)
+    tmp = staging_dir(out_dir)                              # 끊긴 학습의 주인 없는 임시 폴더도 여기서 치운다
     try:
         reads: list[calib.Read] = []
 
