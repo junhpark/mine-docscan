@@ -14,13 +14,15 @@ from minedocscan.evaluate.meta import _changed_pages
 from minedocscan.forms.equipment import equipment_id
 from minedocscan.forms.sitepack import SitePack
 from minedocscan.forms.template import Template, TemplateError
+from minedocscan.handlers.usage import UsageHandler
 from minedocscan.pipeline import Pipeline
+from minedocscan.recognize.builtin import OracleRecognizer
 from minedocscan.report import build_report
 from minedocscan.review.queue import build_queue
 from minedocscan.review.server import ReviewApp
 from minedocscan.review.store import Review, load, save
 from minedocscan.tools import synth_meta, synth_usage
-from minedocscan.tools.synth_usage import T_LOADER, T_USAGE
+from minedocscan.tools.synth_usage import PRINTED_ITEMS, T_LOADER, T_USAGE
 from minedocscan.validate.usage import TOLERANCE, check_usage
 from test_review_store import TABLES, _dump
 
@@ -60,7 +62,7 @@ def reviewed(usage_run, usage_synth, tmp_path_factory) -> dict:
         states[name] = (dict(con.execute("SELECT * FROM eq_usage_daily WHERE page_id = ?", (pid,)).fetchone()),
                         {(r["equipment"], r["equipment_id"]) for r in con.execute("SELECT * FROM prod_tally WHERE page_id = ?",
                                                                                    (pid,))})
-    cell = con.execute("SELECT * FROM prod_tally WHERE page_id = ? AND has_value = 1 ORDER BY tally_id", (pid,)).fetchone()
+    cell = con.execute("SELECT * FROM prod_tally WHERE page_id = ? AND count IS NOT NULL ORDER BY tally_id", (pid,)).fetchone()
     save(con, site, settings, Review(cell["tally_id"], "value", str(cell["count"] + 10), "jp"))
     states["tally"] = dict(con.execute("SELECT * FROM prod_tally WHERE tally_id = ?", (cell["tally_id"],)).fetchone())
     # 계기 칸은 readings 대기열로: 쪽마다 세 칸을 한 번에 (검수 화면이 보내는 것과 같은 /api/reviews)
@@ -76,6 +78,7 @@ def reviewed(usage_run, usage_synth, tmp_path_factory) -> dict:
         n += len(items)
     states["readings"].append(app.queue_json({}))
     n += review_usage(con, site, settings, answers, regions=("shifts", "fields"))
+    n += _review_pending_tally(con, site, settings, answers)          # 잉크는 있는데 답이 없는 작업량 칸 (메모, 칸 안의 인쇄)
     f = con.execute("SELECT f.*, d.source_name || '#' || p.page_no AS source, p.template_name FROM doc_field f "
                     "JOIN doc_page p ON f.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
                     "WHERE f.field_id = ?", (cell["tally_id"],)).fetchone()
@@ -133,6 +136,18 @@ def reviewed(usage_run, usage_synth, tmp_path_factory) -> dict:
             "tally_id": cell["tally_id"], "loader": (first["source"], second["source"]), "drill": drill["source"]}
 
 
+def _review_pending_tally(con, site, settings, answers) -> int:
+    """검수 대기인 작업량 칸을 정답대로 (pending 대기열에서 사람이 하는 일)."""
+    key = {f["field_id"]: (f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"] or "")
+           for f in usage_fields(con)}
+    pend = [r["field_id"] for r in con.execute("SELECT field_id FROM doc_field WHERE region = 'tally' AND review_status = 'pending' "
+                                               "ORDER BY field_id")]
+    for fid in pend:
+        text = answers.get(key[fid])
+        save(con, site, settings, Review(fid, "value", text, "jp") if text else Review(fid, "empty", reviewer="jp"))
+    return len(pend)
+
+
 def _checks(con) -> dict:
     return {(r["source"], r["check_kind"], r["item"]): dict(r) for r in con.execute(
         "SELECT x.*, d.source_name || '#' || p.page_no AS source FROM xcheck_usage x JOIN doc_page p ON x.page_id = p.page_id "
@@ -164,17 +179,54 @@ def test_machine_run_reads_integers_and_leaves_meters_to_people(usage_run, usage
         # 잉크로 정하는 것은 검수 없이도 맞다: 작업 표의 글씨 있는 줄, 서명
         assert (u["activity_rows"], u["signed"]) == (t["activity_rows"], t["signed"]), t["source"]
         assert u["equipment"] is None and u["equipment_id"] is None      # 라벨도 모델도 없다 → page-fields 대기열
-        # 작업량 표의 정수 칸은 숫자 인식 경로를 그대로 탄다 (oracle: 읽은 값 = 정답). 표 위의 메모는 값이 아니다
-        got = {k: (r["count_raw"], r["count"]) for k, r in tally.get(t["source"], {}).items() if r["has_value_raw"]}
+        # 작업량 표의 정수 칸은 숫자 인식 경로를 그대로 탄다 (oracle: 읽은 값 = 정답). 잉크는 있는데 답이 없는 칸(표 위의 메모,
+        # 칸 안의 인쇄만)은 값 없이 검수 대기 — 빈 칸으로 자동 적재하지 않는다
+        cells = tally.get(t["source"], {})
+        got = {k: (r["count_raw"], r["count"]) for k, r in cells.items() if r["count_raw"] is not None}
         assert got == {(c["row_key"], c["column"]): (c["count"], c["count"]) for c in t["tally"]}, t["source"]
+        assert all(r["review_status"] == "pending" for r in cells.values() if r["has_value_raw"] and r["count_raw"] is None)
     meter = con.execute("SELECT * FROM doc_field WHERE region IN ('meter', 'shifts') AND has_value_raw = 1").fetchall()
     assert meter and all(f["value_raw"] is None and f["backend"] == "ink" and f["status_raw"] == "pending" for f in meter)
     assert {f["format"] for f in meter} == {"reading", "time_range"}
     assert all(r["is_subtotal"] == (k[1] == "sub") for cells in tally.values() for k, r in cells.items())
     memo = next(t for t in truth["usage"] if "LOADER_memo_on_tally" in t["scenarios"])
     under = {k: r for k, r in tally[memo["source"]].items() if k[0] == "ROCK|YARD"}           # 메모가 지나간 행 (값이 없다)
-    assert under and not any(r["has_value_raw"] for r in under.values())
+    assert under and all(r["count"] is None for r in under.values())                          # 메모는 값이 되지 않는다
+    assert any(r["has_value_raw"] and r["review_status"] == "pending" for r in under.values())  # 잉크 비율로는 "있음" → 사람이
     assert usage_run["pipe"].summary["handlers"]["usage"]["notes"] >= 1
+
+
+def _printed_cells(con) -> dict:
+    """칸 안에 라벨·단위가 인쇄된 작업량 칸 (PRINTED_ITEMS 의 행): (출처, 행 키, 열) → doc_field 행."""
+    return {(r["source"], r["row_key"], r["field_name"]): dict(r) for r in con.execute(
+        "SELECT f.*, d.source_name || '#' || p.page_no AS source FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id "
+        "JOIN doc_document d ON p.document_id = d.document_id WHERE f.region = 'tally' AND f.kind LIKE 'handwritten%'")
+        if r["row_key"].split("|")[0] in PRINTED_ITEMS}
+
+
+def test_digits_between_printed_labels_are_never_auto_emptied(usage_run, usage_synth, tmp_path, monkeypatch):
+    """작업량 칸 안에 라벨·단위가 인쇄된 행 (실제 로우더 작업일보의 "하단: _ 대"): 그 사이에 쓴 두 자리 숫자는 양옆의 인쇄와,
+    인쇄는 이웃 칸의 인쇄와 이어져 덩어리 배정에서는 줄 전체가 메모가 된다. 잉크 비율로도 보므로(둘 중 하나라도 "있음")
+    그 칸은 빈 칸으로 자동 적재되지 않고 인식기에 간다. 인쇄만 있는 칸은 답이 없으면 검수 대기."""
+    truth = {(t["source"], c["row_key"], c["column"]): c["count"] for t in usage_synth.truth["usage"] for c in t["tally"]}
+    written = {k: v for k, v in truth.items() if k[1].split("|")[0] in PRINTED_ITEMS}
+    two = {k: v for k, v in written.items() if v >= 10}
+    assert len(two) >= 6                                                     # 합성 묶음에 두 자리 값이 있다
+    cells = _printed_cells(usage_run["pipe"].con)
+    assert cells and set(written) <= set(cells)
+    assert not [k for k, f in cells.items() if not f["has_value_raw"] and f["status_raw"] == "auto"]   # 빈 칸 자동 적재 없음
+    assert {k: (f["value_raw"], f["status_raw"]) for k, f in cells.items() if k in written} == \
+        {k: (str(v), "auto") for k, v in written.items()}                    # 쓴 값은 인식기가 읽는다 (oracle)
+    assert all(f["status_raw"] == "pending" and f["value_final"] is None for k, f in cells.items() if k not in written)
+
+    # 덩어리 배정만으로 보면(잉크 비율을 끄면) 두 자리 값 일부가 빈 칸으로 자동 적재된다 — 이 시험이 막는 실패가 합성 양식에 있다
+    monkeypatch.setattr(UsageHandler, "text_ink_min", float("inf"))
+    settings = replace(usage_run["settings"], work_root=tmp_path / "work", reviews=tmp_path / "reviews.jsonl")
+    pipe = Pipeline(settings, recognizer=OracleRecognizer(usage_run["answers"]))
+    pipe.run([usage_synth.scans])
+    old = _printed_cells(pipe.con)
+    lost = [k for k in two if not old[k]["has_value_raw"] and old[k]["status_raw"] == "auto"]
+    assert lost, "덩어리 배정만으로도 다 잡힌다 — 합성 양식이 실제의 실패를 재현하지 못한다"
 
 
 # ── 검수로 정답을 넣으면 ───────────────────────────────────────────────────

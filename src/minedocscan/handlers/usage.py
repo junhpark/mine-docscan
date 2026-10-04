@@ -79,16 +79,20 @@ class UsageHandler(FormHandler):
         def inked(o) -> bool:
             return area.get(id(o), 0) >= MIN_BLOB_AREA if id(o) in blob_ids else o.ink >= self.text_ink_min
 
-        def unread_inked(o) -> bool:
-            """읽지 않는 칸(소수·시각): 두 잉크 판정 중 하나라도 "있음"이면 검수 대기. 긴 계기 값(1234.5)이 이웃 칸의 값과 한 덩어리로
-            묶이면 덩어리 배정은 메모로 보고 두 칸 다 비었다고 한다 — 그 칸을 빈 칸으로 자동 적재하면 값이 조용히 사라진다.
-            이 칸은 어차피 사람이 보므로 잘못 "있음"이면 검수 한 번이 들 뿐이다. 새 임계값은 없다 (MIN_BLOB_AREA, text_ink_min)."""
+        def any_ink(o) -> bool:
+            """두 잉크 판정(덩어리 배정, 잉크 비율) 중 하나라도 "있음"이면 "있음" — 빈 칸으로 자동 적재하지 않는다.
+            덩어리 배정은 이웃 칸의 글씨와 한 덩어리로 묶인 글씨를 메모로 보고 그 칸들을 다 비었다고 한다:
+              · 긴 계기 값(1234.5)이 이웃 칸의 값과 붙을 때
+              · 작업량 칸 안에 인쇄된 라벨·단위("하단: _ 대")가 있을 때 — 쓴 숫자가 양옆의 인쇄와, 인쇄가 이웃 칸의 인쇄와 이어져
+                줄 전체가 메모가 된다 (실제 로우더 작업일보에서 숫자를 쓴 칸 48개를 하나도 잡지 못했다)
+            그 칸을 빈 칸으로 자동 적재하면 값이 조용히 사라진다. 잘못 "있음"이면 인식기가 빈 칸으로 답하거나 검수 한 번이 든다.
+            새 임계값은 없다 (MIN_BLOB_AREA, text_ink_min)."""
             return inked(o) or o.ink >= self.text_ink_min
 
-        # 표의 정수 칸: 숫자 인식 경로 (잉크가 있는 칸만 인식기에)
+        # 표의 정수 칸(작업량): 숫자 인식 경로. 두 잉크 판정 중 하나라도 "있음"인 칸을 인식기에 — 운반 칸(haul)은 덩어리 배정만
         ints = [o for o in ctx.obs if o.cell.region != "fields" and o.cell.kind.startswith("handwritten")
                 and o.cell.fmt == "integer"]
-        to_read = [o for o in ints if inked(o)]
+        to_read = [o for o in ints if any_ink(o)]
         recs = dict(zip([id(o) for o in to_read], recognize(ctx, to_read), strict=True))
         int_ids = {id(o) for o in ints}
 
@@ -99,7 +103,7 @@ class UsageHandler(FormHandler):
                 rows.append(number_row(ctx, o, recs.get(id(o))))
             elif c.kind.startswith("handwritten") and c.region != "fields" and not readable(c):
                 # 소수·시각 칸: 읽지 않는다. 잉크가 있으면 검수 대기, 없으면 빈 칸 (value_final NULL — machine_final 과 같다)
-                rows.append(unread_row(ctx, o) if unread_inked(o) else number_row(ctx, o, None))
+                rows.append(unread_row(ctx, o) if any_ink(o) else number_row(ctx, o, None))
             elif c.kind == "printed":
                 v = c.row_meta.get(c.name)
                 rows.append(field_row(ctx, o, has_value=None, value_raw=None, value_final=None if v is None else str(v),

@@ -15,6 +15,8 @@
   · 총 ≠ 종료 − 시작 인 쪽, 소계 ≠ 합 인 행
   · 대응표([equipment.aliases])에 없는 장비명
   · 작업량 표 위에 여러 칸에 걸쳐 쓴 메모 (값이 아니다), 대부분 빈 작업량 표
+  · 작업량 칸 안에 인쇄된 라벨·단위 (실제의 "하단: _ 대") — 그 구분(PRINTED_ITEMS)의 값은 두 자리. 쓴 숫자가 양옆의 인쇄와,
+    인쇄가 이웃 칸의 인쇄와 이어져 덩어리 배정에서는 줄 전체가 메모가 된다
   · 시각 범위를 8-12 처럼 줄여 쓴 칸 (정답은 08:00~12:00)
 
 글씨는 전부 자체 획(tools/handfont.py — 숫자·소수점·콜론·물결표·붙임표·영문 소문자)으로 그린다 — OpenCV 판과 무관하다.
@@ -55,6 +57,7 @@ USAGE_TOML = """
 """
 ITEMS = ("ORE", "WASTE", "FILL", "SAND", "ROCK", "MUCK", "MISC")
 PLACES = ("LOW", "YARD")
+PRINTED_ITEMS = (ITEMS[0],)                      # 작업량 칸 안에 라벨(장소의 머리글자와 ":")과 단위("ld")가 인쇄된 구분
 SHIFTS = (("am", "AM"), ("pm", "PM"), ("ot", "OT"))
 # 작업 표의 낱말·숫자: 세로획만 있는 글씨("1", "drill")는 괘선 지우기(imaging/cells.remove_rules)가 거의 다 지워 잉크 비율로는 빈 칸이
 # 된다 (CLAUDE.md "실데이터에서 배운 것"). 판정 규칙은 그대로 두고, 합성 정답이 그 한계를 시험하지 않게 그런 글씨는 쓰지 않는다
@@ -164,6 +167,10 @@ def build_loader_log() -> tuple[np.ndarray, dict]:
         _label(img, item, xs[0] + 14, ys[i + 1] + sub_h + 10, 0.7)
         for k, place in enumerate(PLACES):
             _label(img, place, xs[1] + 14, ys[i + 1] + sub_h * k + 30, 0.55)
+            if item in PRINTED_ITEMS:                         # 칸 안의 인쇄: "L: __ ld" — 숫자는 그 사이에 쓴다
+                for x0, x1 in zip(xs[2:-1], xs[3:], strict=True):
+                    _label(img, f"{place[0]}:", x0 + 8, ys[i + 1] + sub_h * k + 30, 0.55)
+                    _label(img, "ld", x1 - 30, ys[i + 1] + sub_h * k + 30, 0.55)
             rows.append({"row": 2 * i + k, "key": f"{item}|{place}", "item": item, "place": place})
 
     sxs = [1200, 1400, 1840]
@@ -343,7 +350,7 @@ def _set_tally(p: PagePlan, rng, d: int) -> None:
         for place in PLACES:
             if rng.random() < 0.4:
                 continue
-            a = int(rng.integers(1, 15))
+            a = int(rng.integers(1, 15)) + (10 if item in PRINTED_ITEMS else 0)   # 인쇄 사이의 값은 두 자리 (난수 흐름은 같다)
             ot = int(rng.integers(1, 6)) if rng.random() < 0.4 else None
             rk = f"{item}|{place}"
             p.tally[(rk, "a")] = a
