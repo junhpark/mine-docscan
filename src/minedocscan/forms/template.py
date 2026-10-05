@@ -219,19 +219,7 @@ class Template:
 
     def cells(self, inset: int = 4) -> list[Cell]:
         """모든 표의 데이터 셀. inset 은 괘선을 피하기 위한 안쪽 여백(px)."""
-        out = []
-        for reg in self.regions:
-            ys, xs = cell_lines(reg)
-            hr = reg.get("header_rows", 0)
-            for r in reg["rows"]:
-                gi = r["row"] + hr
-                y0, y1 = ys[gi], ys[gi + 1]
-                for c in reg["columns"]:
-                    x0, x1 = xs[c["idx"]], xs[c["idx"] + 1]
-                    meta = {k: v for k, v in c.items() if k not in ("idx", "name", "kind")}
-                    out.append(Cell(reg["name"], r["row"], c["idx"], c["name"], c["kind"],
-                                    (x0 + inset, y0 + inset, x1 - inset, y1 - inset), row_key(r), meta, r))
-        return out
+        return [c for reg in self.regions for c in region_cells(reg, inset)]
 
     def field_cells(self) -> list[Cell]:
         return [Cell("fields", -1, -1, f["name"], f["kind"], tuple(f["bbox"]),
@@ -258,6 +246,22 @@ class Template:
     def review_meta_fields(self) -> dict[str, str]:
         """검수값이 쪽의 메타가 되는 자유 필드 — meta_fields 에서 날짜의 부분(읽기 전용)을 뺀 것."""
         return {n: k for n, k in self.meta_fields().items() if k not in DATE_PARTS}
+
+
+def region_cells(reg: dict, inset: int = 4) -> list[Cell]:
+    """표 하나의 데이터 셀 (Template.cells 의 한 표 몫). 행·열이 괘선 범위를 벗어나면 IndexError 등 — template check 가 표마다 잡는다."""
+    out = []
+    ys, xs = cell_lines(reg)
+    hr = reg.get("header_rows", 0)
+    for r in reg["rows"]:
+        gi = r["row"] + hr
+        y0, y1 = ys[gi], ys[gi + 1]
+        for c in reg["columns"]:
+            x0, x1 = xs[c["idx"]], xs[c["idx"] + 1]
+            meta = {k: v for k, v in c.items() if k not in ("idx", "name", "kind")}
+            out.append(Cell(reg["name"], r["row"], c["idx"], c["name"], c["kind"],
+                            (x0 + inset, y0 + inset, x1 - inset, y1 - inset), row_key(r), meta, r))
+    return out
 
 
 def cell_lines(reg: dict) -> tuple[list[int], list[int]]:

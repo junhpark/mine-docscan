@@ -108,6 +108,31 @@ def usage_summary(con: sqlite3.Connection) -> dict:
     }
 
 
+def stale_equipment_ids(con: sqlite3.Connection, site) -> dict:
+    """[equipment.aliases] 를 고친 뒤 다시 돌리지 않은 행: eq_usage_daily·prod_tally 에서 equipment_id 가 지금 대응표로 정한 값
+    (site.equipment_id_of(equipment))과 다른 행의 수, 그 행이 있는 쪽·문서의 수. 수만 (이름·장비 키 없이).
+    build_report 에 넣지 않는다 — 사이트 팩에 따라 달라지는 수라 regress 의 기준과 비교하지 않는다."""
+    out = {"eq_usage_daily": 0, "prod_tally": 0}
+    pages: set[str] = set()
+    for table, key in (("eq_usage_daily", "page_id"), ("prod_tally", "tally_id")):
+        for page_id, equipment, eid in con.execute(f"SELECT page_id, equipment, equipment_id FROM {table} ORDER BY {key}"):
+            if eid != site.equipment_id_of(equipment):         # None 끼리는 같다
+                out[table] += 1
+                pages.add(page_id)
+    out["pages"] = len(pages)
+    out["documents"] = len({d for p, d in con.execute("SELECT page_id, document_id FROM doc_page") if p in pages})
+    return out
+
+
+def format_stale_equipment_ids(st: dict) -> str:
+    """한 줄 (없으면 빈 문자열)."""
+    if not (st["eq_usage_daily"] or st["prod_tally"]):
+        return ""
+    return (f"장비 ID 가 지금의 대응표([equipment.aliases])와 다른 행: 가동 기록 {st['eq_usage_daily']}행, 작업량 {st['prod_tally']}행 "
+            f"(쪽 {st['pages']}, 문서 {st['documents']}건) — 대응표를 고친 뒤 다시 돌리지 않았습니다. "
+            "run --fresh 또는 그 문서를 다시 돌리세요")
+
+
 def page_meta_summary(con: sqlite3.Connection) -> dict:
     """키마다: 쪽 수, 출처별(review | label | filename | machine | none), 대조 결과별, 기계의 상태별 (읽지 않았으면 빠진다)."""
     out: dict = {}

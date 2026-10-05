@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import tomllib
@@ -106,6 +107,14 @@ class SitePack:
             return None
         key = self.equipment_aliases.get(str(name).strip())
         return None if key is None else equipment_id(key)
+
+    @property
+    def equipment_aliases_sha(self) -> str:
+        """대응표의 해시: sha256(정렬한 (이름, 장비 키) 쌍의 JSON) 의 앞 16자. `info` 가 이름 대신 낸다 — 대응표를 고쳤는지만 보인다.
+        DB 에 남겨 비교하지 않는다: 장비 ID 는 쪽을 적재할 때만 정해지므로 해시가 같아도 ID 가 낡았을 수 있다
+        (낡은 행은 `report` 가 센다 — report.stale_equipment_ids)."""
+        canon = json.dumps(sorted(self.equipment_aliases.items()), ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
 
     def known_values(self, key: str) -> list[str]:
         """사이트 팩이 아는 그 키의 값: 템플릿에 인쇄된 값(행렬 머리글의 header_<키> — 나온 만큼) + 장비명이면 대응표의 이름.

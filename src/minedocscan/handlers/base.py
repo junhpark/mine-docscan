@@ -213,7 +213,7 @@ class FormHandler:
 
 def readable(cell) -> bool:
     """인식기에 보내는 칸인가: 형식이 없거나(글자) integer 인 칸만. 소수·시각·계기 칸은 지금의 숫자 모델이 읽지 못한다 —
-    보내지 않고, 잉크가 있으면 검수 대기다 (tasks/0005 4.1. 소수·시각을 읽는 것은 0006)."""
+    보내지 않고, 잉크가 있으면 검수 대기다 (tasks/0005 4.1. 소수·시각을 읽는 것은 미룸 — tasks/0006 1절)."""
     return cell.fmt in (None, "integer")
 
 

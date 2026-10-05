@@ -16,7 +16,7 @@
   · 그 밖의 칸(작업 표, 필드)은 잉크 비율 (FormHandler 의 text_ink_min 그대로). 새 임계값을 만들지 않는다
 값:
   · 정수 칸(작업량)은 지금의 숫자 인식 경로(by_kind, 자동 적재 표)를 그대로 탄다 — handlers/base.number_row
-  · 소수·시각 칸은 읽지 않는다 (0006). 잉크가 있으면 검수 대기 — 계기 칸은 `review serve --queue readings`
+  · 소수·시각 칸은 읽지 않는다 (미룸 — tasks/0006 1절). 잉크가 있으면 검수 대기 — 계기 칸은 `review serve --queue readings`
 
 가동 시간(hours)은 적힌 값에서 계산하고, 무엇으로 계산했는지를 hours_basis 에 남긴다 (4.3):
   meter(종료 − 시작) > total(총 칸) > clock(계기 칸에 적은 시각의 종료 − 시작) > shifts(근무 시각 범위의 합) > NULL.

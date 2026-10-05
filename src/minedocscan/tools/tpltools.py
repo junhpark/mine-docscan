@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 import yaml
 
-from ..forms.template import CELL_KINDS, Template, TemplateError, cell_lines
+from ..forms.template import CELL_KINDS, Template, TemplateError, cell_lines, region_cells
 
 # 칸 종류마다의 색 (BGR)
 COLORS = {"handwritten_number": (200, 80, 0), "handwritten_text": (40, 150, 40), "checkmark": (0, 140, 255),
@@ -62,10 +62,10 @@ def check_template(tdir: str | Path) -> list[str]:
         b = f.get("bbox")
         if not (isinstance(b, list | tuple) and len(b) == 4 and all(isinstance(v, int) for v in b)):
             out.append(f"{tpl.name}/fields/{f.get('name')}: bbox 는 정수 네 개 [x0, y0, x1, y1]")
-    try:                                                     # 칸을 만들 수 없으면(괘선 범위 밖의 행·열 …) 기하 검사는 하지 않는다
-        cells = _boxes(tpl)
-    except (KeyError, IndexError, TypeError, ValueError):
-        return out
+    cells, skipped = _boxes(tpl)
+    if skipped:                                              # 칸을 만들 수 없는 표(괘선 범위 밖의 행·열 …)는 기하 검사에서 빠진다
+        out.append(f"{', '.join(f'{tpl.name}/{n}' for n in skipped)}: 칸을 만들 수 없어(행·열이 괘선 범위 밖이거나 "
+                   f"표 정의가 빠짐 — 위의 오류) 기하 검사(겹침·쪽 밖·좁은 칸)를 건너뛰었습니다 (표 {len(skipped)}개)")
     size = _page_size(tpl, out)
     for name, (x0, y0, x1, y1) in cells:
         if x1 - x0 < 4 or y1 - y0 < 4:
@@ -92,11 +92,20 @@ def _page_size(tpl: Template, out: list[str]) -> tuple[int, int] | None:
     return w, h
 
 
-def _boxes(tpl: Template) -> list[tuple[str, tuple[int, int, int, int]]]:
-    """(이름, bbox) — 표의 칸은 "<표>/<열>/행 <번호>", 필드는 "fields/<이름>"."""
-    out = [(f"{c.region}/{c.name}/행 {c.row}", c.bbox) for c in tpl.cells()]
-    out += [(f"fields/{c.name}", c.bbox) for c in tpl.field_cells()]
-    return out
+def _boxes(tpl: Template) -> tuple[list[tuple[str, tuple[int, int, int, int]]], list[str]]:
+    """((이름, bbox) 목록, 칸을 만들 수 없는 표의 이름) — 표의 칸은 "<표>/<열>/행 <번호>", 필드는 "fields/<이름>".
+    칸을 만들 수 없는 표는 통째로 빠지고 나머지 표·필드는 검사한다. bbox 가 정수 네 개가 아닌 필드는 이미 오류로 알렸으므로 뺀다."""
+    out, skipped = [], []
+    for reg in tpl.regions:
+        try:
+            out += [(f"{c.region}/{c.name}/행 {c.row}", c.bbox) for c in region_cells(reg)]
+        except (KeyError, IndexError, TypeError, ValueError):
+            skipped.append(str(reg.get("name")))
+    for f in tpl.fields:
+        b = f.get("bbox")
+        if isinstance(b, list | tuple) and len(b) == 4 and all(isinstance(v, int) for v in b):
+            out.append((f"fields/{f.get('name')}", tuple(b)))
+    return out, skipped
 
 
 # ── preview ────────────────────────────────────────────────────────────────
@@ -113,7 +122,10 @@ def preview(tdir: str | Path, out_dir: str | Path, scan: str | Path | None = Non
         raise ValueError(f"{out_dir} 은 git 작업 트리 안입니다. 미리보기에는 실제 양식(이름·차량번호)이 들어 있습니다 — "
                          "저장소 밖(WORK_ROOT)에 씁니다")
     tpl = Template(path)
-    base, aligned = tpl.reference, None
+    try:                                                     # 기준 이미지가 없거나 깨졌으면 템플릿 폴더의 오류다 — template check 가 알린다
+        base, aligned = tpl.reference, None
+    except (OSError, ValueError) as e:
+        raise TemplateError(f"기준 이미지를 읽을 수 없습니다: {tpl.spec.get('reference_image')}") from e
     if scan is not None:
         from ..imaging.align import align_to_template
         from ..imaging.io import load_pages

@@ -272,9 +272,10 @@ def cmd_info(a) -> int:
 
         n_master = len(master_keys(site.templates.values()))
         data["site"] = {"name": site.name, "templates": tpls, "labels": len(site.labels),
-                        "equipment_aliases": len(site.equipment_aliases), "equipment_master": n_master}
+                        "equipment_aliases": len(site.equipment_aliases),
+                        "equipment_aliases_sha": site.equipment_aliases_sha, "equipment_master": n_master}
         lines.append(f"사이트 팩: {site.name} — 템플릿 {len(tpls)}종, 페이지 라벨 {len(site.labels)}개, "
-                     f"장비명 대응표 {len(site.equipment_aliases)}개 (마스터 {n_master}대)")
+                     f"장비명 대응표 {len(site.equipment_aliases)}개 (해시 {site.equipment_aliases_sha}, 마스터 {n_master}대)")
         for t in tpls:
             valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}" if t["family"] else "")
             lines.append(f"  {t['name']:<24} handler={t['handler']:<11} 표 {t['regions']}개, 셀 {t['cells']}개"
@@ -387,6 +388,7 @@ def cmd_report(a) -> int:
         by_month,
         format_by_month,
         format_report,
+        format_stale_equipment_ids,
         xcheck_by_date,
         xcheck_usage_by_date,
     )
@@ -403,8 +405,31 @@ def cmd_report(a) -> int:
     if usage_by_date:
         text += "\n날짜별 가동 일보 검산:\n" + "\n".join(
             f"  {d['work_date']}: " + ", ".join(f"{k} {v}" for k, v in d.items() if k != "work_date") for d in usage_by_date)
-    _emit(a, {"report": rep, "xcheck_by_date": by_date, "xcheck_usage_by_date": usage_by_date}, text)
+    data = {"report": rep, "xcheck_by_date": by_date, "xcheck_usage_by_date": usage_by_date}
+    stale, note = _stale_equipment_ids(s, con)
+    if stale is not None:                                   # report 의 dict 밖에 둔다 — regress 가 비교하지 않는다
+        data["stale_equipment_ids"] = stale
+        line = format_stale_equipment_ids(stale)
+        text += f"\n{line}" if line else ""
+    elif note:
+        text += f"\n{note}"
+    _emit(a, data, text)
     return 0
+
+
+def _stale_equipment_ids(s: Settings, con) -> tuple[dict | None, str | None]:
+    """report: 대응표를 고친 뒤 낡은 장비 ID 의 수 (report.stale_equipment_ids). 사이트 팩이 없으면 (None, None),
+    읽을 수 없으면 (None, 한 줄 안내) — 이 검사만 건너뛴다."""
+    from .forms.sitepack import SitePack
+    from .report import stale_equipment_ids
+
+    if s.site is None or not Path(s.site).is_dir():
+        return None, None
+    try:
+        site = SitePack(s.site)
+    except Exception as e:                                  # 망가진 팩(re.error·AttributeError …)이 report 전체를 막지 않게
+        return None, f"(사이트 팩을 읽을 수 없어 장비 ID 검사를 건너뛰었습니다: {type(e).__name__})"   # 종류 이름만 (값 없이)
+    return stale_equipment_ids(con, site), None
 
 
 def cmd_pages(a) -> int:
@@ -537,14 +562,17 @@ def cmd_template(a) -> int:
               "\n".join(f"- {e}" for e in errs) + f"\n오류 {len(errs)}개" if errs else "오류 없음")
         return 1 if errs else 0
     if a.template_command == "preview":
+        from .forms.template import TemplateError
         from .tools.tpltools import preview
 
         s = _settings(a)
         out = Path(a.out) if a.out else s.work_root / "template-preview"
         try:
             r = preview(a.template_dir, out, scan=a.scan, page=a.page, dpi=s.dpi)
-        except (ValueError, OSError) as e:                     # TemplateError 는 ValueError — 오류 목록은 template check 로
+        except TemplateError as e:                             # 템플릿 오류만 — 오류 목록은 template check 로
             raise SystemExit(f"{e}\n(오류를 전부 보려면: minedocscan template check {a.template_dir})") from e
+        except (ValueError, OSError) as e:                     # 저장소 안이라 거절, 없는 쪽 … — 안내 없이 한 줄
+            raise SystemExit(str(e)) from e
         al = r["aligned"]
         _emit(a, r, f"그렸습니다: {r['out']} — 테두리 {r['boxes']}개 (칸 + 필드)"
               + ("" if al is None else f"\n정합: {'통과' if al['ok'] else '실패'}, 인라이어 {al['inliers']}, "

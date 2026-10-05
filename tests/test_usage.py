@@ -371,6 +371,147 @@ def test_equipment_aliases_must_point_into_the_master(usage_synth, tmp_path):
         assert "GHOST" not in str(e.value) and "EQ-9999" not in str(e.value)         # 이름·장비 키를 찍지 않는다
 
 
+def test_equipment_alias_hash_is_canonical(usage_synth, tmp_path):
+    """info 의 대응표 해시: sha256(정렬한 (이름, 장비 키) 쌍의 JSON, 구분자 "," ":")의 앞 16자. 항목의 순서·주석에는 그대로,
+    한 이름을 다른 장비 키로 바꾸면 달라진다 (이름만·개수만 보는 해시가 아니다)."""
+    import hashlib
+
+    site = SitePack(usage_synth.site)
+    pairs = sorted(site.equipment_aliases.items())
+    canon = json.dumps(pairs, ensure_ascii=False, separators=(",", ":"))
+    assert site.equipment_aliases_sha == hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
+    toml = (usage_synth.site / "site.toml").read_text(encoding="utf-8")
+    block = toml[toml.index("[equipment.aliases]"):]
+    lines = [x for x in block.splitlines()[1:] if x.startswith('"')]
+    assert len(lines) == 4
+    d = tmp_path / "reordered"                                      # 순서를 뒤집고 주석을 더한다
+    shutil.copytree(usage_synth.site, d)
+    (d / "site.toml").write_text(toml.replace(block, "[equipment.aliases]\n# 다른 주석\n" + "\n".join(reversed(lines)) + "\n"),
+                                 encoding="utf-8")
+    assert SitePack(d).equipment_aliases_sha == site.equipment_aliases_sha
+    d2 = tmp_path / "remapped"                                      # 같은 이름, 다른 장비 키
+    shutil.copytree(usage_synth.site, d2)
+    (d2 / "site.toml").write_text(toml.replace('"LOADER" = "EQ-0301"', '"LOADER" = "EQ-0401"'), encoding="utf-8")
+    assert SitePack(d2).equipment_aliases_sha != site.equipment_aliases_sha
+
+
+def test_report_flags_equipment_ids_left_stale_by_an_alias_change(usage_synth, usage_run, reviewed, tmp_path, capsys,
+                                                                    monkeypatch):
+    """[equipment.aliases] 를 고친 뒤 (tasks/0006 단계 1): info 의 대응표 해시가 바뀌고, report 가 지금의 대응표와 장비 ID 가 다른
+    행을 한 줄로 센다 (이름·장비 키 없이). 그 문서들을 다시 돌리면 사라진다. 세는 수는 build_report 의 dict 밖이다 (regress).
+    장비명은 검수로 정해지므로(합성에는 라벨이 없다) 검수까지 한 DB(reviewed)에서 시작하고, 다시 돌릴 때도 같은 검수 파일을 쓴다."""
+    import sqlite3
+
+    from minedocscan.cli import main
+    from minedocscan.report import stale_equipment_ids
+
+    site, work = tmp_path / "site", tmp_path / "w"
+    shutil.copytree(usage_synth.site, site)
+    work.mkdir()
+    out = sqlite3.connect(work / "minedocscan.db")                 # 픽스처의 DB 를 파일로 복사 — report 가 연다
+    reviewed["con"].backup(out)
+    out.close()
+    common = ["--site", str(site), "--work-root", str(work)]
+
+    def report() -> tuple[dict, str]:
+        assert main(["report", "--json", *common]) == 0
+        js = json.loads(capsys.readouterr().out)
+        assert main(["report", *common]) == 0
+        return js, capsys.readouterr().out
+
+    def info() -> tuple[dict, str]:
+        assert main(["info", "--json", *common]) == 0
+        js = json.loads(capsys.readouterr().out)["site"]
+        assert main(["info", *common]) == 0
+        return js, capsys.readouterr().out
+
+    zero = {"eq_usage_daily": 0, "prod_tally": 0, "pages": 0, "documents": 0}
+    js, text = report()
+    assert js["stale_equipment_ids"] == zero and "stale_equipment_ids" not in js["report"]
+    assert "[equipment.aliases]" not in text
+    i0, _ = info()
+    assert i0["equipment_aliases"] == 4 and len(i0["equipment_aliases_sha"]) == 16
+    # 대응표에서 DRILL 을 뺀다 — DRILL 은 첫날·셋째 날 문서에만 있다
+    toml = (site / "site.toml").read_text(encoding="utf-8")
+    assert '"DRILL" = "EQ-0201"\n' in toml
+    (site / "site.toml").write_text(toml.replace('"DRILL" = "EQ-0201"\n', ""), encoding="utf-8")
+    i1, itext = info()
+    assert i1["equipment_aliases"] == 3 and i1["equipment_aliases_sha"] != i0["equipment_aliases_sha"]
+    assert f"해시 {i1['equipment_aliases_sha']}" in itext
+    docs = sorted(d for d, pages in usage_synth.truth["documents"].items() if any(p["equipment"] == "DRILL" for p in pages))
+    assert len(docs) == 2
+    js, text = report()
+    st = js["stale_equipment_ids"]
+    assert st == {"eq_usage_daily": 2, "prod_tally": 0, "pages": 2, "documents": 2}, st
+    lines = [x for x in text.splitlines() if "[equipment.aliases]" in x]
+    assert len(lines) == 1 and "가동 기록 2행" in lines[0] and "문서 2건" in lines[0] and "--fresh" in lines[0]
+    for name in ("DRILL", "EQ-0201", "LOADER", "EQ-0301"):          # 이름·장비 키를 찍지 않는다
+        assert name not in text and name not in itext and name not in json.dumps(js["stale_equipment_ids"])
+    # 작업량(prod_tally)도 센다: LOADER 를 다른 장비 키로 바꾼 사이트 팩 (다시 돌리지 않고 세기만)
+    site2 = tmp_path / "site2"
+    shutil.copytree(site, site2)
+    (site2 / "site.toml").write_text((site2 / "site.toml").read_text(encoding="utf-8").replace(
+        '"LOADER" = "EQ-0301"', '"LOADER" = "EQ-0401"'), encoding="utf-8")
+    con = sqlite3.connect(work / "minedocscan.db")
+    st2 = stale_equipment_ids(con, SitePack(site2))
+    con.close()
+    n_loader = len(usage_synth.truth["documents"])                  # LOADER 는 날마다 한 쪽
+    assert st2["eq_usage_daily"] == 2 + n_loader and st2["prod_tally"] > 0 and st2["documents"] == n_loader
+    # 사이트 팩을 읽을 수 없으면 이 검사만 건너뛴다 (report 는 나온다): 마스터 밖의 장비 키, 깨진 파일명 정규식, dict 가 아닌 필드
+    toml = (site / "site.toml").read_text(encoding="utf-8")
+    broken = {"ConfigError": lambda d: (d / "site.toml").write_text(toml + '"GHOST" = "EQ-9999"\n', encoding="utf-8"),
+              "error": lambda d: (d / "site.toml").write_text(toml.replace(
+                  "date_from_filename = '", "date_from_filename = '(?P<yyyy"), encoding="utf-8")}
+
+    def non_dict_field(d):
+        p = d / "templates" / T_LOADER / "template.yaml"
+        spec = yaml.safe_load(p.read_text(encoding="utf-8"))
+        spec["fields"].append("oops")
+        p.write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    broken["AttributeError"] = non_dict_field
+    for exc, breaker in broken.items():
+        bad = tmp_path / f"bad-{exc}"
+        shutil.copytree(site, bad)
+        breaker(bad)
+        args = ["--site", str(bad), "--work-root", str(work)]
+        assert main(["report", "--json", *args]) == 0
+        out = capsys.readouterr().out
+        assert "stale_equipment_ids" not in json.loads(out) and "GHOST" not in out, exc
+        assert main(["report", *args]) == 0
+        text = capsys.readouterr().out
+        notes = [x for x in text.splitlines() if "장비 ID 검사를 건너뛰었습니다" in x]
+        assert len(notes) == 1 and notes[0].endswith(f": {exc})") and "GHOST" not in text and "EQ-9999" not in text, exc
+        assert "[equipment.aliases]" not in text, exc
+    # 사이트 팩이 없으면 이 검사만 건너뛴다 (환경변수·현재 폴더의 설정 파일이 사이트 팩을 대지 않게)
+    monkeypatch.delenv("MINEDOCSCAN_SITE", raising=False)
+    monkeypatch.delenv("MINEDOCSCAN_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert main(["report", "--json", "--work-root", str(work)]) == 0
+    assert "stale_equipment_ids" not in json.loads(capsys.readouterr().out)
+    assert main(["report", "--work-root", str(work)]) == 0
+    assert "장비 ID 검사" not in (t := capsys.readouterr().out) and "[equipment.aliases]" not in t
+    con = sqlite3.connect(work / "minedocscan.db")
+    before = con.execute("SELECT COUNT(*), COUNT(equipment), COUNT(equipment_id) FROM eq_usage_daily").fetchone()
+    con.close()
+    # 그 문서들만 다시 돌리면 사라진다
+    settings = replace(reviewed["settings"], site=site, work_root=work)
+    pipe = Pipeline(settings, recognizer=OracleRecognizer(usage_run["answers"]))
+    for d in docs:
+        pipe.process_file(usage_synth.scans / f"{d}.pdf")
+    pipe.finalize()
+    pipe.con.close()
+    js, text = report()
+    assert js["stale_equipment_ids"] == zero and "[equipment.aliases]" not in text
+    # 장비 ID 를 다시 정했을 뿐 검수로 정한 장비명은 그대로다 (이름을 잃어 None == None 이 된 것이 아니다): 행 수·이름 수는 같고,
+    # 대응표에서 뺀 장비의 두 쪽만 ID 가 NULL 이 되었다
+    con = sqlite3.connect(work / "minedocscan.db")
+    after = con.execute("SELECT COUNT(*), COUNT(equipment), COUNT(equipment_id) FROM eq_usage_daily").fetchone()
+    n_drill = con.execute("SELECT COUNT(*) FROM eq_usage_daily WHERE equipment = 'DRILL' AND equipment_id IS NULL").fetchone()[0]
+    con.close()
+    assert after[:2] == before[:2] and after[2] == before[2] - 2 and n_drill == 2, (before, after, n_drill)
+
+
 # ── equipment 는 새 키일 뿐이다 ────────────────────────────────────────────
 def test_equipment_key_goes_through_page_fields_and_exports(usage_run, tmp_path):
     from minedocscan.review.export import export_meta_crops
@@ -635,7 +776,7 @@ def test_illegible_tally_cell_makes_the_subtotal_unknown():
 
 
 def test_readings_never_carry_machine_or_earlier_values(usage_run, usage_synth, tmp_path):
-    """readings 의 응답에는 기계 값도 앞날의 값도 없다 — 기계가 계기를 읽었고(0006 을 흉내 낸다) 앞날의 계기를 검수한 뒤에도."""
+    """readings 의 응답에는 기계 값도 앞날의 값도 없다 — 기계가 계기를 읽었고(소수·시각을 읽는 모델을 흉내 낸다 — 미룸, tasks/0006 1절) 앞날의 계기를 검수한 뒤에도."""
     con, site = clone_db(usage_run["pipe"].con), usage_run["pipe"].site
     settings = replace(usage_run["settings"], reviews=tmp_path / "r.jsonl")
     con.execute("UPDATE doc_field SET value_raw = '9999.9' WHERE region = 'meter' AND has_value_raw = 1")
