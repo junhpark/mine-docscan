@@ -18,7 +18,7 @@ def build_report(con: sqlite3.Connection) -> dict:
                          "FROM doc_page WHERE align_ok IS NOT NULL GROUP BY 1 ORDER BY 1"):
         align[r[0]] = {"pages": r[1], "ok": r[2] or 0, "min_inliers": r[3],
                        "max_grid_err": None if r[4] is None else round(r[4], 2)}
-    return {
+    rep = {
         "documents": one("SELECT COUNT(*) FROM doc_document"),
         "documents_by_status": _pairs(con, "SELECT status, COUNT(*) FROM doc_document GROUP BY 1 ORDER BY 1"),
         "warnings": {"n": one("SELECT COUNT(*) FROM doc_document WHERE warning IS NOT NULL"),
@@ -71,6 +71,14 @@ def build_report(con: sqlite3.Connection) -> dict:
         # 가동 일보의 검산 (tasks/0005 4.4): 종류(total | subtotal | continuity)별 결과별 수
         "xcheck_usage": xcheck_usage_summary(con),
     }
+    # 인쇄 층으로 값 유무를 잰 쪽 (tasks/0006 4.3): 양식별 적재된 쪽 수 (핸들러에서 오류가 난 쪽은 행이 되돌려져 잰 값이 남지
+    # 않았으므로 세지 않는다 — print_sha 는 어디까지 갔는지로 남는다). 그런 쪽이 하나도 없으면 키가 없다 — 인쇄 층이 없는 사이트의
+    # 리포트(와 regress 의 기준)는 예전과 같다
+    used = _pairs(con, "SELECT template_name, COUNT(*) FROM doc_page WHERE print_sha IS NOT NULL AND status = 'loaded' "
+                       "GROUP BY 1 ORDER BY 1")
+    if used:
+        rep["print_layer"] = used
+    return rep
 
 
 def xcheck_usage_summary(con: sqlite3.Connection) -> dict:
@@ -294,6 +302,8 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
     for name, a in rep["align"].items():
         lines.append(f"  {name}: {a['ok']}/{a['pages']} 통과, 인라이어 최소 {a['min_inliers']}, "
                      f"괘선 오차 최대 {a['max_grid_err']} px")
+    if rep.get("print_layer"):
+        lines.append("인쇄 층으로 값 유무를 잰 쪽: " + kv(rep["print_layer"]))
     f, i, h = rep["fields"], rep["inspection"], rep["haul"]
     lines += [
         f"필드 {f['total']}개 (값 있음 {f['with_value']}, 검수 대기 {f['pending']})",

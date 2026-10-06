@@ -14,7 +14,8 @@ from minedocscan.evaluate.meta import _changed_pages
 from minedocscan.forms.equipment import equipment_id
 from minedocscan.forms.sitepack import SitePack
 from minedocscan.forms.template import Template, TemplateError
-from minedocscan.handlers.usage import UsageHandler
+from minedocscan.handlers.usage import presence
+from minedocscan.imaging.cells import observe_cells
 from minedocscan.pipeline import Pipeline
 from minedocscan.recognize.builtin import OracleRecognizer
 from minedocscan.report import build_report
@@ -175,6 +176,7 @@ def test_machine_run_reads_integers_and_leaves_meters_to_people(usage_run, usage
         # 소수·시각은 읽지 않는다: 계기 칸에 잉크가 있으면 모르는 칸(pending), 가동 시간은 아직 모른다
         assert u["reading_kind"] == ("empty" if t["reading_kind"] == "empty" else "pending"), t["source"]
         assert u["hours"] is None and u["meter_start"] is None and u["meter_start_raw"] is None
+        # 아무것도 쓰지 않은 쪽은 자동 — 근무 시각 칸의 인쇄된 "~" 는 인쇄 층이 지운다 (끄면 pending — test_print_presence.py)
         assert u["review_status"] == ("auto" if t["reading_kind"] == "empty" and not t["shifts"] else "pending")
         # 잉크로 정하는 것은 검수 없이도 맞다: 작업 표의 글씨 있는 줄, 서명
         assert (u["activity_rows"], u["signed"]) == (t["activity_rows"], t["signed"]), t["source"]
@@ -204,29 +206,44 @@ def _printed_cells(con) -> dict:
         if r["row_key"].split("|")[0] in PRINTED_ITEMS}
 
 
-def test_digits_between_printed_labels_are_never_auto_emptied(usage_run, usage_synth, tmp_path, monkeypatch):
+def test_digits_between_printed_labels_are_never_auto_emptied(usage_run, usage_synth, usage_pages):
     """작업량 칸 안에 라벨·단위가 인쇄된 행 (실제 로우더 작업일보의 "하단: _ 대"): 그 사이에 쓴 두 자리 숫자는 양옆의 인쇄와,
     인쇄는 이웃 칸의 인쇄와 이어져 덩어리 배정에서는 줄 전체가 메모가 된다. 잉크 비율로도 보므로(둘 중 하나라도 "있음")
-    그 칸은 빈 칸으로 자동 적재되지 않고 인식기에 간다. 인쇄만 있는 칸은 답이 없으면 검수 대기."""
+    그 칸은 빈 칸으로 자동 적재되지 않고 인식기에 간다. 인쇄만 있는 칸은 인쇄 층(usage_synth 는 켰다 — tasks/0006 단계 3)이
+    빈 칸으로 자동 적재한다 (끈 것은 검수 대기 — test_print_presence.py).
+    덩어리 배정만의 실패는 파이프라인을 다시 돌리지 않고 같은 쪽을 다시 편 그림(usage_pages)에서 핸들러의 값 유무 함수
+    (handlers/usage.presence)로 잰다 — 잉크 비율을 끄고(text_ink_min = inf), 인쇄 층 없이."""
     truth = {(t["source"], c["row_key"], c["column"]): c["count"] for t in usage_synth.truth["usage"] for c in t["tally"]}
     written = {k: v for k, v in truth.items() if k[1].split("|")[0] in PRINTED_ITEMS}
     two = {k: v for k, v in written.items() if v >= 10}
     assert len(two) >= 6                                                     # 합성 묶음에 두 자리 값이 있다
     cells = _printed_cells(usage_run["pipe"].con)
     assert cells and set(written) <= set(cells)
-    assert not [k for k, f in cells.items() if not f["has_value_raw"] and f["status_raw"] == "auto"]   # 빈 칸 자동 적재 없음
+    assert not [k for k in written if not cells[k]["has_value_raw"] and cells[k]["status_raw"] == "auto"]   # 빈 칸 자동 적재 없음
     assert {k: (f["value_raw"], f["status_raw"]) for k, f in cells.items() if k in written} == \
         {k: (str(v), "auto") for k, v in written.items()}                    # 쓴 값은 인식기가 읽는다 (oracle)
-    assert all(f["status_raw"] == "pending" and f["value_final"] is None for k, f in cells.items() if k not in written)
+    printed = [f for k, f in cells.items() if k not in written]
+    assert printed and all(not f["has_value_raw"] and f["status_raw"] == "auto" and f["value_final"] is None for f in printed)
 
-    # 덩어리 배정만으로 보면(잉크 비율을 끄면) 두 자리 값 일부가 빈 칸으로 자동 적재된다 — 이 시험이 막는 실패가 합성 양식에 있다
-    monkeypatch.setattr(UsageHandler, "text_ink_min", float("inf"))
-    settings = replace(usage_run["settings"], work_root=tmp_path / "work", reviews=tmp_path / "reviews.jsonl")
-    pipe = Pipeline(settings, recognizer=OracleRecognizer(usage_run["answers"]))
-    pipe.run([usage_synth.scans])
-    old = _printed_cells(pipe.con)
-    lost = [k for k in two if not old[k]["has_value_raw"] and old[k]["status_raw"] == "auto"]
-    assert lost, "덩어리 배정만으로도 다 잡힌다 — 합성 양식이 실제의 실패를 재현하지 못한다"
+    # 덩어리 배정만으로 보면(잉크 비율을 끄면) 인쇄 층 없이는 두 자리 값 일부가 빈 칸으로 자동 적재된다 — 이 시험이 막는 실패가
+    # 합성 양식에 있다. 지금의 규칙(둘 중 하나라도)은 하나도 잃지 않고, 인쇄 층을 켜면 덩어리 배정만으로도 다 잡는다
+    lost: dict[str, list] = {"blob_only": [], "rule": [], "blob_only_print_layer": []}
+    loader = [pg for pg in usage_pages if pg["tpl"].name == T_LOADER]
+    assert loader
+    for pg in loader:
+        tpl, img = pg["tpl"], pg["aligned"]
+        obs = observe_cells(img, tpl, None)
+        obs_on = observe_cells(img, tpl, tpl.print_mask)
+        runs = {"blob_only": presence(img, tpl, obs, None, text_ink_min=float("inf"))[0],
+                "rule": presence(img, tpl, obs, None)[0],
+                "blob_only_print_layer": presence(img, tpl, obs_on, tpl.print_mask, text_ink_min=float("inf"))[0]}
+        for name, pres in runs.items():
+            for o, pr in zip(obs, pres, strict=True):
+                key = (pg["source"], o.cell.row_key, o.cell.name)
+                if key in written and not pr.has_ink:
+                    lost[name].append(key)
+    assert [k for k in lost["blob_only"] if k in two], "덩어리 배정만으로도 다 잡힌다 — 합성 양식이 실제의 실패를 재현하지 못한다"
+    assert lost["rule"] == [] and lost["blob_only_print_layer"] == [], lost
 
 
 # ── 검수로 정답을 넣으면 ───────────────────────────────────────────────────
@@ -287,13 +304,17 @@ def test_clock_pages_nothing_written_two_sheets_and_unknown_names(reviewed, usag
 
 
 def test_review_file_rebuilds_the_same_db(reviewed, usage_run, usage_synth, tmp_path):
-    """불변식: 검수를 저장한 직후의 DB = 같은 검수 파일로 새로 돌린 DB (새 테이블 포함). 같은 칸의 여러 검수, 장비명 바꾸기 포함."""
+    """불변식: 검수를 저장한 직후의 DB = 같은 검수 파일로 새로 돌린 DB (새 테이블 포함). 같은 칸의 여러 검수, 장비명 바꾸기 포함.
+    인쇄 층을 켠 가동 일보다 (tasks/0006 6절) — 모든 쪽이 합성이 넣은 인쇄 층으로 쟀다 (doc_page.print_sha)."""
     fresh = Pipeline(replace(reviewed["settings"], work_root=tmp_path / "w"), recognizer=usage_run["pipe"].recognizer)
     fresh.run([usage_synth.scans])
     assert fresh.summary["reviews"]["imported"] == reviewed["n"]
     assert build_report(fresh.con) == build_report(reviewed["con"])
-    for t in USAGE_TABLES:
+    for t in (*USAGE_TABLES, "doc_page"):
         assert _dump(fresh.con, t) == _dump(reviewed["con"], t), t
+    sha = usage_synth.truth["print_layers"]
+    pages = reviewed["con"].execute("SELECT template_name, print_sha FROM doc_page").fetchall()
+    assert len(pages) == len(usage_synth.truth["usage"]) and all(p[1] == sha[p[0]] for p in pages)
 
 
 def test_bad_meter_input_is_refused_before_the_file(reviewed, tmp_path):

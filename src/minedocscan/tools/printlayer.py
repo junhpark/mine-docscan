@@ -116,8 +116,10 @@ def build(template_dir: str | Path, settings: Settings, max_pages: int = MAX_PAG
     covered = [{"cell": boxes[i][0], "coverage": round(cov[i], 4)} for i in order[:TOP_COVERED] if cov[i] > 0]
     warnings = []
     if len(used) < WARN_PAGES:
-        warnings.append(f"쪽이 {len(used)}장뿐입니다 ({WARN_PAGES}장 미만) — 손글씨의 잔상이 남을 수 있습니다. "
-                        "쪽이 쌓이면 다시 만드세요")
+        # 잔상의 결과: 여러 쪽의 같은 자리에 쓴 손글씨가 층에 남으면 그 자리에 쓴 값까지 지워 빈 칸으로 자동 적재될 수 있다
+        # (합성 가동 일보 3일치: 2–3장으로 만든 로우더 층에서 작업량의 두 자리 값 1–4칸을 잃었다, 4–5장에서는 0 — tasks/0006 4.3)
+        warnings.append(f"쪽이 {len(used)}장뿐입니다 ({WARN_PAGES}장 미만) — 손글씨의 잔상이 남아 같은 자리에 쓴 값이 지워지고 "
+                        "빈 칸으로 자동 적재될 수 있습니다. 쪽이 쌓이면 다시 만드세요")
     return {"template": tpl.name, "out": str(out), "pages": len(used), "candidates": len(rows),
             "dates": len({r["work_date"] for r in used if r["work_date"]}),
             "undated": sum(not r["work_date"] for r in used),

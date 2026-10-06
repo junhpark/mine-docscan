@@ -83,6 +83,33 @@ def check_template(tdir: str | Path) -> list[str]:
     return out
 
 
+def print_layer_unused(tpl: Template) -> str | None:
+    """인쇄 층(print_image)이 있는데 그것으로 재는 칸이 없으면 한 줄 (오류가 아니다 — 템플릿은 그대로 돈다). 인쇄 층은 role 이
+    meter·shifts·tally 인 표의 형식 있는 칸에만 쓴다 (tasks/0006 4.3, Template.uses_print_layer): 운반·점검표처럼 역할이 없는
+    표뿐인 양식, 아직 표가 없는 분류 전용 양식에 print_image 를 적어도 값 유무는 그대로이고 doc_page.print_sha 도 남지 않는다."""
+    if tpl.print_path is None or tpl.print_problems():
+        return None
+    try:
+        if tpl.uses_print_layer:
+            return None
+    except (KeyError, TypeError, ValueError, AttributeError):    # 표 정의가 깨졌다 — 오류 목록이 이미 알린다
+        return None
+    return (f"{tpl.name}: 인쇄 층(print_image)이 있지만 인쇄 층으로 재는 칸(role 이 meter·shifts·tally 인 표의 형식 있는 칸)이 "
+            "없습니다 — 값 유무에 쓰지 않습니다")
+
+
+def check_notes(tdir: str | Path) -> list[str]:
+    """template check 의 참고 (오류가 아닌 것 — 종료 코드에 세지 않는다): 쓰이지 않는 인쇄 층."""
+    tdir = Path(tdir)
+    path = tdir / "template.yaml" if tdir.is_dir() else tdir
+    try:
+        tpl = Template(path, validate=False)
+    except (OSError, TemplateError, KeyError, TypeError, ValueError, AttributeError, yaml.YAMLError):
+        return []
+    note = print_layer_unused(tpl)
+    return [note] if note else []
+
+
 def _print_covered(tpl: Template) -> list[str]:
     """인쇄 층(print_image)이 있으면: 표의 손으로 쓰는 칸 중 인쇄 마스크(4.3 — 2 px 넓힌 것)가 칸의 절반 넘게 덮은 칸을 한 줄로.
     값이 들어갈 자리가 없다 — 칸 안의 인쇄, 손글씨의 잔상, 다른 양식·어긋난 층. 파일·크기의 오류는 problems() 가 이미 알렸다.

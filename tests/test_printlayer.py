@@ -34,10 +34,27 @@ ROLE_TABLES = ("meter", "shifts", "tally")             # 인쇄 층을 쓰는 �
 
 
 def _copy_template(site: Path, name: str, dest: Path) -> Path:
-    """템플릿 폴더 하나를 dest/<이름> 으로 복사한다 (세션 픽스처의 사이트 팩을 더럽히지 않게)."""
+    """템플릿 폴더 하나를 dest/<이름> 으로 복사한다 (세션 픽스처의 사이트 팩을 더럽히지 않게) — 인쇄 층 없이: 세션의 합성
+    가동 일보는 인쇄 층을 켰다(usage_synth, 단계 3). 이 파일의 시험은 층이 없는 템플릿에서 시작한다 (print.png 와 키를 뺀다)."""
     out = dest / name
-    shutil.copytree(site / "templates" / name, out)
+    shutil.copytree(site / "templates" / name, out, ignore=shutil.ignore_patterns("print.png"))
+    _drop_print(out)
     return out
+
+
+def _drop_print(tdir: Path) -> None:
+    p = tdir / "template.yaml"
+    spec = yaml.safe_load(p.read_text(encoding="utf-8"))
+    if spec.pop("print_image", None) is not None:
+        p.write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
+def _plain_site(site: Path, dest: Path) -> Path:
+    """사이트 팩을 인쇄 층 없이 복사한다."""
+    shutil.copytree(site, dest, ignore=shutil.ignore_patterns("print.png"))
+    for t in (dest / "templates").iterdir():
+        _drop_print(t)
+    return dest
 
 
 def _copy_built(layers: dict, name: str, dest: Path) -> Path:
@@ -81,7 +98,7 @@ def test_layer_covers_the_blank_print_and_leaves_the_value_cells_clear(usage_lay
     """양식마다: 넓히지 않은 층(binary)이 빈 양식의 인쇄 화소를 99 % 이상 덮고, role 표의 손으로 쓰는 칸 전체에서 인쇄 아닌 화소 중
     인쇄로 잡힌 것이 1 % 미만이다. 2 px 넓힌 마스크로 재지 않는다 (괘선 둘레가 칸의 4 px 안쪽으로 들어온다).
     층은 10일치(운행일보 31쪽, 로우더 20쪽)로 만든다 — 3일치(운행일보 9쪽)는 모든 쪽이 같은 자리에 계기 값을 써서 운행일보만
-    약 1.9 % (12절). 10일치에서 운행일보 0.71 %·로우더 0.39 % (OpenCV 5.0), 0.72 %·0.42 % (4.9). 칸마다의 값은 메시지에만."""
+    약 1.9 % (12절). 10일치에서 운행일보 0.46 %·로우더 0.56 % (OpenCV 5.0), 0.47 %·0.58 % (4.9 — 단계 3 의 "~" 뒤). 칸마다의 값은 메시지에만."""
     for name in USAGE:
         lay = usage_layers10["layers"][name]
         layer = printlayer.binary(imread_gray(lay["dir"] / "print.png"))
@@ -390,8 +407,7 @@ def test_print_image_problems_are_template_errors(layers, tmp_path):
 
 def test_site_pack_with_a_key_but_no_file_does_not_load(usage_synth, tmp_path):
     """키가 파일보다 먼저 있으면 사이트 팩 전체가 읽히지 않는다 — 그래서 print-layer 는 키를 적지 않고 안내만 한다 (4.2)."""
-    site = tmp_path / "site"
-    shutil.copytree(usage_synth.site, site)
+    site = _plain_site(usage_synth.site, tmp_path / "site")
     _with_print(site / "templates" / synth_usage.T_USAGE)
     with pytest.raises(TemplateError, match="인쇄 층 파일이 없습니다"):
         SitePack(site)
@@ -469,17 +485,34 @@ def test_preview_print_draws_on_the_layer(layers, tmp_path, capsys):
 
 
 def test_info_says_which_templates_have_a_print_layer(layers, usage_synth, tmp_path, capsys):
-    site = tmp_path / "site"
-    shutil.copytree(usage_synth.site, site)
+    """info 는 템플릿마다 인쇄 층과 해시, 그리고 그것으로 재는 칸이 있는지(print_used). 역할이 없는 표뿐인 양식(운반 일보)에
+    print_image 를 적으면 쓰이지 않는다 (4.3 — role meter·shifts·tally 의 형식 있는 칸만) — info 와 template check 가 한 줄로
+    알린다 (check 는 오류가 아니라 참고: 종료 코드 0)."""
+    from minedocscan.tools.synth import T_LOG
+
+    site = _plain_site(usage_synth.site, tmp_path / "site")
     shutil.copy(layers[synth_usage.T_LOADER]["dir"] / "print.png", site / "templates" / synth_usage.T_LOADER / "print.png")
     _with_print(site / "templates" / synth_usage.T_LOADER)
+    haul = site / "templates" / T_LOG
+    _with_print(haul, imread_gray(haul / Template(haul / "template.yaml").spec["reference_image"]))
     assert main(["info", "--site", str(site), "--work-root", str(tmp_path / "w"), "--json"]) == 0
     tpls = {t["name"]: t for t in json.loads(capsys.readouterr().out)["site"]["templates"]}
-    assert tpls[synth_usage.T_LOADER]["print_image"] == "print.png"
+    assert tpls[synth_usage.T_LOADER]["print_image"] == "print.png" and tpls[synth_usage.T_LOADER]["print_used"]
     assert tpls[synth_usage.T_LOADER]["print_sha"] == layers[synth_usage.T_LOADER]["summary"]["sha"]
-    assert all(t["print_image"] is None and t["print_sha"] is None for n, t in tpls.items() if n != synth_usage.T_LOADER)
+    assert tpls[T_LOG]["print_image"] == "print.png" and tpls[T_LOG]["print_sha"] and not tpls[T_LOG]["print_used"]
+    assert all(t["print_image"] is None and t["print_sha"] is None and not t["print_used"]
+               for n, t in tpls.items() if n not in (synth_usage.T_LOADER, T_LOG))
     assert main(["info", "--site", str(site), "--work-root", str(tmp_path / "w")]) == 0
-    assert f"인쇄 층 print.png ({layers[synth_usage.T_LOADER]['summary']['sha']})" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f"인쇄 층 print.png ({layers[synth_usage.T_LOADER]['summary']['sha']})" in out
+    unused = [ln for ln in out.splitlines() if "쓰지 않음" in ln]
+    assert len(unused) == 1 and T_LOG in unused[0]
+    # template check: 참고 한 줄, 오류는 없다. 쓰이는 층에는 참고가 없다
+    assert main(["template", "check", str(haul)]) == 0
+    out = capsys.readouterr().out
+    assert "오류 없음" in out and out.count("참고: ") == 1 and "값 유무에 쓰지 않습니다" in out
+    assert main(["template", "check", str(site / "templates" / synth_usage.T_LOADER), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["notes"] == []
 
 
 # ── 함수 단위 ──────────────────────────────────────────────────────────────────────

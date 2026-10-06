@@ -41,6 +41,9 @@ from .formats import FORMAT_KINDS, FORMATS, default_format
 CELL_KINDS = {"printed", "handwritten_text", "handwritten_number", "checkmark", "signature"}
 DATE_PARTS = ("date.month", "date.day")      # 읽기 전용 메타 키: 정답은 쪽의 날짜에서 나온다. 검수로 받지 않는다
 ROLES = ("meter", "shifts", "tally", "activities")      # usage 핸들러의 표의 역할 (tasks/0005 4.2)
+# 덩어리 배정으로 값 유무를 정하는 표 (낮은 칸, 칸을 넘는 글씨 — tasks/0005 4.3). 인쇄 층을 뺀 그림으로 잉크를 재는 것도
+# 이 표의 형식 있는 칸뿐이다 (tasks/0006 4.3) — 필드·작업 표(activities)는 늘 같은 자리에 같은 글씨로 쓰는 칸이 인쇄 층에 들어간다
+BLOB_ROLES = ("meter", "shifts", "tally")
 METER_SLOTS = ("start", "end", "total")                 # 계기 표의 칸: 열 이름 또는 행 키
 METER_REQUIRED = ("start", "end")                       # 총(total)은 없어도 된다 — 종료 − 시작이 먼저다
 METER_FORMATS = ("reading", "decimal", "time")          # 계기 칸의 형식: 계기 값 또는 시각
@@ -106,6 +109,7 @@ class Template:
         self._ref: np.ndarray | None = None
         self._feats = None
         self._print: dict = {}                     # 인쇄 층·마스크·해시 (처음 쓸 때 한 번만)
+        self._roles: dict | None = None
         if validate:
             self._validate()
 
@@ -272,6 +276,28 @@ class Template:
         if "sha" not in self._print:
             self._print["sha"] = printlayer.sha(self.print_layer)
         return self._print["sha"]
+
+    def role_value_cell(self, cell: Cell) -> bool:
+        """role 이 meter·shifts·tally 인 표의 형식 있는 손글씨 칸인가 (한 곳에서 정한다): usage 핸들러가 덩어리 배정으로 값 유무를
+        정하는 칸이고, 인쇄 마스크가 있으면 인쇄를 뺀 이진 그림으로 잉크를 재는 칸이다 (tasks/0006 4.3 — cells.observe_cells,
+        blobs.assign_blobs). 필드(서명·체크·메타 필드 포함), 작업 표, 인쇄된 칸, 역할이 없는 표(운반·점검표)는 아니다.
+        인쇄 층이 있는지는 보지 않는다 — 마스크는 받는 쪽이 받았을 때만 쓴다 (uses_print_layer)."""
+        if cell.region == "fields" or not cell.kind.startswith("handwritten") or cell.fmt is None:
+            return False
+        if self._roles is None:
+            self._roles = {reg.get("name"): reg.get("role") for reg in self.regions}
+        return self._roles.get(cell.region) in BLOB_ROLES
+
+    @property
+    def uses_print_layer(self) -> bool:
+        """이 템플릿의 쪽을 인쇄 층으로 재는가: print_image 가 있고 role_value_cell 인 칸이 하나라도 있다. 아니면 파이프라인은
+        인쇄 층을 읽지도 않는다 (doc_page.print_sha 도 NULL) — 역할이 없는 표뿐인 양식(운반·점검표)에 print_image 를 적어도
+        값 유무는 그대로다 (tasks/0006 4.4)."""
+        if self.print_path is None:
+            return False
+        if "uses" not in self._print:
+            self._print["uses"] = any(self.role_value_cell(c) for c in self.cells())
+        return self._print["uses"]
 
     def region(self, name: str) -> dict:
         for reg in self.regions:

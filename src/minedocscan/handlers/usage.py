@@ -14,6 +14,8 @@
   · meter·shifts·tally 표의 형식 있는 칸은 운반 칸과 같다 — 괘선 제거 + RLSA 덩어리 배정(imaging/blobs.py), 기준 면적은 운반
     핸들러의 MIN_BLOB_AREA 그대로. 칸보다 큰 글씨, 표 위에 걸친 메모(덩어리가 여러 칸에 걸치면 값이 아니다)를 같은 규칙으로 다룬다
   · 그 밖의 칸(작업 표, 필드)은 잉크 비율 (FormHandler 의 text_ink_min 그대로). 새 임계값을 만들지 않는다
+  · 템플릿에 인쇄 층(print_image)이 있으면 meter·shifts·tally 표의 형식 있는 칸의 두 판정(덩어리 배정, 잉크 비율)은 인쇄를 뺀
+    이진 그림으로 잰다 — 칸 안에 인쇄만 있는 칸이 빈 칸이 된다 (tasks/0006 4.3, presence). 필드·작업 표·크롭은 원래 그림
 값:
   · 정수 칸(작업량)은 지금의 숫자 인식 경로(by_kind, 자동 적재 표)를 그대로 탄다 — handlers/base.number_row
   · 소수·시각 칸은 읽지 않는다 (미룸 — tasks/0006 1절). 잉크가 있으면 검수 대기 — 계기 칸은 `review serve --queue readings`
@@ -30,6 +32,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 from ..forms.equipment import META_KEY as EQUIPMENT
 from ..forms.formats import as_number, minutes, range_minutes, reading_kind, span_minutes, try_normalize
@@ -51,7 +54,6 @@ from .base import (
 )
 from .haul import MIN_BLOB_AREA
 
-BLOB_ROLES = ("meter", "shifts", "tally")       # 낮은 칸, 글씨가 칸을 넘는 표 — 운반 칸과 같은 덩어리 배정
 UNKNOWN = object()                              # 잉크는 있는데 값을 모르는 칸 (검수 대기)
 
 
@@ -60,34 +62,11 @@ class UsageHandler(FormHandler):
 
     def load(self, ctx: PageContext) -> dict:
         tpl = ctx.template
-        roles = {reg["name"]: reg.get("role") for reg in tpl.regions}
-
-        # 덩어리 배정: meter·shifts·tally 표의 형식 있는 칸 (표마다)
-        blob = [o for o in ctx.obs if roles.get(o.cell.region) in BLOB_ROLES and _formatted(o.cell)]
-        area: dict[int, int] = {}
-        n_notes = 0
-        for reg in tpl.regions:
-            cells = [o for o in blob if o.cell.region == reg["name"]]
-            if not cells:
-                continue
-            ink_by, blobs = assign_blobs(ctx.aligned, [o.cell for o in cells], reg["grid"]["ys"], reg["grid"]["xs"])
-            for ci, a in ink_by.items():
-                area[id(cells[ci])] = a
-            n_notes += int(sum(bool(b.is_note) for b in blobs))       # numpy bool → int (실행 요약은 int 만 더한다)
-        blob_ids = {id(o) for o in blob}
-
-        def inked(o) -> bool:
-            return area.get(id(o), 0) >= MIN_BLOB_AREA if id(o) in blob_ids else o.ink >= self.text_ink_min
+        pres, n_notes = presence(ctx.aligned, tpl, ctx.obs, ctx.print_mask, self.text_ink_min)
+        has = {id(o): p.has_ink for o, p in zip(ctx.obs, pres, strict=True)}
 
         def any_ink(o) -> bool:
-            """두 잉크 판정(덩어리 배정, 잉크 비율) 중 하나라도 "있음"이면 "있음" — 빈 칸으로 자동 적재하지 않는다.
-            덩어리 배정은 이웃 칸의 글씨와 한 덩어리로 묶인 글씨를 메모로 보고 그 칸들을 다 비었다고 한다:
-              · 긴 계기 값(1234.5)이 이웃 칸의 값과 붙을 때
-              · 작업량 칸 안에 인쇄된 라벨·단위("하단: _ 대")가 있을 때 — 쓴 숫자가 양옆의 인쇄와, 인쇄가 이웃 칸의 인쇄와 이어져
-                줄 전체가 메모가 된다 (실제 로우더 작업일보에서 숫자를 쓴 칸 48개를 하나도 잡지 못했다)
-            그 칸을 빈 칸으로 자동 적재하면 값이 조용히 사라진다. 잘못 "있음"이면 인식기가 빈 칸으로 답하거나 검수 한 번이 든다.
-            새 임계값은 없다 (MIN_BLOB_AREA, text_ink_min)."""
-            return inked(o) or o.ink >= self.text_ink_min
+            return has[id(o)]
 
         # 표의 정수 칸(작업량): 숫자 인식 경로. 두 잉크 판정 중 하나라도 "있음"인 칸을 인식기에 — 운반 칸(haul)은 덩어리 배정만
         ints = [o for o in ctx.obs if o.cell.region != "fields" and o.cell.kind.startswith("handwritten")
@@ -153,6 +132,51 @@ class UsageHandler(FormHandler):
         # 그 장비의 연속성 — 장비명이 바뀌었으면 예전 장비와 새 장비 둘 다 (앞뒤 기록의 검산이 바로 바뀐다)
         refs = {equipment_ref(after)} | ({equipment_ref(before)} if before is not None else set())
         recompute_continuity(con, refs, {f["page_id"]})
+
+
+@dataclass(frozen=True)
+class Presence:
+    """칸 하나의 값 유무 (load 가 쓰는 판정 그대로). area: 덩어리 배정 면적 — role 표의 형식 있는 칸만, 아니면 None.
+    ink: 잉크 비율 (CellObs.ink — 인쇄 마스크가 있었으면 인쇄를 뺀 그림으로 잰 것). has_ink: 두 판정 중 하나라도 "있음"."""
+    area: int | None
+    ink: float
+    has_ink: bool
+
+
+def presence(aligned, tpl: Template, obs: list, print_mask=None,
+             text_ink_min: float = FormHandler.text_ink_min) -> tuple[list[Presence], int]:
+    """쪽의 칸마다 값 유무 (obs 와 같은 순서)와 메모로 본 덩어리의 수. load 가 이것을 쓴다 — 시험은 같은 함수로 인쇄 층을 켜고 끈
+    것·틀린 층을 파이프라인 없이 비교한다 (obs 는 같은 print_mask 로 잰 cells.observe_cells 의 결과).
+
+      · role 표(meter·shifts·tally)의 형식 있는 칸(Template.role_value_cell): 운반 칸과 같은 덩어리 배정 (표마다,
+        print_mask 가 있으면 인쇄를 뺀 그림). 기준 면적은 운반 핸들러의 MIN_BLOB_AREA 그대로
+      · 그 밖의 칸: 잉크 비율 ≥ text_ink_min
+      · has_ink = 덩어리 배정 또는 잉크 비율 중 하나라도 "있음" — 빈 칸으로 자동 적재하지 않는다.
+        덩어리 배정은 이웃 칸의 글씨와 한 덩어리로 묶인 글씨를 메모로 보고 그 칸들을 다 비었다고 한다:
+          · 긴 계기 값(1234.5)이 이웃 칸의 값과 붙을 때
+          · 작업량 칸 안에 인쇄된 라벨·단위("하단: _ 대")가 있을 때 — 쓴 숫자가 양옆의 인쇄와, 인쇄가 이웃 칸의 인쇄와 이어져
+            줄 전체가 메모가 된다 (실제 로우더 작업일보에서 숫자를 쓴 칸 48개를 하나도 잡지 못했다)
+        그 칸을 빈 칸으로 자동 적재하면 값이 조용히 사라진다. 잘못 "있음"이면 인식기가 빈 칸으로 답하거나 검수 한 번이 든다.
+        인쇄 층은 그 "잘못 있음"(칸 안의 인쇄)을 줄일 뿐 규칙은 그대로다 (tasks/0006 4.3). 새 임계값은 없다."""
+    blob = [o for o in obs if tpl.role_value_cell(o.cell)]
+    area: dict[int, int] = {}
+    n_notes = 0
+    for reg in tpl.regions:
+        cells = [o for o in blob if o.cell.region == reg["name"]]
+        if not cells:
+            continue
+        ink_by, blobs = assign_blobs(aligned, [o.cell for o in cells], reg["grid"]["ys"], reg["grid"]["xs"],
+                                     print_mask=print_mask)
+        for ci, a in ink_by.items():
+            area[id(cells[ci])] = a
+        n_notes += int(sum(bool(b.is_note) for b in blobs))       # numpy bool → int (실행 요약은 int 만 더한다)
+    blob_ids = {id(o) for o in blob}
+    out = []
+    for o in obs:
+        a = area.get(id(o), 0) if id(o) in blob_ids else None
+        inked = a >= MIN_BLOB_AREA if a is not None else o.ink >= text_ink_min
+        out.append(Presence(a, o.ink, bool(inked or o.ink >= text_ink_min)))
+    return out, n_notes
 
 
 def rebuild_page(con, site, tpl: Template, page: dict) -> dict | None:
@@ -232,11 +256,6 @@ def usage_rows(site, tpl: Template, page: dict, meta: dict, frows: list[dict]) -
                 "count": as_int(r["value_final"]), "count_raw": as_int(r["value_raw"]), "confidence": r["confidence"],
                 "source_field_id": r["field_id"], "review_status": r["review_status"]})
     return usage, tally
-
-
-def _formatted(cell) -> bool:
-    """덩어리 배정으로 값 유무를 정하는 칸: 손으로 쓰는 칸 중 형식이 있는 것 (정수·소수·시각 …)."""
-    return cell.kind.startswith("handwritten") and cell.fmt is not None
 
 
 def _meter_slot(r: dict) -> str | None:

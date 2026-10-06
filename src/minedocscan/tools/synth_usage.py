@@ -18,13 +18,17 @@
   · 작업량 칸 안에 인쇄된 라벨·단위 (실제의 "하단: _ 대") — 그 구분(PRINTED_ITEMS)의 값은 두 자리. 쓴 숫자가 양옆의 인쇄와,
     인쇄가 이웃 칸의 인쇄와 이어져 덩어리 배정에서는 줄 전체가 메모가 된다
   · 시각 범위를 8-12 처럼 줄여 쓴 칸 (정답은 08:00~12:00)
+  · 근무 시각 칸 가운데에 인쇄된 "~" (실제 로우더 작업일보처럼) — 손으로는 그 양옆에 시작·끝을 쓴다 (8-12 는 8 과 12).
+    아무것도 쓰지 않은 칸도 인쇄로는 잉크가 있다 (tasks/0006 단계 3)
 
 글씨는 전부 자체 획(tools/handfont.py — 숫자·소수점·콜론·물결표·붙임표·영문 소문자)으로 그린다 — OpenCV 판과 무관하다.
-인쇄된 글자(양식)만 OpenCV 내장 글꼴이다 (기준 이미지와 같은 판으로 그리므로 정합에는 상관없다).
+인쇄된 글자(양식)만 OpenCV 내장 글꼴이다 (기준 이미지와 같은 판으로 그리므로 정합에는 상관없다). 근무 시각 칸의 "~" 는
+값 유무를 가르는 인쇄라 판과 무관한 선으로 그린다 (_tilde).
 난수는 따로 쓴다 (default_rng([seed, 5005])) — 기본 합성 데이터의 난수 흐름을 건드리지 않는다.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 import cv2
@@ -80,6 +84,19 @@ def _grid(img, ys, xs, thick: int = 2) -> None:
         cv2.line(img, (xs[0], y), (xs[-1], y), 0, thick)
     for x in xs:
         cv2.line(img, (x, ys[0]), (x, ys[-1]), 0, thick)
+
+
+TILDE_W, TILDE_A, TILDE_T = 32, 5, 3            # 근무 시각 칸에 인쇄된 "~": 폭, 진폭, 굵기 (px)
+
+
+def _tilde(img, cx: float, cy: float) -> None:
+    """인쇄된 물결표 (실제 로우더 작업일보의 근무 시각 칸 "~"). OpenCV 내장 글꼴의 "~" 는 판마다 크기가 크게 다르다
+    (배율 1.5·굵기 3 에서 잉크 102 px(5.0) ↔ 276 px(4.9)) — 칸 하나의 값 유무를 가르는 인쇄라 판과 무관한 선으로 그린다.
+    스캔한 쪽에서 잉크는 약 300 px (칸의 비율 약 0.014) — 덩어리 배정의 기준 면적(40)과 잉크 비율의 기준(0.008)을 둘 다 넘는다:
+    실제처럼 인쇄 층이 없으면 아무것도 쓰지 않은 칸이 "있음"(검수 대기)이다."""
+    t = np.linspace(0.0, 2 * np.pi, 25)
+    pts = np.stack([cx - TILDE_W / 2 + t / (2 * np.pi) * TILDE_W, cy - TILDE_A * np.sin(t)], 1)
+    cv2.polylines(img, [np.round(pts).astype(np.int32)], False, 0, TILDE_T, cv2.LINE_AA)
 
 
 def build_usage_log() -> tuple[np.ndarray, dict]:
@@ -181,6 +198,7 @@ def build_loader_log() -> tuple[np.ndarray, dict]:
     _label(img, "From ~ to", sxs[1] + 14, sys_[0] + 40, 0.7)
     for i, (_k, lab) in enumerate(SHIFTS):
         _label(img, lab, sxs[0] + 14, sys_[i + 1] + 40, 0.7)
+        _tilde(img, (sxs[1] + sxs[2]) / 2, (sys_[i + 1] + sys_[i + 2]) / 2)     # 칸 안의 인쇄: "__ ~ __" (tasks/0006 단계 3)
 
     mxs = [1200, 1570, 1940, 2310]                            # 계기 칸: 긴 값(1234.5)이 이웃 칸의 값과 한 덩어리가 되지 않을 만큼 넓게
     mys = [700, 742, 788]
@@ -457,8 +475,12 @@ def fill_page(blank: np.ndarray, spec: dict, p: PagePlan, rng) -> np.ndarray:
         _write_in_cell(img, text, _cell_box(regs["meter"], 0, slot), rng, style, (0.6, 0.75))
     if "shifts" in regs:
         rows = {r["key"]: r["row"] for r in regs["shifts"]["rows"]}
-        for k, (text, _truth) in p.shifts.items():
-            _write_in_cell(img, text, _cell_box(regs["shifts"], rows[k], "range"), rng, style, (0.5, 0.65))
+        for k, (text, _truth) in p.shifts.items():                 # 인쇄된 "~" 의 양옆에: 시작은 왼쪽, 끝은 오른쪽 (8-12 → 8, 12)
+            x0, y0, x1, y1 = _cell_box(regs["shifts"], rows[k], "range")
+            cx, gap = (x0 + x1) / 2, TILDE_W / 2 + 14
+            a, b = re.split("[~-]", text)
+            _write_in_cell(img, a, (x0, y0, int(cx - gap), y1), rng, style, (0.5, 0.65))
+            _write_in_cell(img, b, (int(cx + gap), y0, x1, y1), rng, style, (0.5, 0.65))
     if "tally" in regs:
         reg = regs["tally"]
         rows = {r["key"]: r["row"] for r in reg["rows"]}

@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS doc_page (
   aligned_image   TEXT,                      -- 정합 이미지 경로 (work_root 기준 상대경로)
   homography      TEXT,                      -- JSON 3×3: 렌더링한 쪽 픽셀 → 템플릿 픽셀. 원본 해상도 크롭이 쓴다 (imaging/hires.py)
   render_dpi      INTEGER,                   -- 그 호모그래피를 구할 때 쪽을 렌더링한 해상도 (이미지 파일이면 원본 그대로)
+  print_sha       TEXT,                      -- 값 유무를 잰 인쇄 층의 해시 (Template.print_sha — 화소의 해시). 쓰지 않았으면 NULL (tasks/0006 4.3)
+  variant_errs    TEXT,                      -- 동시 판마다의 괘선 오차 JSON {판 이름: 오차 | null}. 판이 하나면 NULL (tasks/0006 4.6)
   work_date       TEXT,
   status          TEXT NOT NULL,             -- unknown_form | classified_only | align_failed | loaded | error
   error           TEXT                       -- error 일 때 예외 종류와 메시지. 그 쪽의 반쯤 쓰인 행은 남기지 않는다(SAVEPOINT)

@@ -238,14 +238,16 @@ def meta_mislabeled(meta_synth, meta_truth, tmp_path_factory) -> dict:
 # ── 장비 가동 일보 (tasks/0005) ─────────────────────────────────────────────
 @pytest.fixture(scope="session")
 def usage_synth(tmp_path_factory):
-    """합성 가동 일보 두 종만의 3일치 (점검표·운반 쪽 없이 — tools/synth_usage.py)."""
-    return generate(tmp_path_factory.mktemp("usage_synth"), days=3, seed=0, usage_only=True)
+    """합성 가동 일보 두 종만의 3일치 (점검표·운반 쪽 없이 — tools/synth_usage.py). 두 양식에 인쇄 층이 켜져 있다
+    (print_layers — 합성 쪽에서 추정한 print.png + print_image, tasks/0006 단계 3). 인쇄 층을 끈 결과는 같은 쪽을 다시 펴서
+    함수 단위로 잰다 (test_print_presence.py) — 파이프라인을 한 번 더 돌리지 않는다."""
+    return generate(tmp_path_factory.mktemp("usage_synth"), days=3, seed=0, usage_only=True, print_layers=True)
 
 
 @pytest.fixture(scope="session")
 def usage_run(usage_synth, tmp_path_factory) -> dict:
-    """usage_synth 를 정답 인식기(oracle)로 돌린 것: 정수 칸(작업량)·글자 칸은 읽고, 소수·시각 칸(계기·근무 시각)은 읽지 않는다
-    (잉크가 있으면 검수 대기). 이 DB 에 쓰지 않는다 (쓸 시험은 clone_db 와 다른 검수 파일로)."""
+    """usage_synth 를 정답 인식기(oracle)로 돌린 것 (인쇄 층을 켜고): 정수 칸(작업량)·글자 칸은 읽고, 소수·시각 칸(계기·근무 시각)은
+    읽지 않는다 (잉크가 있으면 검수 대기). 이 DB 에 쓰지 않는다 (쓸 시험은 clone_db 와 다른 검수 파일로)."""
     root = tmp_path_factory.mktemp("usage_run")
     answers = load_answers_json(usage_synth.answers_path)
     settings = Settings(site=usage_synth.site, archive_root=usage_synth.scans, work_root=root / "work",
@@ -316,3 +318,52 @@ def usage_layers10(tmp_path_factory) -> dict:
     layers = {name: {"dir": root / "templates" / name, "summary": build(root / "templates" / name, settings)}
               for name in (T_USAGE, T_LOADER)}
     return {"settings": settings, "db": db, "db_sha": db_sha, "layers": layers}
+
+
+@pytest.fixture(scope="session")
+def usage_pages(usage_run) -> list[dict]:
+    """usage_run 의 적재된 쪽마다 저장된 호모그래피로 다시 편 그림 (tools/printlayer.page_image — 파이프라인의 정합 그림과
+    바이트까지 같다). 인쇄 층을 끈 결과·틀린 층은 이 그림에서 함수 단위로 다시 잰다 — 파이프라인을 한 번 더 돌리지 않는다 (6절).
+    [{page_id, document_id, page_no, source_name, source, tpl, aligned}] (쪽 순서)."""
+    from minedocscan.tools.printlayer import page_image
+
+    con, site, settings = usage_run["pipe"].con, usage_run["pipe"].site, usage_run["settings"]
+    out = []
+    for r in con.execute("SELECT p.*, d.source_path, d.source_rel, d.source_name FROM doc_page p JOIN doc_document d "
+                         "ON p.document_id = d.document_id WHERE p.status = 'loaded' ORDER BY p.page_id").fetchall():
+        tpl = site.templates[r["template_name"]]
+        img, how = page_image(r, tpl, settings, tpl.reference.shape)
+        assert how == "rewarped", how
+        out.append({"page_id": r["page_id"], "document_id": r["document_id"], "page_no": r["page_no"],
+                    "source_name": r["source_name"], "source": f"{r['source_name']}#{r['page_no']}", "tpl": tpl,
+                    "aligned": img})
+    return out
+
+
+def reload_usage(con, usage_run, pages: list[dict], mask_of) -> None:
+    """usage_run 의 쪽들을 usage 핸들러로만 다시 적재한다 (분류·정합 없이 — 다시 편 그림에서 칸을 잰다). mask_of(쪽) → 인쇄 마스크
+    | None. 파이프라인과 같은 순서다: observe_cells(그림, 템플릿, 마스크) → 핸들러의 load (값 유무는 handlers/usage.presence) →
+    마무리의 검산. 인쇄 층을 끈 DB 를 파이프라인 한 번 더 없이 만든다.
+    con 은 usage_run 의 DB 를 복사한 것이어도 된다: 다시 적재할 쪽의 핸들러 행(doc_field·eq_usage_daily·prod_tally)과 검산
+    (xcheck_usage — 마무리가 전부 다시 만든다)을 먼저 지운다 — 다시 적재가 빠뜨린 행이 복사본의 값으로 남아 "같다"가 되지 않게.
+    메타 필드의 기계 행(파이프라인이 핸들러보다 먼저 쓴다)은 이 합성에 없다 (인식기 oracle, 메타 모델 없음)."""
+    from minedocscan.handlers import PageContext, get_handler
+    from minedocscan.imaging.cells import observe_cells
+    from minedocscan.pagemeta import page_meta_of
+
+    pipe, settings = usage_run["pipe"], usage_run["settings"]
+    ids = [pg["page_id"] for pg in pages]
+    q = ", ".join("?" * len(ids))
+    for t in ("doc_field", "eq_usage_daily", "prod_tally"):
+        con.execute(f"DELETE FROM {t} WHERE page_id IN ({q})", ids)
+    con.execute("DELETE FROM xcheck_usage")
+    h = get_handler("usage")
+    for pg in pages:
+        m = mask_of(pg)
+        obs = observe_cells(pg["aligned"], pg["tpl"], m)
+        h.load(PageContext(con, settings, pipe.site, pg["tpl"], pg["document_id"], pg["page_id"], pg["page_no"],
+                           pg["source_name"], page_meta_of(con, pg["page_id"]), pg["aligned"], obs, pipe.recognizer,
+                           pipe.corrector, print_mask=m))
+    h.finalize(con, pipe.site, settings)
+    for t in ("doc_field", "eq_usage_daily"):                       # 쪽마다 다시 쓴 행이 있다
+        assert {r[0] for r in con.execute(f"SELECT DISTINCT page_id FROM {t} WHERE page_id IN ({q})", ids)} == set(ids), t

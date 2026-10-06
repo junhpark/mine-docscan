@@ -134,6 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--usage-logs", action="store_true",
                    help="장비 가동 일보 두 종(작업 표 + 계기 / 작업량 표 + 근무 시각 + 계기)을 날마다 묶음 끝에 붙인다")
     p.add_argument("--usage-only", action="store_true", help="가동 일보만 (점검표·운반 쪽 없이)")
+    p.add_argument("--print-layers", action="store_true",
+                   help="--usage-logs/--usage-only 와 함께: 가동 일보 두 종의 인쇄 층(print.png)을 합성 쪽에서 추정해 템플릿에 넣는다 "
+                        "(print_image)")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
@@ -283,7 +286,8 @@ def cmd_info(a) -> int:
         tpls = [{"name": t.name, "title": t.title, "handler": t.handler, "regions": len(t.regions),
                  "cells": len(t.cells()) + len(t.fields), "status": "cells" if t.has_cells else "classify_only",
                  "family": t.family, "valid_from": t.valid_from, "valid_to": t.valid_to,
-                 "print_image": t.spec.get("print_image"), "print_sha": _print_sha(t)}
+                 "print_image": t.spec.get("print_image"), "print_sha": _print_sha(t),
+                 "print_used": t.uses_print_layer}          # 인쇄 층으로 재는 칸이 있는가 (role meter·shifts·tally — 4.3)
                 for t in site.templates.values()]
         from .forms.equipment import master_keys
 
@@ -295,7 +299,9 @@ def cmd_info(a) -> int:
                      f"장비명 대응표 {len(site.equipment_aliases)}개 (해시 {site.equipment_aliases_sha}, 마스터 {n_master}대)")
         for t in tpls:
             valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}" if t["family"] else "")
-            printed = (f"  인쇄 층 {t['print_image']} ({t['print_sha'] or '읽을 수 없음'})" if t["print_image"] else "")
+            printed = (f"  인쇄 층 {t['print_image']} ({t['print_sha'] or '읽을 수 없음'})"
+                       + ("" if t["print_used"] else " — 인쇄 층으로 재는 칸(role meter·shifts·tally)이 없어 쓰지 않음")
+                       if t["print_image"] else "")
             lines.append(f"  {t['name']:<24} handler={t['handler']:<11} 표 {t['regions']}개, 셀 {t['cells']}개"
                          + ("" if t["status"] == "cells" else "  (분류 전용 — 셀 정의 없음)") + valid + printed)
     else:
@@ -581,11 +587,13 @@ def cmd_template(a) -> int:
     from .tools.mktemplate import init_template
 
     if a.template_command == "check":
-        from .tools.tpltools import check_template
+        from .tools.tpltools import check_notes, check_template
 
         errs = check_template(a.template_dir)
-        _emit(a, {"template": a.template_dir, "problems": errs},
-              "\n".join(f"- {e}" for e in errs) + f"\n오류 {len(errs)}개" if errs else "오류 없음")
+        notes = check_notes(a.template_dir)                    # 오류가 아닌 참고 (쓰이지 않는 인쇄 층) — 종료 코드에 세지 않는다
+        _emit(a, {"template": a.template_dir, "problems": errs, "notes": notes},
+              ("\n".join(f"- {e}" for e in errs) + f"\n오류 {len(errs)}개" if errs else "오류 없음")
+              + "".join(f"\n참고: {n}" for n in notes))
         return 1 if errs else 0
     if a.template_command == "preview":
         from .forms.template import TemplateError
@@ -635,8 +643,10 @@ def cmd_synth(a) -> int:
 
     if a.mix_pages and not a.meta_fields:
         raise SystemExit("--mix-pages 는 --meta-fields 와 같이 씁니다")
+    if a.print_layers and not (a.usage_logs or a.usage_only):
+        raise SystemExit("--print-layers 는 --usage-logs 또는 --usage-only 와 같이 씁니다")
     r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
-                 usage_logs=a.usage_logs, usage_only=a.usage_only)
+                 usage_logs=a.usage_logs, usage_only=a.usage_only, print_layers=a.print_layers)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")

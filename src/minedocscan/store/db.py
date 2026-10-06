@@ -20,7 +20,8 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 # 4: 숫자 인식기(doc_document.warning, doc_field.status_raw) — docs/tasks/0003-digit-recognizer.md
 # 5: 쪽 메타의 출처(doc_page_meta) — docs/tasks/0004-page-fields-and-checks.md
 # 6: 값의 형식(doc_field.format), 장비 가동 일보(eq_usage_daily, prod_tally, xcheck_usage) — docs/tasks/0005-usage-logs.md
-SCHEMA_VERSION = 6
+# 7: 인쇄 층·동시 판(doc_page.print_sha, doc_page.variant_errs) — docs/tasks/0006-print-layer-and-variants.md
+SCHEMA_VERSION = 7
 
 # 테이블별 기본 키 (upsert 의 충돌 대상)
 PRIMARY_KEYS: dict[str, tuple[str, ...]] = {

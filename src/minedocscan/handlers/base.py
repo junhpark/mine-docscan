@@ -40,6 +40,7 @@ class PageContext:
     corrector: Corrector
     notes: dict = field(default_factory=dict)
     images: PageImages | None = None    # 이 쪽의 그림(정합 이미지·원본). 인식기에 넘길 크롭을 규격대로 뜨는 데 쓴다
+    print_mask: np.ndarray | None = None  # 인쇄 마스크 (Template.print_mask, 인쇄 층이 없으면 None) — 값 유무에만 쓴다 (tasks/0006 4.3)
 
     @property
     def work_date(self) -> str | None:

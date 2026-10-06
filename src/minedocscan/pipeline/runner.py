@@ -164,7 +164,7 @@ class Pipeline:
         meta = self.site.page_meta(source_name, page_no)
         page = {"page_id": page_id, "document_id": document_id, "page_no": page_no, "template_name": None,
                 "classify_margin": None, "align_inliers": None, "align_grid_err": None, "align_ok": None,
-                "aligned_image": None, "homography": None, "render_dpi": None,
+                "aligned_image": None, "homography": None, "render_dpi": None, "print_sha": None, "variant_errs": None,
                 "work_date": meta.get("date"), "status": "unknown_form", "error": None}
         try:
             out = self._process_page(page, source_name, gray, template, source_path)
@@ -218,6 +218,9 @@ class Pipeline:
             return self._close_page(page)
 
         # extract → (recognize → correct → validate → load: 핸들러)
+        # 인쇄 층(tasks/0006 4.3): 있으면 role 표의 형식 있는 칸의 잉크를 인쇄를 뺀 이진 그림으로 잰다. 어느 층으로 쟀는지 쪽에 남긴다
+        print_mask = tpl.print_mask if tpl.uses_print_layer else None
+        page["print_sha"] = tpl.print_sha if print_mask is not None else None
         upsert(self.con, "doc_page", page)      # doc_field 가 참조하므로 먼저 적는다
         handler = self._handler(tpl.handler)
         # 원본 쪽은 인식기가 원본 해상도 규격을 원할 때만, 쪽마다 한 번 렌더링한다 (PageImages)
@@ -225,7 +228,7 @@ class Pipeline:
         images = PageImages(aligned=ar.warped, source=source_path, page_no=page_no, homography=ar.homography,
                             render_dpi=self.settings.dpi, source_dpi=self.settings.source_dpi,
                             damaged=self.settings.damaged_pdf, source_image=gray if is_image else None)
-        obs = observe_cells(ar.warped, tpl)
+        obs = observe_cells(ar.warped, tpl, print_mask)
         # 메타 필드를 핸들러보다 먼저 읽는다 — 쪽 메타가 핸들러가 행을 만들기 전에 정해져 있어야 한다 (tasks/0004 단계 5)
         meta_obs, machine, reads = self._read_meta(tpl, obs, images)
         # 쪽 메타: 검수값 > 라벨 > 파일명 > 기계 값 — 출처·대조와 함께 doc_page_meta 에. 핸들러는 그 최종 값을 쓴다
@@ -235,7 +238,7 @@ class Pipeline:
         meta = pagemeta.final_meta(meta_rows)
         ctx = PageContext(self.con, self.settings, self.site, tpl, document_id, page_id, page_no, source_name,
                           meta, ar.warped, [o for o in obs if id(o) not in meta_obs], self.recognizer, self.corrector,
-                          images=images)
+                          images=images, print_mask=print_mask)
         if reads:                                   # 읽은 메타 필드의 doc_field 행 (기계 값 + 검수)
             upsert(self.con, "doc_field", apply_reviews(ctx, [_meta_field_row(ctx, o, r) for o, r in reads]))
         result = handler.load(ctx)
