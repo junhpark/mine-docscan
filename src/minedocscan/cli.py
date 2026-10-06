@@ -7,7 +7,7 @@
   eval       정답과 비교 (CER, 필드 정확도, 자동 적재율)
   regress    사이트 팩의 기준 수치와 비교하는 실데이터 회귀 검사
   template   템플릿 도구: init(뼈대), check(오류 전부), preview(칸을 그린 그림, --print), print-layer(인쇄 층),
-             variant(같은 날 섞여 쓰이는 판 — 괘선만 다시 잡는다)
+             variant(같은 날 섞여 쓰이는 판 — 괘선만 다시 잡는다), add-region(표 하나를 더한다)
   synth      개인정보 없는 합성 사이트 팩과 스캔 문서 만들기
   review     검수: serve(로컬 화면), stats(진행 현황), export-answers(검수값 → 정답 파일), export-crops(학습용 크롭)
   recognizer 숫자 인식기: train(학습, torch 필요), list(사이트 팩의 모델), eval(크롭에서 바로 평가)
@@ -129,6 +129,15 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--page", type=int, default=1, help="--scan 의 쪽 번호 (1부터)")
     t.add_argument("--name", required=True, help="새 판의 템플릿 이름 (예: <양식>_b)")
     t.add_argument("--out-dir", help="새 판의 폴더 (기본: 기존 판 옆의 <NAME>). git 작업 트리 안이거나 이미 있으면 거절한다")
+    t = tsub.add_parser("add-region", parents=[common],
+                        help="그 영역의 괘선을 잡아 표 하나의 뼈대를 template.yaml 의 regions 끝에 더한다 (인쇄 층이 있으면 그것에서)")
+    t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
+    t.add_argument("--roi", required=True, help="표 영역 x0,y0,x1,y1 (템플릿 좌표 — 기준 이미지 픽셀). 표 둘레를 조금 넉넉히, "
+                   "이웃 표까지의 간격보다는 좁게")
+    t.add_argument("--name", required=True, help="표 이름 (영문·숫자·밑줄) — 같은 이름의 표가 있으면 거절한다")
+    t.add_argument("--role", help="usage 핸들러의 표의 역할 meter | shifts | tally | activities — 그 역할이 요구하는 열의 자리표시로")
+    t.add_argument("--header-rows", type=int, default=1, help="머리 행의 수 (기본 1)")
+    t.add_argument("--allow-in-repo", action="store_true", help="저장소 안의 템플릿도 고친다 (합성 사이트 팩만)")
     t = tsub.add_parser("check", parents=[common],
                         help="템플릿의 오류를 전부: 읽기 오류, 겹치는 칸, 쪽 밖의 칸, 역할에 필요한 칸, 형식과 종류의 불일치 …")
     t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
@@ -653,16 +662,34 @@ def cmd_template(a) -> int:
             raise SystemExit(str(e).splitlines()[0] if str(e) else type(e).__name__) from e
         _emit(a, r, format_summary(r))
         return 0
+    if a.template_command == "add-region":
+        from .tools.mktemplate import AddRegionError, add_region, format_summary
+
+        try:
+            r = add_region(a.template_dir, _roi(a.roi), a.name, role=a.role, header_rows=a.header_rows,
+                           allow_in_repo=a.allow_in_repo)
+        except (AddRegionError, OSError) as e:                  # 거절은 한 줄
+            raise SystemExit(str(e).splitlines()[0] if str(e) else type(e).__name__) from e
+        _emit(a, r, format_summary(r))
+        return 0
     s = _settings(a)
     if s.site is None:
         raise SystemExit("사이트 팩이 지정되지 않았습니다: --site 또는 MINEDOCSCAN_SITE")
-    roi = tuple(int(v) for v in a.roi.split(",")) if a.roi else None
-    if roi and len(roi) != 4:
-        raise SystemExit("--roi 는 x0,y0,x1,y1 네 숫자입니다")
+    roi = _roi(a.roi) if a.roi else None
     path = init_template(a.image, a.name, Path(s.site) / "templates", roi=roi, header_rows=a.header_rows,
                          page=a.page, dpi=s.dpi, handler=a.handler, overwrite=a.overwrite)
     _emit(a, {"template": str(path)}, f"템플릿 뼈대를 만들었습니다: {path}\n열 이름·kind·행 키를 채우세요 (docs/SITE_PACK.md).")
     return 0
+
+
+def _roi(text: str) -> tuple[int, int, int, int]:
+    try:
+        roi = tuple(int(v) for v in text.split(","))
+    except ValueError:
+        roi = ()
+    if len(roi) != 4:
+        raise SystemExit("--roi 는 x0,y0,x1,y1 네 정수입니다")
+    return roi
 
 
 def cmd_synth(a) -> int:
