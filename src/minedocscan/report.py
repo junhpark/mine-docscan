@@ -84,7 +84,19 @@ def build_report(con: sqlite3.Connection, families: dict[str, str] | None = None
     variants = variant_summary(con, families)
     if variants:
         rep["variants"] = variants
+    # 점으로 쓴 시각을 계기 값으로 넣었을 수 있는 쪽 (tasks/0006 4.8): 가동 기록이 있을 때만 키가 생긴다 — 가동 일보가 없는
+    # 사이트의 리포트(와 regress 의 기준)는 예전과 같고, 있는 사이트는 regress 에 새 항목으로 나온다 (usage 묶음 안에 두면 어긋남)
+    if rep["usage"]["pages"]:
+        rep["usage_dotted_suspect"] = dotted_suspect(con)
     return rep
+
+
+def dotted_suspect(con: sqlite3.Connection) -> int:
+    """계기 값(reading_kind meter)으로 적재되었는데 시작·종료가 둘 다 24 이하인 쪽의 수 — 점으로 쓴 시각(08.00)을 그대로 넣었을
+    수 있다 (tasks/0006 4.8). 리포트는 옆에 mixed(한 칸만 콜론으로 넣은 쪽 — usage.reading 의 mixed)를 같이 보여 준다.
+    세기만 한다 — 값은 고치지 않는다."""
+    return con.execute("SELECT COUNT(*) FROM eq_usage_daily WHERE reading_kind = 'meter' AND meter_start <= 24 "
+                       "AND meter_end <= 24").fetchone()[0] or 0
 
 
 NEAR_TIE_PX = 1.0          # 리포트: 두 판의 괘선 오차 차이가 이보다 작은 쪽 = 가르기 어려웠던 쪽 (tasks/0006 4.6·9절) — 세기만 한다
@@ -385,6 +397,8 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
             f"가동 기록 {u['pages']}쪽 ({kv(u['by_form'])}) — 계기 칸: {kv(u['reading'])}; 검수 대기 {u['pending']}",
             f"  가동 시간의 근거: {kv(u['hours_basis'])}; 장비명 있음 {u['with_equipment']}, 장비 ID 정해짐 {u['with_equipment_id']}",
             f"  작업량 칸 {u['tally']['cells']}개 — 값 있음 {u['tally']['filled']}, 수 {u['tally']['with_count']}",
+            f"  계기 값의 시작·종료가 둘 다 24 이하인 쪽 {rep.get('usage_dotted_suspect', 0)} (점으로 쓴 시각일 수 있다 — "
+            f"종이를 본다), 계기 값과 시각이 섞인 쪽(mixed) {u['reading'].get('mixed', 0)}",
         ]
         names = {"total": "총 = 종료 − 시작", "subtotal": "소계 = 합", "continuity": "계기의 연속성"}
         for k, d in (rep.get("xcheck_usage") or {}).items():

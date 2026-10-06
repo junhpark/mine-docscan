@@ -317,11 +317,12 @@ def usage_fields(con) -> list:
         "WHERE p.template_name IN (?, ?, ?) AND f.kind LIKE 'handwritten%' ORDER BY f.field_id", (*USAGE_LOGS, T_LOADER)).fetchall()
 
 
-def review_usage(con, site, settings, answers, regions=None) -> int:
-    """가동 일보의 칸·필드를 정답대로 검수한다 (값이 있으면 value, 없으면 empty). regions: 이 표(와 "fields")만."""
+def review_usage(con, site, settings, answers, regions=None, skip=()) -> int:
+    """가동 일보의 칸·필드를 정답대로 검수한다 (값이 있으면 value, 없으면 empty). regions: 이 표(와 "fields")만.
+    skip: 건너뛸 field_id (이미 다른 길 — 예: readings 대기열 — 로 검수한 칸)."""
     n = 0
     for f in usage_fields(con):
-        if regions is not None and f["region"] not in regions:
+        if (regions is not None and f["region"] not in regions) or f["field_id"] in skip:
             continue
         text = answers.get((f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"] or ""))
         rv = Review(f["field_id"], "value", text, "jp") if text else Review(f["field_id"], "empty", reviewer="jp")

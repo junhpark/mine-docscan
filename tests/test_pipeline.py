@@ -11,6 +11,8 @@ def test_every_page_classified_aligned_and_loaded(synth, null_run):
     assert rep["documents"] == exp["documents"] and rep["pages"] == exp["pages"]
     assert rep["pages_by_form"] == exp["pages_by_form"]
     assert rep["pages_by_status"] == {"loaded": exp["pages"]}
+    # 가동 일보가 없는 사이트: 0006 의 키가 없다 — 리포트(와 regress 의 기준)가 예전과 같다
+    assert rep["usage"]["pages"] == 0 and not {"usage_dotted_suspect", "print_layer", "variants"} & set(rep)
     for name, a in rep["align"].items():
         assert a["ok"] == a["pages"], name
         assert a["max_grid_err"] <= 3.0, name

@@ -5,6 +5,7 @@
   haul-numbers  운반 숫자 셀의 표본 (정답 만들기). 기계 값은 숨긴다 — 보여 주면 그 값에 끌린다
   mismatch      교차검증 불일치 칸마다 한 항목: 일보의 주간·야간 셀과 행렬 셀(여러 장이면 전부)을 묶는다. 기계 값 숨김
   pending       검수 대기 필드 전부, 쪽 순서 (운영용). 기계 값을 보여 주고 입력창에 미리 채운다
+                계기 표의 시작·종료 칸에는 readings 와 같은 ask_dotted (tasks/0006 4.8 — 미리 채운 기계 값은 정한 값이 아니다)
   page-fields   쪽의 메타(차량번호·작성자)가 되는 자유 필드 중 아직 값이 없는 것. 항목 = 쪽 하나. 후보 목록을 같이 준다.
                 기계가 채운 키는 나오지 않는다. audit=N 이면 기계의 상태와 상관없이 날짜별로 고르게 뽑은 쪽 N 개에서 사람·파일명의
                 값이 없는 키를 (기계 값 없이) 보여 준다 — 자동 적재된 쪽의 오류를 잴 정답 (tasks/0004 4.6)
@@ -12,8 +13,11 @@
   checks        점검표의 장비 행 표본 (✓ 판정의 정답, tasks/0004 단계 6). 항목 = 행 하나(유·무 두 칸). 기계의 판정은 숨긴다.
                 판정 불가인 행, 점검을 하지 않은 날(column_unused)의 행도 모집단에 있다 — 표시가 없다는 것도 정답이다.
                 검수한 행도 목록에 남긴다 (answer) — 다시 열면 전에 고른 답이 보인다
-  readings      가동 일보의 계기 칸 (tasks/0005 단계 5). 항목 = 쪽 하나 (시작·종료·총을 한 번에). 계기 표에 잉크가 있는 쪽,
-                audit=N 이면 잉크와 상관없이 날짜별로 고르게 뽑은 쪽 N 개. 기계 값도 앞날의 값도 싣지 않는다 (4.7 — 보여 주면 따라 적는다)
+  readings      가동 일보의 가동 시간을 정하는 칸 (tasks/0005 단계 5, tasks/0006 4.7). 항목 = 쪽 하나: 계기 칸(시작·종료·총) +
+                근무 시각 칸(shifts 표의 time_range 칸, 행 순서)을 한 번에. 그중 하나라도 잉크가 있는 쪽, audit=N 이면 잉크와 상관없이
+                날짜별로 고르게 뽑은 쪽 N 개. 기계 값도 앞날의 값도 싣지 않는다 (0005 4.7 — 보여 주면 따라 적는다).
+                계기 표의 시작·종료 칸(reading 형식)에는 ask_dotted — 점으로 쓴 시각(08.00)을 넣으면 화면이 묻는다 (0006 4.8).
+                usage-check·pending 의 계기 칸도 같다
   usage-check   가동 일보의 검산이 어긋난 것 (xcheck_usage 의 gap·overlap·mismatch). 항목 = 검산 하나: 비교한 칸들(다른 쪽이면
                 두 쪽)과 지금 값, 차이. 고칠 칸만 고쳐 저장한다 — 고쳐서 맞으면 끝, 여전히 어긋나면 남는다. 아무것도 고치지 않고
                 저장하면 "종이에 적힌 대로"를 확인한 것이고 끝난다 (어긋남은 xcheck_usage 와 리포트에 그대로 남는다 — ADR 0006).
@@ -33,7 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
 from .store import effective, field_id_of
 
@@ -63,6 +67,7 @@ class QueueCell:
     human: dict | None = None               # meta-check: 사람·파일명의 값 {value, source}
     format: str | None = None               # 값의 형식 (forms/formats.py) — 화면이 받는 글자와 안내를 바꾼다
     current: dict | None = None             # usage-check: 지금의 최종 값 {value, has_value} — 고칠 칸을 고른다
+    ask_dotted: bool = False                # 계기 표의 시작·종료 칸(reading): 점으로 쓴 시각을 넣으면 화면이 묻는다 (tasks/0006 4.8)
 
 
 @dataclass
@@ -84,7 +89,7 @@ def build_queue(con: sqlite3.Connection, name: str, *, n: int | None = None, see
     elif name == "mismatch":
         items, total, done = _mismatch(con)
     elif name == "pending":
-        items, total, done = _pending(con, template, kind)
+        items, total, done = _pending(con, template, kind, site)
     elif name == "page-fields":
         if site is None:
             raise ValueError("page-fields 대기열에는 사이트 팩이 필요합니다 (템플릿의 meta_key 와 라벨)")
@@ -203,7 +208,9 @@ def _mismatch(con):
 
 
 # ── pending ────────────────────────────────────────────────────────────────
-def _pending(con, template: str | None, kind: str | None):
+def _pending(con, template: str | None, kind: str | None, site=None):
+    """검수 대기 칸 하나씩 (기계 값을 미리 채운다). 사이트 팩이 있으면 계기 표의 시작·종료 칸에 ask_dotted — 같은
+    handwritten_number 라 계기 칸도 여기 나온다 (tasks/0006 4.7·4.8: 묻는 것은 칸에 붙는다, 대기열이 아니라)."""
     kinds = [kind] if kind else list(INPUT_KINDS)
     sql = _FIELD_SQL + f"WHERE f.review_status = 'pending' AND f.kind IN ({','.join('?' * len(kinds))})"
     args: list = list(kinds)
@@ -214,7 +221,8 @@ def _pending(con, template: str | None, kind: str | None):
     reviews = effective(con, field_ids=[r["field_id"] for r in rows])      # illegible 로 표시한 것은 다시 묻지 않는다
     todo = sorted((r for r in rows if r["field_id"] not in reviews), key=_order)
     items = [QueueItem(r["field_id"], _title(r, r["field_name"]), r["work_date"],
-                       [_cell(r, r["field_name"], None, show_machine=True)]) for r in todo]
+                       [replace(_cell(r, r["field_name"], None, show_machine=True),
+                                ask_dotted=site is not None and ask_dotted(site, r))]) for r in todo]
     return items, len(todo), 0
 
 
@@ -380,43 +388,76 @@ def _candidates(con, site, key: str) -> list[str]:
 
 # ── readings ───────────────────────────────────────────────────────────────
 def _readings(con, site, audit: int | None = None, seed: int = 0):
-    """가동 일보의 계기 칸 (role meter). 쪽마다 한 항목: 시작·종료·총. 계기 표에 기계가 잉크를 본 칸(has_value_raw)이 있는 쪽 —
-    audit=N 이면 잉크와 상관없이 날짜별로 고르게 N 쪽. 셀에 기계 값을 싣지 않고, 다른 쪽(앞날)의 값도 싣지 않는다 (4.7).
-    세 칸에 유효한 검수가 다 있으면 끝난 쪽."""
+    """가동 시간을 정하는 칸 (tasks/0006 4.7). 쪽마다 한 항목: 계기 칸(role meter — 시작·종료·총) 다음에 근무 시각 칸(role shifts 의
+    time_range 칸, 행 순서). 계기 표만 있는 양식도, 근무 시각 표만 있는 양식도 된다. 그 칸 중 하나라도 기계가 잉크를 본 칸
+    (has_value_raw)이 있는 쪽 — audit=N 이면 잉크와 상관없이 날짜별로 고르게 N 쪽. 셀에 기계 값을 싣지 않고, 다른 쪽(앞날)의 값도
+    싣지 않는다 (0005 4.7). 항목의 칸에 전부 유효한 검수가 있으면 끝난 쪽."""
     from ..forms.template import meter_slot
 
-    regions = {t.name: {r["name"] for r in t.regions if r.get("role") == "meter"} for t in site.templates.values()
-               if t.handler == "usage"}
-    names = [n for n, regs in regions.items() if regs]
+    roles = {t.name: {r["name"]: r["role"] for r in t.regions if r.get("role") in ("meter", "shifts")}
+             for t in site.templates.values() if t.handler == "usage"}
+    names = [n for n, regs in roles.items() if regs]
     if not names:
         return [], 0, 0
     rows = con.execute(_FIELD_SQL + f"WHERE p.status = 'loaded' AND f.kind LIKE 'handwritten%' AND p.template_name IN "
                        f"({','.join('?' * len(names))})", names).fetchall()
     order = {"start": 0, "end": 1, "total": 2}
-    by_page: dict[str, list] = {}
+    shift_labels: dict = {}
+    by_page: dict[str, list] = {}                # 쪽 → [(보여 주는 순서, 라벨, 행)]
     for r in rows:
-        slot = meter_slot(r["field_name"], r["row_key"])
-        if r["region"] in regions[r["template_name"]] and slot:
-            by_page.setdefault(r["page_id"], []).append((order[slot], slot, r))
+        role = roles[r["template_name"]].get(r["region"])
+        slot = meter_slot(r["field_name"], r["row_key"]) if role == "meter" else None
+        if slot:
+            by_page.setdefault(r["page_id"], []).append(((0, order[slot], 0), METER_LABELS[slot], r))
+        elif role == "shifts" and r["format"] == "time_range":
+            label = _shift_label(site, r, shift_labels)
+            by_page.setdefault(r["page_id"], []).append(((1, r["row_no"], r["x0"] or 0), label, r))
     if audit:
         firsts = [min(v, key=lambda x: x[0])[2] for v in by_page.values()]
         pages = [r["page_id"] for r in _stratified_pages(firsts, audit, seed)]
     else:
-        pages = [pid for pid, v in by_page.items() if any(r["has_value_raw"] for _o, _s, r in v)]
-    pages.sort(key=lambda pid: _order(by_page[pid][0][2]))
-    reviews = effective(con, field_ids=[r["field_id"] for pid in pages for _o, _s, r in by_page[pid]])
+        pages = [pid for pid, v in by_page.items() if any(r["has_value_raw"] for _o, _l, r in v)]
+    pages.sort(key=lambda pid: _order(min(by_page[pid], key=lambda x: x[0])[2]))
+    reviews = effective(con, field_ids=[r["field_id"] for pid in pages for _o, _l, r in by_page[pid]])
     items, done = [], 0
     for pid in pages:
         cells = sorted(by_page[pid], key=lambda x: x[0])
-        if all(r["field_id"] in reviews for _o, _s, r in cells):
+        if all(r["field_id"] in reviews for _o, _l, r in cells):
             done += 1
             continue
         r0 = cells[0][2]
-        title = f"{r0['work_date'] or '날짜 없음'} · {r0['template_name']} · {r0['source_name']}#{r0['page_no']} · 계기"
+        what = "·".join(w for g, w in ((0, "계기"), (1, "근무 시각")) if any(o[0] == g for o, _l, _r in cells))
+        title = f"{r0['work_date'] or '날짜 없음'} · {r0['template_name']} · {r0['source_name']}#{r0['page_no']} · {what}"
         items.append(QueueItem(f"readings:{pid}", title, r0["work_date"],
-                               [QueueCell(r["field_id"], METER_LABELS[slot], r["kind"], _review_dict(reviews.get(r["field_id"])),
-                                          None, format=r["format"]) for _o, slot, r in cells]))
+                               [QueueCell(r["field_id"], label, r["kind"], _review_dict(reviews.get(r["field_id"])), None,
+                                          format=r["format"], ask_dotted=ask_dotted(site, r)) for _o, label, r in cells]))
     return items, len(pages), done
+
+
+def _shift_label(site, r, cache: dict) -> str:
+    """근무 시각 칸의 라벨: "근무 시각 " + 행에 인쇄된 근무 구분(행 메타 shift, 없으면 행 키). 표에 time_range 열이 둘 이상이면
+    열 이름을 덧붙인다. 템플릿의 값이다 — 손으로 쓴 값이 아니다."""
+    key = (r["template_name"], r["region"])
+    if key not in cache:
+        reg = site.templates[r["template_name"]].region(r["region"])
+        ranges = [c for c in reg["columns"] if c.get("format") == "time_range"]
+        cache[key] = ({row["row"]: row for row in reg["rows"]}, len(ranges) > 1)
+    rows, many = cache[key]
+    row = rows.get(r["row_no"], {})
+    label = f"근무 시각 {row.get('shift') or r['row_key'] or r['row_no']}"
+    return f"{label} · {r['field_name']}" if many else label
+
+
+def ask_dotted(site, r) -> bool:
+    """점으로 쓴 시각을 물을 칸인가 (tasks/0006 4.8): 가동 일보의 계기 표(role meter)의 시작·종료 칸이고 형식이 reading.
+    총은 가동 시간(길이)이라 묻지 않고, 근무 시각 칸(time_range)·소수(decimal)·시각(time) 칸도 묻지 않는다."""
+    from ..forms.template import meter_slot
+
+    tpl = site.templates.get(r["template_name"])
+    if tpl is None or tpl.handler != "usage" or r["format"] != "reading" or not str(r["kind"]).startswith("handwritten"):
+        return False
+    role = next((reg.get("role") for reg in tpl.regions if reg["name"] == r["region"]), None)
+    return role == "meter" and meter_slot(r["field_name"], r["row_key"]) in ("start", "end")
 
 
 # ── usage-check ────────────────────────────────────────────────────────────
@@ -463,7 +504,7 @@ def _usage_check(con, site):
                 continue
             cur = {"value": r["value_final"] if r["has_value"] else "", "has_value": r["has_value"]}
             cells.append(QueueCell(fid, _check_label(c, k, r), r["kind"], _review_dict(reviews.get(fid)), None,
-                                   format=r["format"], current=cur))
+                                   format=r["format"], current=cur, ask_dotted=ask_dotted(site, r)))
         diff = "" if c["diff"] is None else f" · 차이 {c['diff']:+g}"
         title = f"{c['work_date'] or '날짜 없음'} · {c['template_name']} · {c['source_name']}#{c['page_no']} · " \
                 f"{names.get(c['check_kind'], c['check_kind'])} {c['result']}{diff}"

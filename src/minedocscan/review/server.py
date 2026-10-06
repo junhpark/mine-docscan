@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from ..forms.formats import FORMATS, HINTS, INPUT_CHARS, FormatError, normalize
+from ..forms.formats import DOTTED_CLOCK, FORMATS, HINTS, INPUT_CHARS, FormatError, normalize
 from .crops import CropError, cell_crop, field_info, pair_crop, row_crop
 from .queue import INPUT_KINDS, QUEUES, build_queue
 from .store import VERDICTS, field_format, review_from_field, save, stats
@@ -74,7 +74,8 @@ class ReviewApp:
                         **{k: v for k, v in opts.items() if k in ("n", "seed", "empty_share", "template", "kind", "audit")})
         q.update(reviewer=self.reviewer, site=self.site.name, show_machine=(name == "pending"),
                  templates={t.name: t.title for t in self.site.templates.values()},
-                 formats={f: {"chars": INPUT_CHARS[f], "hint": HINTS[f]} for f in FORMATS})
+                 formats={f: {"chars": INPUT_CHARS[f], "hint": HINTS[f]} for f in FORMATS},
+                 dotted_clock=DOTTED_CLOCK.pattern)      # 점으로 쓴 시각의 모양 — ask_dotted 칸에서 화면이 묻는다 (tasks/0006 4.8)
         return q
 
     def crop_png(self, params: dict) -> tuple[bytes, str]:

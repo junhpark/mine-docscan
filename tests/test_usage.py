@@ -66,19 +66,24 @@ def reviewed(usage_run, usage_synth, tmp_path_factory) -> dict:
     cell = con.execute("SELECT * FROM prod_tally WHERE page_id = ? AND count IS NOT NULL ORDER BY tally_id", (pid,)).fetchone()
     save(con, site, settings, Review(cell["tally_id"], "value", str(cell["count"] + 10), "jp"))
     states["tally"] = dict(con.execute("SELECT * FROM prod_tally WHERE tally_id = ?", (cell["tally_id"],)).fetchone())
-    # 계기 칸은 readings 대기열로: 쪽마다 세 칸을 한 번에 (검수 화면이 보내는 것과 같은 /api/reviews)
+    # 가동 시간 칸(계기 + 근무 시각)은 readings 대기열로: 쪽마다 한 번에 (검수 화면이 보내는 것과 같은 /api/reviews).
+    # 저장 직후 그 쪽의 가동 기록을 적어 둔다 (한 번의 저장으로 가동 시간이 정해지는지 — tasks/0006 단계 5)
     app = ReviewApp(con, site, settings, "jp", "readings")
     key = {f["field_id"]: (f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"]) for f in usage_fields(con)}
     q = app.queue_json({})
-    states["readings"] = [q]
-    n = 0
+    states["readings"], states["readings_rows"] = [q], {}
+    n, done = 0, set()
     for it in q["items"]:
         items = [{"field_id": c["field_id"], "verdict": "value" if answers.get(key[c["field_id"]]) else "empty",
                   "value": answers.get(key[c["field_id"]], "")} for c in it["cells"]]
         states["readings"].append(app.post_reviews({"items": items}))
+        pid = it["item_id"].split(":", 1)[1]
+        states["readings_rows"][pid] = dict(con.execute("SELECT * FROM eq_usage_daily WHERE page_id = ?", (pid,)).fetchone())
+        done |= {x["field_id"] for x in items}
         n += len(items)
     states["readings"].append(app.queue_json({}))
-    n += review_usage(con, site, settings, answers, regions=("shifts", "fields"))
+    # 나머지(readings 에 오지 않은 쪽의 근무 시각 칸, 필드)는 칸마다
+    n += review_usage(con, site, settings, answers, regions=("shifts", "fields"), skip=done)
     n += _review_pending_tally(con, site, settings, answers)          # 잉크는 있는데 답이 없는 작업량 칸 (메모, 칸 안의 인쇄)
     f = con.execute("SELECT f.*, d.source_name || '#' || p.page_no AS source, p.template_name FROM doc_field f "
                     "JOIN doc_page p ON f.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
@@ -673,28 +678,146 @@ def test_renaming_moves_the_record_between_both_equipments(reviewed, usage_synth
 
 # ── 단계 5: 검수 대기열 ─────────────────────────────────────────────────────
 def test_readings_queue_shows_one_page_at_a_time_without_machine_or_other_pages(reviewed, usage_synth):
+    """readings 의 항목 = 쪽 하나: 계기 칸(시작·종료·총) 다음에 근무 시각 칸 (tasks/0006 4.7). 그중 하나라도 잉크가 있는 쪽이 오고,
+    기계 값·다른 쪽의 값은 응답에 없다 (근무 시각 칸까지)."""
     q0, *saves, q1 = reviewed["states"]["readings"]
     truth = usage_synth.truth["usage"]
-    inked = [t for t in truth if t["reading_kind"] != "empty"]
+    inked = [t for t in truth if t["reading_kind"] != "empty" or t["shift_minutes"] is not None]
+    assert any(t["reading_kind"] == "empty" for t in inked)               # 계기가 비고 근무 시각만 적힌 쪽도 온다
     assert (q0["total"], q0["done"], len(q0["items"])) == (len(inked), 0, len(inked))
     assert (q1["total"], q1["done"], q1["items"]) == (len(inked), len(inked), [])
+    meter = ["계기 시작", "계기 종료", "총"]
     for it in q0["items"]:
         pid = it["item_id"].split(":", 1)[1]
-        assert [c["label"] for c in it["cells"]] == ["계기 시작", "계기 종료", "총"]
-        assert all(c["field_id"].startswith(pid + ":meter:") for c in it["cells"])        # 다른 쪽(앞날)의 칸이 없다
+        loader = it["title"].split(" · ")[1] == T_LOADER
+        assert [c["label"] for c in it["cells"]] == meter + (["근무 시각 AM", "근무 시각 PM", "근무 시각 OT"] if loader else [])
+        assert all(c["field_id"].startswith((pid + ":meter:", pid + ":shifts:")) for c in it["cells"])   # 다른 쪽(앞날)의 칸이 없다
         assert all(c["machine"] is None and c["human"] is None and c["current"] is None for c in it["cells"])
-        assert {c["format"] for c in it["cells"]} == {"reading"}
+        assert [c["format"] for c in it["cells"]] == ["reading"] * 3 + (["time_range"] * 3 if loader else [])
+        # 점으로 쓴 시각을 묻는 칸: 계기의 시작·종료만 (총은 길이, 근무 시각은 범위)
+        assert [c["ask_dotted"] for c in it["cells"]] == [True, True, False] + ([False] * 3 if loader else [])
     blob = json.dumps(q0, ensure_ascii=False)
-    for t in truth:                                                    # 응답 어디에도 계기 값(정답)이 없다
-        for v in (t["meter_start"], t["meter_end"], t["clock_start"]):
+    for t in truth:                                                    # 응답 어디에도 계기 값·근무 시각(정답)이 없다
+        for v in (t["meter_start"], t["meter_end"], t["clock_start"], *(t["shifts"] or {}).values()):
             assert v is None or (f"{v:.1f}" if isinstance(v, float) else v) not in blob
-    # 한 쪽의 세 칸이 한 번의 저장으로 남는다 (같은 시각)
-    assert all(len(s["saved"]) == 3 and s["reviewed_at"] for s in saves)
-    recs = [rv for _seq, rv in load(reviewed["settings"].reviews)[0] if rv.region == "meter"]
+    # 한 쪽의 칸이 한 번의 저장으로 남는다 (같은 시각)
+    assert [len(s["saved"]) for s in saves] == [len(it["cells"]) for it in q0["items"]] and all(s["reviewed_at"] for s in saves)
+    recs = [rv for _seq, rv in load(reviewed["settings"].reviews)[0] if rv.region in ("meter", "shifts")]
     by_page: dict = {}
-    for rv in recs[: 3 * len(saves)]:
+    for rv in recs[: sum(len(s["saved"]) for s in saves)]:
         by_page.setdefault(rv.page_id, set()).add(rv.reviewed_at)
     assert len(by_page) == len(saves) and all(len(v) == 1 for v in by_page.values())
+
+
+def test_shift_only_page_gets_its_hours_from_one_save(reviewed, usage_run, usage_synth):
+    """계기가 비고 근무 시각만 적힌 쪽(SHOVEL_shifts_only)이 readings 에 올라오고, 그 항목의 한 번의 저장으로 가동 시간이
+    shifts 근거로 정해진다 (tasks/0006 단계 5). 저장 전에는 근무 시각 칸이 검수 대기라 가동 시간이 NULL 이다."""
+    q0 = reviewed["states"]["readings"][0]
+    before = _by_source(usage_run["pipe"].con)
+    shifts_only = [t for t in usage_synth.truth["usage"] if "SHOVEL_shifts_only" in t["scenarios"]]
+    assert shifts_only
+    for t in shifts_only:
+        pid = before[t["source"]]["page_id"]
+        it = next(it for it in q0["items"] if it["item_id"] == f"readings:{pid}")
+        assert sum(c["field_id"].startswith(pid + ":shifts:") for c in it["cells"]) == 3
+        assert before[t["source"]]["hours"] is None and before[t["source"]]["reading_kind"] == "empty"
+        row = reviewed["states"]["readings_rows"][pid]                  # 그 항목을 저장한 직후
+        assert (row["hours_basis"], row["shift_minutes"]) == ("shifts", t["shift_minutes"])
+        assert row["hours"] == pytest.approx(t["hours"]) and t["hours_basis"] == "shifts"
+        assert json.loads(row["shifts"]) == t["shifts"]
+
+
+def test_readings_with_a_shifts_only_template(usage_run):
+    """근무 시각 표만 있는 양식(계기 표 없음)도 readings 에 쪽마다 한 항목으로 온다 — 로우더 템플릿에서 계기 표를 뺀 사이트로
+    같은 DB 의 대기열을 만든다 (칸의 역할은 템플릿에서 읽는다). 근무 시각 표에 time_range 열이 둘 이상이면 라벨에 열 이름이 붙는다
+    (그 표에 열 하나를 더 적은 템플릿 — 라벨은 템플릿의 열만 본다)."""
+    from types import SimpleNamespace
+
+    con, site = usage_run["pipe"].con, usage_run["pipe"].site
+
+    def without_meter(t, extra_range=False):
+        regs = [r for r in t.regions if r.get("role") != "meter"] if t.name == T_LOADER else t.regions
+        if extra_range and t.name == T_LOADER:
+            regs = [{**r, "columns": [*r["columns"], {"idx": 9, "name": "extra", "format": "time_range"}]}
+                    if r.get("role") == "shifts" else r for r in regs]
+        return SimpleNamespace(name=t.name, handler=t.handler, regions=regs,
+                               region=lambda n, regs=regs: next(r for r in regs if r["name"] == n))
+
+    fake = SimpleNamespace(templates={n: without_meter(t) for n, t in site.templates.items()})
+    q = build_queue(con, "readings", site=fake)
+    loader = [it for it in q["items"] if it["title"].split(" · ")[1] == T_LOADER]
+    assert loader and all([c["label"] for c in it["cells"]] == ["근무 시각 AM", "근무 시각 PM", "근무 시각 OT"]
+                          and it["title"].endswith(" · 근무 시각") and not any(c["ask_dotted"] for c in it["cells"])
+                          for it in loader)
+    two = build_queue(con, "readings", site=SimpleNamespace(
+        templates={n: without_meter(t, extra_range=True) for n, t in site.templates.items()}))
+    assert [[c["label"] for c in it["cells"]] for it in two["items"] if it["title"].split(" · ")[1] == T_LOADER] == \
+        [["근무 시각 AM · range", "근무 시각 PM · range", "근무 시각 OT · range"]] * len(loader)
+    full = build_queue(con, "readings", site=site)
+    assert len(q["items"]) == len(full["items"])            # 합성 로우더 쪽은 계기를 적었으면 근무 시각도 적었다
+    assert [it for it in q["items"] if it not in loader] == [it for it in full["items"]
+                                                             if it["title"].split(" · ")[1] != T_LOADER]
+
+
+# 점으로 쓴 시각 (tasks/0006 4.8): 화면이 묻는 조건. 화면의 스크립트(static/index.html 의 dottedClock)가 같은 규칙이다 —
+# 같은 벡터를 브라우저에서 확인한다
+DOTTED_ASKED = {"08.00": ("08:00", "8.00"), "17.30": ("17:30", "17.30"), "8.00": ("08:00", "8.00"), "24.00": ("24:00", "24.00"),
+                "00.00": ("00:00", "0.00"), " 9.59 ": ("09:59", "9.59")}     # 입력 → (콜론을 고르면, 그대로를 고르면 남는 값)
+DOTTED_NOT_ASKED = ("1234.5", "8.5", "25.30", "08.75", "24.30", "123.45", "08:00", "800", "8", "8.0", "08.000", ".00", "", None)
+
+
+def test_dotted_clock_asks_only_for_two_digit_fractions_up_to_24():
+    from minedocscan.forms.formats import DOTTED_CLOCK, dotted_clock, normalize
+
+    for text, (clock, as_is) in DOTTED_ASKED.items():
+        assert dotted_clock(text) == clock, text
+        assert (normalize("reading", clock), normalize("reading", text)) == (clock, as_is)   # 코드는 여전히 콜론만 시각으로 본다
+    for text in DOTTED_NOT_ASKED:
+        assert dotted_clock(text) is None, text
+    assert DOTTED_CLOCK.pattern == r"^([0-9]{1,2})\.([0-9]{2})$"        # 화면이 RegExp 로 그대로 쓴다 (JavaScript 문법)
+
+
+def test_dotted_clock_cells_both_answers_and_the_report_counts(reviewed, tmp_path):
+    """묻는 칸 = 계기의 시작·종료 (readings 와 usage-check 모두 — 총·근무 시각·작업량 칸은 아니다). 두 답이 서버에서 어떻게
+    남는지: 콜론을 고르면 시각 08:00, 그대로를 고르면 계기 값 8.00. 리포트는 그런 쪽을 센다 — 값은 고치지 않는다."""
+    for it in reviewed["states"]["uc"][0]["items"]:                     # usage-check: 계기 칸이면 같은 표시
+        for c in it["cells"]:
+            assert c["ask_dotted"] == (c["format"] == "reading" and not c["label"].startswith("총")), c["label"]
+    assert any(c["ask_dotted"] for it in reviewed["states"]["uc"][0]["items"] for c in it["cells"])
+    con, site = clone_db(reviewed["con"]), reviewed["site"]
+    settings = replace(reviewed["settings"], reviews=tmp_path / "r.jsonl")
+    shutil.copy(reviewed["settings"].reviews, settings.reviews)        # 검수 파일을 이어서 (같은 초의 앞 검수보다 뒤 줄이 이긴다)
+    app = ReviewApp(con, site, settings, "jp", "readings")
+    from minedocscan.forms.formats import DOTTED_CLOCK
+
+    assert app.queue_json({})["dotted_clock"] == DOTTED_CLOCK.pattern      # 화면이 같은 모양으로 묻는다
+    rows = _by_source(con)
+    rep = build_report(con)
+    assert (rep["usage_dotted_suspect"], rep["usage"]["reading"].get("mixed", 0)) == (0, 0)
+    a, b = sorted((u for u in rows.values() if u["equipment"] == "DRILL"), key=lambda u: u["work_date"])[:2]
+    c = next(u for u in rows.values() if u["reading_kind"] == "meter" and u["meter_end"] > 24 and u["equipment"] != "DRILL")
+    # a: 시작·종료를 점으로 쓴 시각 그대로(계기 값으로) — 묻는 칸에서 "그대로"를 고른 것
+    out = app.post_reviews({"items": [{"field_id": a["start_field_id"], "verdict": "value", "value": "08.00"},
+                                      {"field_id": a["end_field_id"], "verdict": "value", "value": "17.30"}]})
+    assert [x["value"] for x in out["saved"]] == ["8.00", "17.30"]
+    # b: 시작만 콜론을 골랐다 (08.00 → 08:00) — 종료는 계기 값 그대로
+    out = app.post_reviews({"items": [{"field_id": b["start_field_id"], "verdict": "value", "value": "08:00"}]})
+    assert [x["value"] for x in out["saved"]] == ["08:00"]
+    # c: 시작만 점으로 쓴 시각 그대로, 종료는 진짜 계기 값 — 둘 다 24 이하가 아니므로 세지 않는다
+    app.post_reviews({"items": [{"field_id": c["start_field_id"], "verdict": "value", "value": "08.00"}]})
+    rows = {u["page_id"]: u for u in _by_source(con).values()}
+    ua, ub, uc = rows[a["page_id"]], rows[b["page_id"]], rows[c["page_id"]]
+    assert (ua["reading_kind"], ua["meter_start"], ua["meter_end"], ua["hours_basis"]) == ("meter", 8.0, 17.3, "meter")
+    assert (ub["reading_kind"], ub["clock_start"], ub["hours"]) == ("mixed", "08:00", None)
+    assert (uc["reading_kind"], uc["meter_start"]) == ("meter", 8.0) and uc["meter_end"] > 24
+    rep = build_report(con)
+    assert (rep["usage_dotted_suspect"], rep["usage"]["reading"]["mixed"]) == (1, 1)
+    from minedocscan.report import dotted_suspect, format_report
+
+    line = next(x for x in format_report(rep).splitlines() if "24 이하" in x)
+    assert "24 이하인 쪽 1" in line and "(mixed) 1" in line
+    con.execute("UPDATE eq_usage_daily SET reading_kind = 'pending' WHERE page_id = ?", (a["page_id"],))
+    assert dotted_suspect(con) == 0                                     # 계기 값(meter)으로 적재된 쪽만 센다
 
 
 def test_readings_audit_samples_pages_whatever_the_ink(usage_run):
@@ -703,6 +826,13 @@ def test_readings_audit_samples_pages_whatever_the_ink(usage_run):
     dates = {it["work_date"] for it in q["items"]}
     assert q["total"] == 6 and len(dates) == 3                          # 날짜별로 고르게
     assert build_queue(con, "readings", site=site, audit=6, seed=1)["items"] == q["items"]
+    # pending 에도 계기 칸이 나온다 (같은 handwritten_number) — 묻는 칸의 표시는 대기열이 아니라 칸에 붙는다 (tasks/0006 4.8)
+    cells = [c for it in build_queue(con, "pending", site=site)["items"] for c in it["cells"]]
+    asked = [c["ask_dotted"] for c in cells]
+    assert asked == [":meter:" in c["field_id"] and c["label"] in ("start", "end") for c in cells] and any(asked)
+    assert any(":meter:" in c["field_id"] and c["label"] == "total" for c in cells)
+    assert any(":shifts:" in c["field_id"] for c in cells) and any(":tally:" in c["field_id"] for c in cells)
+    assert not any(c["ask_dotted"] for it in build_queue(con, "pending")["items"] for c in it["cells"])   # 사이트 팩 없이
 
 
 def test_usage_check_fix_leaves_still_wrong_stays_confirm_finishes(reviewed):
@@ -810,25 +940,48 @@ def test_illegible_tally_cell_makes_the_subtotal_unknown():
 
 
 def test_readings_never_carry_machine_or_earlier_values(usage_run, usage_synth, tmp_path):
-    """readings 의 응답에는 기계 값도 앞날의 값도 없다 — 기계가 계기를 읽었고(소수·시각을 읽는 모델을 흉내 낸다 — 미룸, tasks/0006 1절) 앞날의 계기를 검수한 뒤에도."""
+    """readings 의 응답에는 기계 값도 앞날의 값도 없다 — 기계가 계기와 근무 시각을 읽었고(소수·시각을 읽는 모델을 흉내 낸다 — 미룸,
+    tasks/0006 1절) 앞날의 계기·근무 시각을 검수한 뒤에도 (tasks/0006 4.7)."""
     con, site = clone_db(usage_run["pipe"].con), usage_run["pipe"].site
     settings = replace(usage_run["settings"], reviews=tmp_path / "r.jsonl")
     con.execute("UPDATE doc_field SET value_raw = '9999.9' WHERE region = 'meter' AND has_value_raw = 1")
+    con.execute("UPDATE doc_field SET value_raw = '01:23~04:56' WHERE region = 'shifts' AND has_value_raw = 1")
     day0 = min(t["date"] for t in usage_synth.truth["usage"])
     first = {t["source"] for t in usage_synth.truth["usage"] if t["date"] == day0}
-    rows = [f for f in usage_fields(con) if f["source"] in first and f["region"] == "meter"]
-    for f in rows:                                                       # 첫날의 계기 칸만 정답대로
-        text = usage_run["answers"].get((f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"]))
-        save(con, site, settings, Review(f["field_id"], "value", text, "jp") if text else Review(f["field_id"], "empty",
-                                                                                                reviewer="jp"))
+    rows = [f for f in usage_fields(con) if f["source"] in first and f["region"] in ("meter", "shifts")]
+
+    def review(region):                                                  # 첫날의 그 표의 칸만 정답대로
+        for f in rows:
+            if f["region"] == region:
+                text = usage_run["answers"].get((f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"]))
+                save(con, site, settings, Review(f["field_id"], "value", text, "jp") if text
+                     else Review(f["field_id"], "empty", reviewer="jp"))
+
+    inked = lambda t: t["reading_kind"] != "empty" or t["shift_minutes"] is not None      # noqa: E731
+    later = [t for t in usage_synth.truth["usage"] if t["date"] != day0 and inked(t)]
+    page = lambda f: f["field_id"].split(":", 1)[0]                                       # noqa: E731
+    pid_of = {f["source"]: page(f) for f in rows}
+    inked0 = {pid_of[t["source"]] for t in usage_synth.truth["usage"] if t["date"] == day0 and inked(t)}
+    waiting = inked0 & {page(f) for f in rows if f["region"] == "shifts"}
+    # 계기 칸만 검수한 쪽은 끝나지 않았다 — 근무 시각 칸이 남은 첫날 쪽은 그대로 있고, 계기 칸에는 그 칸의 검수만 실린다
+    review("meter")
+    qp = build_queue(con, "readings", site=site)
+    got = {it["item_id"].split(":", 1)[1]: it for it in qp["items"]}
+    assert waiting and waiting < inked0 and len(got) == len(later) + len(waiting) and waiting <= set(got)
+    assert (qp["total"], qp["done"]) == (len(later) + len(inked0), len(inked0) - len(waiting))
+    for pid in waiting:
+        assert all((c["review"] is not None) == (":meter:" in c["field_id"]) for c in got[pid]["cells"])
+    review("shifts")
     q = build_queue(con, "readings", site=site)
     blob = json.dumps(q, ensure_ascii=False)
-    later = [t for t in usage_synth.truth["usage"] if t["date"] != day0 and t["reading_kind"] != "empty"]
-    assert q["items"] and len(q["items"]) == len(later) and rows
-    assert "9999.9" not in blob
+    assert q["items"] and len(q["items"]) == len(later) and {f["region"] for f in rows} == {"meter", "shifts"}
+    assert (q["total"], q["done"]) == (qp["total"], len(inked0)) and not waiting & {it["item_id"].split(":", 1)[1]
+                                                                                    for it in q["items"]}
+    assert any(":shifts:" in c["field_id"] for it in q["items"] for c in it["cells"])
+    assert "9999.9" not in blob and "01:23" not in blob
     for t in usage_synth.truth["usage"]:
         if t["date"] == day0:
-            for v in (t["meter_end"], t["clock_end"]):
+            for v in (t["meter_end"], t["clock_end"], *(t["shifts"] or {}).values()):
                 assert v is None or (f"{v:.1f}" if isinstance(v, float) else v) not in blob
 
 
