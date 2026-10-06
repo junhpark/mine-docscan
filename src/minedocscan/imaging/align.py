@@ -15,6 +15,8 @@ import numpy as np
 
 from .grid import detect_grid_roi
 
+MIN_INLIERS = 60            # 정합을 믿는 RANSAC 인라이어의 최소 수 (align_to_template 의 기본값 — 인쇄 층도 같은 값을 쓴다)
+
 
 @dataclass
 class AlignResult:
@@ -32,7 +34,7 @@ def orb_features(gray: np.ndarray, n: int = 6000):
 
 
 def align_to_template(gray: np.ndarray, ref_gray: np.ndarray, regions: list[dict],
-                      ref_features=None, ratio: float = 0.75, min_inliers: int = 60,
+                      ref_features=None, ratio: float = 0.75, min_inliers: int = MIN_INLIERS,
                       max_grid_err: float = 6.0) -> AlignResult:
     """regions: 템플릿의 표 목록 (각각 grid.ys / grid.xs). ref_features: 기준 이미지의 ORB 결과(캐시)."""
     k1, d1 = orb_features(gray)
@@ -49,11 +51,18 @@ def align_to_template(gray: np.ndarray, ref_gray: np.ndarray, regions: list[dict
     inl = int(mask.sum()) if mask is not None else 0
     if H is None:
         return AlignResult(gray, np.eye(3), len(good), inl, float("inf"), False)
-    h, w = ref_gray.shape
-    warped = cv2.warpPerspective(gray, H, (w, h), flags=cv2.INTER_LINEAR, borderValue=255)
+    warped = warp_to_template(gray, H, ref_gray.shape)
     grid_err = grid_error(warped, regions)
     ok = inl >= min_inliers and grid_err <= max_grid_err
     return AlignResult(warped, H, len(good), inl, grid_err, ok)
+
+
+def warp_to_template(gray: np.ndarray, homography, ref_shape: tuple[int, ...]) -> np.ndarray:
+    """렌더링한 쪽 → 템플릿 좌표계 (기준 이미지 크기). 정합과 인쇄 층의 다시 펴기(tools/printlayer.py)가 같이 쓴다 —
+    저장된 호모그래피(doc_page.homography)와 같은 해상도의 쪽이면 정합 그림과 바이트까지 같다."""
+    h, w = ref_shape[:2]
+    H = np.asarray(homography, dtype=np.float64)
+    return cv2.warpPerspective(gray, H, (w, h), flags=cv2.INTER_LINEAR, borderValue=255)
 
 
 def grid_error(warped: np.ndarray, regions: list[dict]) -> float:

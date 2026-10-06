@@ -23,6 +23,19 @@ def imread_gray(path: str | Path) -> np.ndarray:
     return img
 
 
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def image_size(path: str | Path) -> tuple[int, int]:
+    """그림의 (너비, 높이). PNG 는 머리(IHDR)만 읽는다 — 사이트 팩을 읽을 때마다 큰 그림을 풀지 않게. 그 밖의 형식은 풀어서 잰다."""
+    with open(path, "rb") as f:
+        head = f.read(24)
+    if len(head) == 24 and head[:8] == PNG_SIGNATURE and head[12:16] == b"IHDR":
+        return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+    h, w = imread_gray(path).shape[:2]
+    return w, h
+
+
 def imwrite(path: str | Path, img: np.ndarray) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

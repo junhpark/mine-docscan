@@ -15,6 +15,8 @@
                                               #   (없는 괘선을 찾으면 정합이 실패한다). row·idx 는 괘선과 나눔 선을 합친 순서다
                                               # role: usage 핸들러의 표의 역할 — meter | shifts | tally | activities (tasks/0005 4.2)
                                               #   meter: 열 이름(또는 행 키) start·end·total, tally: 소계 칸은 열·행 메타 subtotal: true
+  print_image: print.png                      # 선택. 인쇄 층 (tasks/0006 4.1) — 기준 이미지와 같은 크기의 회색조, 인쇄된 것만.
+                                              #   `template print-layer` 가 만들고 이 키는 사람이 적는다. 없으면 모든 것이 지금과 같다
   fields: [{name, kind, bbox, meta_key?, format?}]     # 표 밖의 자유 필드 (날짜, 작성자, 비고 …)
                                               # format: 손으로 쓰는 칸의 값의 형식 — integer | decimal | time | time_range | reading
                                               #   (forms/formats.py, tasks/0005 4.1). 숫자 칸의 기본은 integer, 글자 칸은 없음
@@ -31,8 +33,9 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from ..imaging import printlayer
 from ..imaging.align import orb_features
-from ..imaging.io import imread_gray
+from ..imaging.io import image_size, imread_gray
 from .formats import FORMAT_KINDS, FORMATS, default_format
 
 CELL_KINDS = {"printed", "handwritten_text", "handwritten_number", "checkmark", "signature"}
@@ -102,6 +105,7 @@ class Template:
             raise TemplateError(f"{self.name}: valid_from 이 valid_to 보다 늦습니다")
         self._ref: np.ndarray | None = None
         self._feats = None
+        self._print: dict = {}                     # 인쇄 층·마스크·해시 (처음 쓸 때 한 번만)
         if validate:
             self._validate()
 
@@ -141,7 +145,32 @@ class Template:
                 n = sum(reg.get("role") == role for reg in self.regions)
                 if n > 1:
                     out.append(f"{self.name}: role {role} 인 표가 {n}개입니다 (쪽 하나에 하나)")
+        out += self.print_problems()
         return out
+
+    def print_problems(self) -> list[str]:
+        """print_image: 빈 문자열이 아닌 파일 이름, 파일이 있고, 크기가 기준 이미지와 같다 (그림을 풀지 않고 머리만 읽는다)."""
+        if "print_image" not in self.spec:
+            return []
+        v = self.spec["print_image"]
+        if not isinstance(v, str) or not v.strip():
+            return [f"{self.name}: print_image 는 템플릿 폴더 안의 파일 이름이어야 합니다 (예: print.png)"]
+        if Path(v).suffix.lower() != ".png":       # 손실 없는 형식만 — 화소가 template print-layer 가 만든 것(print_sha)과 같게
+            return [f"{self.name}: print_image 는 PNG 파일이어야 합니다 (손실 압축이면 화소와 해시가 달라진다): {v}"]
+        p = self.dir / v
+        if not p.is_file():
+            return [f"{self.name}: 인쇄 층 파일이 없습니다: {v} — template print-layer 로 만든 뒤에 키를 적습니다"]
+        try:
+            pw, ph = image_size(p)
+        except (OSError, ValueError):
+            return [f"{self.name}: 인쇄 층을 읽을 수 없습니다: {v}"]
+        try:                                       # 기준 이미지가 없거나 깨졌으면 그쪽 오류가 먼저다 (template check)
+            rw, rh = image_size(self.dir / str(self.spec.get("reference_image") or ""))
+        except (OSError, ValueError):
+            return []
+        if (pw, ph) != (rw, rh):
+            return [f"{self.name}: 인쇄 층 {v} 의 크기 {pw}×{ph} 가 기준 이미지 {rw}×{rh} 와 다릅니다"]
+        return []
 
     def _region_problems(self, reg: dict) -> list[str]:
         out: list[str] = []
@@ -210,6 +239,39 @@ class Template:
         if self._feats is None:
             self._feats = orb_features(self.reference)
         return self._feats
+
+    @property
+    def print_path(self) -> Path | None:
+        """인쇄 층 파일 (print_image). 키가 없으면 None — 그때는 인쇄 층의 속성이 전부 None 이다."""
+        v = self.spec.get("print_image")
+        return self.dir / v if isinstance(v, str) and v.strip() else None
+
+    @property
+    def print_layer(self) -> np.ndarray | None:
+        """인쇄 층 (회색조, 템플릿 좌표계). 한 번만 읽는다."""
+        if self.print_path is None:
+            return None
+        if "layer" not in self._print:
+            self._print["layer"] = imread_gray(self.print_path)
+        return self._print["layer"]
+
+    @property
+    def print_mask(self) -> np.ndarray | None:
+        """인쇄 마스크 (bool, tasks/0006 4.3): 인쇄 층을 grid.binarize 로 이진화해 2 px 넓힌 것. 한 번만 계산한다."""
+        if self.print_path is None:
+            return None
+        if "mask" not in self._print:
+            self._print["mask"] = printlayer.mask(self.print_layer)
+        return self._print["mask"]
+
+    @property
+    def print_sha(self) -> str | None:
+        """인쇄 층의 해시 (printlayer.sha — 화소의 해시, PNG 바이트가 아니다)."""
+        if self.print_path is None:
+            return None
+        if "sha" not in self._print:
+            self._print["sha"] = printlayer.sha(self.print_layer)
+        return self._print["sha"]
 
     def region(self, name: str) -> dict:
         for reg in self.regions:

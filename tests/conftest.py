@@ -276,3 +276,43 @@ def review_usage(con, site, settings, answers, regions=None) -> int:
         save(con, site, settings, rv)
         n += 1
     return n
+
+
+# ── 인쇄 층 (tasks/0006) ───────────────────────────────────────────────────
+@pytest.fixture(scope="session")
+def usage_layers10(tmp_path_factory) -> dict:
+    """합성 가동 일보 10일치(seed 0)의 쪽들로 `template print-layer` 의 기본 설정(최대 40장, 백분위 75)으로 만든 인쇄 층 두 개.
+    수용 기준 1(단계 2)을 양식마다 재는 층이다. usage_synth 의 3일치(운행일보 9쪽)로는 모든 쪽이 같은 자리에 계기 값을 써서
+    운행일보만 잔상이 1.9 % 남는다 — 쪽이 적으면 남는 것이 방법의 성질이고, 지시서의 합성 수치도 10일치로 쟀다.
+    싸게 하려고 파이프라인은 분류만 한다: 사이트 팩에서 두 양식의 칸 정의를 지워(분류 전용 → classified_only, 호모그래피 없음)
+    print-layer 가 쪽을 직접 정합하는 경로(4.2)를 쓰고, 운반 양식은 뺀다(점검표는 장비 마스터라 둔다). 인쇄 층은 칸 정의가 있는
+    원래 템플릿 폴더의 복사본에 쓴다. DB 는 print-layer 가 쓰지 않는다 — db_sha 는 만들기 전의 해시.
+    {"settings", "db", "db_sha", "layers": {양식: {"dir", "summary"}}}"""
+    import hashlib
+    import shutil
+
+    import yaml
+
+    from minedocscan.tools.printlayer import build
+    from minedocscan.tools.synth_usage import T_LOADER, T_USAGE
+
+    root = tmp_path_factory.mktemp("usage_layers10")
+    syn = generate(root / "data", days=10, seed=0, usage_only=True)
+    for name in (T_LOG, T_MATRIX):
+        shutil.rmtree(syn.site / "templates" / name)
+    for name in (T_USAGE, T_LOADER):
+        shutil.copytree(syn.site / "templates" / name, root / "templates" / name)
+        p = syn.site / "templates" / name / "template.yaml"
+        spec = yaml.safe_load(p.read_text(encoding="utf-8"))
+        spec["regions"], spec["fields"] = [], []
+        p.write_text(yaml.safe_dump(spec, allow_unicode=True), encoding="utf-8")
+    settings = Settings(site=syn.site, archive_root=syn.scans, work_root=root / "work", reviews=root / "reviews.jsonl",
+                        save_aligned=False)
+    pipe = Pipeline(settings)
+    pipe.run([syn.scans])
+    pipe.con.close()
+    db = root / "work" / "minedocscan.db"
+    db_sha = hashlib.sha256(db.read_bytes()).hexdigest()
+    layers = {name: {"dir": root / "templates" / name, "summary": build(root / "templates" / name, settings)}
+              for name in (T_USAGE, T_LOADER)}
+    return {"settings": settings, "db": db, "db_sha": db_sha, "layers": layers}

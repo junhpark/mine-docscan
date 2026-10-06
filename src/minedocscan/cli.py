@@ -6,7 +6,7 @@
   pages      쪽 목록 (상태·양식·분류 여유로 거름). --thumbs 는 원본 쪽의 미리보기 PNG
   eval       정답과 비교 (CER, 필드 정확도, 자동 적재율)
   regress    사이트 팩의 기준 수치와 비교하는 실데이터 회귀 검사
-  template   새 양식의 템플릿 뼈대 만들기
+  template   템플릿 도구: init(뼈대), check(오류 전부), preview(칸을 그린 그림, --print), print-layer(인쇄 층)
   synth      개인정보 없는 합성 사이트 팩과 스캔 문서 만들기
   review     검수: serve(로컬 화면), stats(진행 현황), export-answers(검수값 → 정답 파일), export-crops(학습용 크롭)
   recognizer 숫자 인식기: train(학습, torch 필요), list(사이트 팩의 모델), eval(크롭에서 바로 평가)
@@ -108,6 +108,16 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--scan", help="이 스캔의 쪽을 정합해서 그 위에 그린다 (칸이 실제 글씨에 맞는지)")
     t.add_argument("--page", type=int, default=1, help="--scan 의 쪽 번호 (1부터)")
     t.add_argument("--out", help="출력 폴더 (기본 WORK_ROOT/template-preview). 저장소 안은 거절한다")
+    t.add_argument("--print", dest="print_layer", action="store_true",
+                   help="인쇄 층(print_image) 위에 그린다 — 인쇄 화소에 색. 값 자리가 인쇄에 덮이지 않았나 (tasks/0006)")
+    t = tsub.add_parser("print-layer", parents=[common],
+                        help="그 양식으로 분류된 쪽들에서 인쇄 층(손글씨가 빠진 빈 양식)을 만든다 → <템플릿 폴더>/print.png + 요약")
+    t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
+    t.add_argument("--max-pages", type=int, default=40, help="쓸 쪽의 최대 수 — 날짜별로 고르게 (기본 40, 2장 미만이면 거절)")
+    t.add_argument("--percentile", type=_number, default=75,
+                   help="화소마다 밝기의 백분위 (기본 75). 판이 섞였을 수 있는 양식의 첫 층은 50 (tasks/0006 4.2)")
+    t.add_argument("--out", help="출력 PNG 파일 (기본 <템플릿 폴더>/print.png). git 작업 트리 안은 거절한다")
+    t.add_argument("--allow-in-repo", action="store_true", help="저장소 안에도 쓴다 (합성 사이트 팩만)")
     t = tsub.add_parser("check", parents=[common],
                         help="템플릿의 오류를 전부: 읽기 오류, 겹치는 칸, 쪽 밖의 칸, 역할에 필요한 칸, 형식과 종류의 불일치 …")
     t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
@@ -203,6 +213,12 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _number(text: str) -> int | float:
+    """정수면 정수로 (요약에 75 로 찍히게), 아니면 실수."""
+    v = float(text)
+    return int(v) if v.is_integer() else v
+
+
 def _settings(a: argparse.Namespace, **extra) -> Settings:
     return load_settings(a.config, site=a.site, archive_root=a.archive_root, work_root=a.work_root,
                          db_url=a.db_url, **extra)
@@ -266,7 +282,8 @@ def cmd_info(a) -> int:
     if site is not None:
         tpls = [{"name": t.name, "title": t.title, "handler": t.handler, "regions": len(t.regions),
                  "cells": len(t.cells()) + len(t.fields), "status": "cells" if t.has_cells else "classify_only",
-                 "family": t.family, "valid_from": t.valid_from, "valid_to": t.valid_to}
+                 "family": t.family, "valid_from": t.valid_from, "valid_to": t.valid_to,
+                 "print_image": t.spec.get("print_image"), "print_sha": _print_sha(t)}
                 for t in site.templates.values()]
         from .forms.equipment import master_keys
 
@@ -278,12 +295,21 @@ def cmd_info(a) -> int:
                      f"장비명 대응표 {len(site.equipment_aliases)}개 (해시 {site.equipment_aliases_sha}, 마스터 {n_master}대)")
         for t in tpls:
             valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}" if t["family"] else "")
+            printed = (f"  인쇄 층 {t['print_image']} ({t['print_sha'] or '읽을 수 없음'})" if t["print_image"] else "")
             lines.append(f"  {t['name']:<24} handler={t['handler']:<11} 표 {t['regions']}개, 셀 {t['cells']}개"
-                         + ("" if t["status"] == "cells" else "  (분류 전용 — 셀 정의 없음)") + valid)
+                         + ("" if t["status"] == "cells" else "  (분류 전용 — 셀 정의 없음)") + valid + printed)
     else:
         lines.append("사이트 팩: 지정되지 않았거나 폴더가 없습니다")
     _emit(a, data, "\n".join(lines))
     return 0
+
+
+def _print_sha(t) -> str | None:
+    """info: 템플릿의 인쇄 층 해시 (print_image 가 없으면 None, 읽을 수 없으면 None — 글에는 "읽을 수 없음")."""
+    try:
+        return t.print_sha
+    except (OSError, ValueError):
+        return None
 
 
 def _describe_recognizer(s: Settings, site) -> dict:
@@ -568,7 +594,7 @@ def cmd_template(a) -> int:
         s = _settings(a)
         out = Path(a.out) if a.out else s.work_root / "template-preview"
         try:
-            r = preview(a.template_dir, out, scan=a.scan, page=a.page, dpi=s.dpi)
+            r = preview(a.template_dir, out, scan=a.scan, page=a.page, dpi=s.dpi, print_layer=a.print_layer)
         except TemplateError as e:                             # 템플릿 오류만 — 오류 목록은 template check 로
             raise SystemExit(f"{e}\n(오류를 전부 보려면: minedocscan template check {a.template_dir})") from e
         except (ValueError, OSError) as e:                     # 저장소 안이라 거절, 없는 쪽 … — 안내 없이 한 줄
@@ -578,6 +604,19 @@ def cmd_template(a) -> int:
               + ("" if al is None else f"\n정합: {'통과' if al['ok'] else '실패'}, 인라이어 {al['inliers']}, "
                  f"괘선 오차 {al['grid_err']} px")
               + "\n저장소에 넣지 마세요 — 실제 양식의 이름·차량번호가 보입니다.")
+        return 0
+    if a.template_command == "print-layer":
+        import yaml
+
+        from .tools.printlayer import PrintLayerError, build, format_summary
+
+        s = _settings(a)
+        try:
+            r = build(a.template_dir, s, max_pages=a.max_pages, percentile=a.percentile, out=a.out,
+                      allow_in_repo=a.allow_in_repo)
+        except (PrintLayerError, OSError, NotImplementedError, yaml.YAMLError) as e:   # 거절은 한 줄
+            raise SystemExit(str(e).splitlines()[0] if str(e) else type(e).__name__) from e
+        _emit(a, r, format_summary(r))
         return 0
     s = _settings(a)
     if s.site is None:
