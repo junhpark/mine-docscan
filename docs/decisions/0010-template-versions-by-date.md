@@ -1,6 +1,7 @@
 # 0010. 양식의 판은 템플릿을 따로 두고 날짜로 가린다
 
 상태: 채택 (2026-10). 작업 지시서 [tasks/0002](../tasks/0002-full-archive-and-evalset.md) 4.4.
+보완 → [0018](0018-concurrent-variants.md): 같은 날 섞여 쓰이는 판은 두 판 모두 `concurrent: true` 면 기간이 겹쳐도 되고, 괘선 오차로 고른다.
 
 ## 상황
 
