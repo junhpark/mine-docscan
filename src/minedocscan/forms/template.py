@@ -4,6 +4,9 @@
 
   name, title, reference_image, dpi, page_size
   family, valid_from, valid_to                # 선택. 같은 양식의 개정판은 이름이 다른 템플릿이고, 날짜(양 끝 포함)로 가린다
+  concurrent: true | false                    # 선택. 같은 날 섞여 쓰이는 인쇄 판 (tasks/0006 4.6) — family 가 있을 때만.
+                                              #   같은 계열에서 유효 기간이 겹치는 판끼리 둘 다 true 면 허용하고(forms/sitepack.py),
+                                              #   분류는 한 후보로 묶고, 판마다 정합해 괘선 오차로 고른다 (pipeline/runner.py)
   handler: generic | inspection | haul | usage   # 추출값을 업무 테이블로 옮기는 방법
   handler_options: {...}
   regions:                                    # 한 페이지에 표가 여러 개일 수 있다
@@ -102,6 +105,7 @@ class Template:
         self.regions: list[dict] = spec.get("regions", []) or []
         self.fields: list[dict] = spec.get("fields", []) or []
         self.family: str | None = spec.get("family") or None
+        self.concurrent: bool = spec.get("concurrent") is True     # 잘못된 값(문자열 …)은 problems() 가 오류로 잡는다
         self.valid_from: str | None = _iso_date(self.name, "valid_from", spec.get("valid_from"))
         self.valid_to: str | None = _iso_date(self.name, "valid_to", spec.get("valid_to"))
         if self.valid_from and self.valid_to and self.valid_from > self.valid_to:
@@ -149,6 +153,11 @@ class Template:
                 n = sum(reg.get("role") == role for reg in self.regions)
                 if n > 1:
                     out.append(f"{self.name}: role {role} 인 표가 {n}개입니다 (쪽 하나에 하나)")
+        c = self.spec.get("concurrent")
+        if c is not None and not isinstance(c, bool):
+            out.append(f"{self.name}: concurrent 는 true/false: {c!r}")
+        elif c and not self.family:
+            out.append(f"{self.name}: concurrent 는 family 가 있을 때만 씁니다 — 같은 날 섞여 쓰이는 판끼리 같은 family 를 적습니다")
         out += self.print_problems()
         return out
 

@@ -6,7 +6,8 @@
   pages      쪽 목록 (상태·양식·분류 여유로 거름). --thumbs 는 원본 쪽의 미리보기 PNG
   eval       정답과 비교 (CER, 필드 정확도, 자동 적재율)
   regress    사이트 팩의 기준 수치와 비교하는 실데이터 회귀 검사
-  template   템플릿 도구: init(뼈대), check(오류 전부), preview(칸을 그린 그림, --print), print-layer(인쇄 층)
+  template   템플릿 도구: init(뼈대), check(오류 전부), preview(칸을 그린 그림, --print), print-layer(인쇄 층),
+             variant(같은 날 섞여 쓰이는 판 — 괘선만 다시 잡는다)
   synth      개인정보 없는 합성 사이트 팩과 스캔 문서 만들기
   review     검수: serve(로컬 화면), stats(진행 현황), export-answers(검수값 → 정답 파일), export-crops(학습용 크롭)
   recognizer 숫자 인식기: train(학습, torch 필요), list(사이트 팩의 모델), eval(크롭에서 바로 평가)
@@ -71,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--meta-mismatch", action="store_true",
                    help="기계가 읽은 메타 값이 사람·파일명의 값과 다른 쪽 (날짜 포함). 값은 찍지 않는다 — 검수 화면 meta-check 에서 본다")
     p.add_argument("--meta-key", help="--meta-mismatch: 이 키만 (vehicle_no, operator, date.day …)")
+    p.add_argument("--variants", action="store_true",
+                   help="같은 날 섞여 쓰이는 판(concurrent)을 고른 쪽 중 가르기 어려웠던 쪽: 두 판의 괘선 오차 차이가 1 px 미만 "
+                        "(판마다의 오차를 같이 낸다)")
 
     p = sub.add_parser("eval", parents=[common], help="정답과 비교")
     g = p.add_mutually_exclusive_group(required=True)
@@ -118,6 +122,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="화소마다 밝기의 백분위 (기본 75). 판이 섞였을 수 있는 양식의 첫 층은 50 (tasks/0006 4.2)")
     t.add_argument("--out", help="출력 PNG 파일 (기본 <템플릿 폴더>/print.png). git 작업 트리 안은 거절한다")
     t.add_argument("--allow-in-repo", action="store_true", help="저장소 안에도 쓴다 (합성 사이트 팩만)")
+    t = tsub.add_parser("variant", parents=[common],
+                        help="같은 날 섞여 쓰이는 다른 인쇄 판의 템플릿: 열·행·필드는 그대로, 표마다 괘선만 새 스캔에서 다시 잡는다")
+    t.add_argument("template_dir", help="기존 판의 템플릿 폴더 (<site>/templates/<양식>) — 고치지 않는다")
+    t.add_argument("--scan", required=True, help="새 판의 깨끗한 쪽이 든 스캔 (이미지·PDF)")
+    t.add_argument("--page", type=int, default=1, help="--scan 의 쪽 번호 (1부터)")
+    t.add_argument("--name", required=True, help="새 판의 템플릿 이름 (예: <양식>_b)")
+    t.add_argument("--out-dir", help="새 판의 폴더 (기본: 기존 판 옆의 <NAME>). git 작업 트리 안이거나 이미 있으면 거절한다")
     t = tsub.add_parser("check", parents=[common],
                         help="템플릿의 오류를 전부: 읽기 오류, 겹치는 칸, 쪽 밖의 칸, 역할에 필요한 칸, 형식과 종류의 불일치 …")
     t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
@@ -137,6 +148,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--print-layers", action="store_true",
                    help="--usage-logs/--usage-only 와 함께: 가동 일보 두 종의 인쇄 층(print.png)을 합성 쪽에서 추정해 템플릿에 넣는다 "
                         "(print_image)")
+    p.add_argument("--usage-variants", action="store_true",
+                   help="--usage-logs/--usage-only 와 함께: 운행일보에 같은 날 섞여 쓰이는 판 B(표만 아래로 옮긴 판)를 더한다 — "
+                        "두 판에 family·concurrent: true (tasks/0006)")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
@@ -285,7 +299,7 @@ def cmd_info(a) -> int:
     if site is not None:
         tpls = [{"name": t.name, "title": t.title, "handler": t.handler, "regions": len(t.regions),
                  "cells": len(t.cells()) + len(t.fields), "status": "cells" if t.has_cells else "classify_only",
-                 "family": t.family, "valid_from": t.valid_from, "valid_to": t.valid_to,
+                 "family": t.family, "valid_from": t.valid_from, "valid_to": t.valid_to, "concurrent": t.concurrent,
                  "print_image": t.spec.get("print_image"), "print_sha": _print_sha(t),
                  "print_used": t.uses_print_layer}          # 인쇄 층으로 재는 칸이 있는가 (role meter·shifts·tally — 4.3)
                 for t in site.templates.values()]
@@ -298,7 +312,8 @@ def cmd_info(a) -> int:
         lines.append(f"사이트 팩: {site.name} — 템플릿 {len(tpls)}종, 페이지 라벨 {len(site.labels)}개, "
                      f"장비명 대응표 {len(site.equipment_aliases)}개 (해시 {site.equipment_aliases_sha}, 마스터 {n_master}대)")
         for t in tpls:
-            valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}" if t["family"] else "")
+            valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}"
+                     + (" (같은 날 섞여 쓰이는 판)" if t["concurrent"] else "") if t["family"] else "")
             printed = (f"  인쇄 층 {t['print_image']} ({t['print_sha'] or '읽을 수 없음'})"
                        + ("" if t["print_used"] else " — 인쇄 층으로 재는 칸(role meter·shifts·tally)이 없어 쓰지 않음")
                        if t["print_image"] else "")
@@ -364,7 +379,7 @@ def cmd_run(a) -> int:
             from .evaluate.inspection_csv import load_answers
 
             answers |= load_answers(a.inspection_csv, site.templates[_only_inspection_template(site)])
-        recognizer = OracleRecognizer(answers)
+        recognizer = OracleRecognizer(answers, site=site)       # 동시 판의 정답은 계열로 (tasks/0006 4.6)
     elif s.recognizer == "oracle":
         raise SystemExit("oracle 백엔드는 --answers 또는 --inspection-csv 가 필요합니다")
     else:
@@ -394,7 +409,7 @@ def cmd_run(a) -> int:
                     + (f" · 경고: {r['warning']}" if r.get("warning") else ""))
             print(f"[{i}/{len(files)}] {f.name} · {what} · 지난 {_hms(el)} · 남은 약 {_hms(eta)}", file=sys.stderr)
     summary = pipe.finalize()
-    rep = build_report(pipe.con)
+    rep = build_report(pipe.con, pipe.site.variant_families())
     text = (f"이번 실행: 문서 {summary['documents']}건, 페이지 {summary['pages']}장, 건너뜀 {summary['skipped']}건, "
             f"실패 {len(summary['failed'])}건 (인식 백엔드: {recognizer.name})\n"
             f"분류 여유가 낮은 페이지: {len(summary['low_margin'])}장, 오류 난 쪽: {len(summary['page_errors'])}장\n"
@@ -421,6 +436,7 @@ def cmd_report(a) -> int:
         format_by_month,
         format_report,
         format_stale_equipment_ids,
+        stale_equipment_ids,
         xcheck_by_date,
         xcheck_usage_by_date,
     )
@@ -432,14 +448,16 @@ def cmd_report(a) -> int:
         rows = by_month(con, s.classify_min_margin)
         _emit(a, {"by_month": rows}, format_by_month(rows))
         return 0
-    rep, by_date, usage_by_date = build_report(con), xcheck_by_date(con), xcheck_usage_by_date(con)
+    site, note = _load_site(s)
+    rep = build_report(con, site.variant_families() if site is not None else None)
+    by_date, usage_by_date = xcheck_by_date(con), xcheck_usage_by_date(con)
     text = format_report(rep, by_date)
     if usage_by_date:
         text += "\n날짜별 가동 일보 검산:\n" + "\n".join(
             f"  {d['work_date']}: " + ", ".join(f"{k} {v}" for k, v in d.items() if k != "work_date") for d in usage_by_date)
     data = {"report": rep, "xcheck_by_date": by_date, "xcheck_usage_by_date": usage_by_date}
-    stale, note = _stale_equipment_ids(s, con)
-    if stale is not None:                                   # report 의 dict 밖에 둔다 — regress 가 비교하지 않는다
+    if site is not None:                                    # report 의 dict 밖에 둔다 — regress 가 비교하지 않는다
+        stale = stale_equipment_ids(con, site)
         data["stale_equipment_ids"] = stale
         line = format_stale_equipment_ids(stale)
         text += f"\n{line}" if line else ""
@@ -449,19 +467,18 @@ def cmd_report(a) -> int:
     return 0
 
 
-def _stale_equipment_ids(s: Settings, con) -> tuple[dict | None, str | None]:
-    """report: 대응표를 고친 뒤 낡은 장비 ID 의 수 (report.stale_equipment_ids). 사이트 팩이 없으면 (None, None),
-    읽을 수 없으면 (None, 한 줄 안내) — 이 검사만 건너뛴다."""
+def _load_site(s: Settings) -> tuple:
+    """report 가 쓰는 사이트 팩: 대응표를 고친 뒤 낡은 장비 ID 의 수(report.stale_equipment_ids)와 동시 판의 계열
+    (report.variant_summary). 사이트 팩이 없으면 (None, None), 읽을 수 없으면 (None, 한 줄 안내) — 그 검사만 건너뛰고
+    동시 판은 판 이름으로 묶는다."""
     from .forms.sitepack import SitePack
-    from .report import stale_equipment_ids
 
     if s.site is None or not Path(s.site).is_dir():
         return None, None
     try:
-        site = SitePack(s.site)
+        return SitePack(s.site), None
     except Exception as e:                                  # 망가진 팩(re.error·AttributeError …)이 report 전체를 막지 않게
         return None, f"(사이트 팩을 읽을 수 없어 장비 ID 검사를 건너뛰었습니다: {type(e).__name__})"   # 종류 이름만 (값 없이)
-    return stale_equipment_ids(con, site), None
 
 
 def cmd_pages(a) -> int:
@@ -478,7 +495,7 @@ def cmd_pages(a) -> int:
               "검수 화면: minedocscan review serve --queue meta-check")
         return 0
     rows = list_pages(con, status=a.status, template=a.template,
-                      low_margin=s.classify_min_margin if a.low_margin else None)
+                      low_margin=s.classify_min_margin if a.low_margin else None, variants=a.variants)
     written = []
     if a.thumbs is not None:
         from .tools.thumbs import write_thumbs
@@ -613,6 +630,16 @@ def cmd_template(a) -> int:
                  f"괘선 오차 {al['grid_err']} px")
               + "\n저장소에 넣지 마세요 — 실제 양식의 이름·차량번호가 보입니다.")
         return 0
+    if a.template_command == "variant":
+        from .tools.variant import VariantError, format_summary, make_variant
+
+        s = _settings(a)
+        try:
+            r = make_variant(a.template_dir, a.scan, a.page, a.name, out_dir=a.out_dir, dpi=s.dpi, damaged=s.damaged_pdf)
+        except VariantError as e:                               # 거절은 한 줄
+            raise SystemExit(str(e).splitlines()[0]) from e
+        _emit(a, r, format_summary(r))
+        return 0
     if a.template_command == "print-layer":
         import yaml
 
@@ -645,8 +672,11 @@ def cmd_synth(a) -> int:
         raise SystemExit("--mix-pages 는 --meta-fields 와 같이 씁니다")
     if a.print_layers and not (a.usage_logs or a.usage_only):
         raise SystemExit("--print-layers 는 --usage-logs 또는 --usage-only 와 같이 씁니다")
+    if a.usage_variants and not (a.usage_logs or a.usage_only):
+        raise SystemExit("--usage-variants 는 --usage-logs 또는 --usage-only 와 같이 씁니다")
     r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
-                 usage_logs=a.usage_logs, usage_only=a.usage_only, print_layers=a.print_layers)
+                 usage_logs=a.usage_logs, usage_only=a.usage_only, print_layers=a.print_layers,
+                 usage_variants=a.usage_variants)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")

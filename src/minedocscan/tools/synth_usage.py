@@ -99,7 +99,25 @@ def _tilde(img, cx: float, cy: float) -> None:
     cv2.polylines(img, [np.round(pts).astype(np.int32)], False, 0, TILDE_T, cv2.LINE_AA)
 
 
-def build_usage_log() -> tuple[np.ndarray, dict]:
+# 판 B (tasks/0006 4.6, 단계 4): 같은 날 섞여 쓰이는 다른 인쇄 판. 작업 표와 계기 표 두 개만 10 px 아래, 줄 간격 +1 % (정수 좌표).
+# 머리 상자·제목·장비명/운전자 필드·서명 상자, 표 아래의 비고 상자·꼬리 문구는 판 A 와 같은 자리 — 표 아래까지 같이 내리면 판 A 만으로도
+# 작은 오차로 통과하고 칸도 맞아, 막으려는 실패(판 A 에 정합해 칸이 어긋난 채 적재, 또는 align_failed)가 합성에 없다
+T_USAGE_B = "synth_usage_log_b"
+B_SHIFT, B_SCALE = 10, 1.01
+USAGE_LOGS = (T_USAGE, T_USAGE_B)                 # 운행일보의 판들 (판 B 는 usage_variants 일 때만 사이트 팩에 있다)
+
+
+def _table_y(top: int, variant: str):
+    """표 하나의 y 좌표 변환 (그 표의 위 괘선 기준). 판 A 는 그대로, 판 B 는 B_SHIFT 아래·간격 B_SCALE 배 (반올림한 정수)."""
+    if variant == "a":
+        return lambda y: y
+    return lambda y: top + B_SHIFT + int(round((y - top) * B_SCALE))
+
+
+def build_usage_log(variant: str = "a") -> tuple[np.ndarray, dict]:
+    """variant: "a" (기본 — 지금까지의 판, 바이트까지 그대로) | "b" (판 B: 작업 표·계기 표만 옮긴 판, 이름 T_USAGE_B)."""
+    if variant not in ("a", "b"):
+        raise ValueError(f"variant 는 a | b: {variant!r}")
     img = _canvas(PORTRAIT)
     _label(img, "EQUIPMENT DAILY OPERATION LOG", 100, 170, 1.4, 3)
     _label(img, "Site: SYNTHETIC MINE  (generated test data - not a real site)", 100, 225, 0.7)
@@ -109,8 +127,9 @@ def build_usage_log() -> tuple[np.ndarray, dict]:
     cv2.rectangle(img, sig[:2], sig[2:], 0, 2)
     _label(img, "Signature", 980, 445, 0.8)
 
+    wy = _table_y(520, variant)
     xs = [100, 200, 520, 960, 1180, 1554]                   # No / Location / Work / Hours / Remarks
-    ys = [520, 580] + [580 + 70 * (i + 1) for i in range(6)]
+    ys = [wy(y) for y in [520, 580] + [580 + 70 * (i + 1) for i in range(6)]]
     _grid(img, ys, xs)
     for ci, s in enumerate(("No", "Location", "Work", "Hours", "Remarks")):
         _label(img, s, xs[ci] + 14, ys[0] + 40, 0.7)
@@ -120,9 +139,10 @@ def build_usage_log() -> tuple[np.ndarray, dict]:
         _label(img, no, xs[0] + 12, ys[i + 1] + 45, 0.55 if i == 5 else 0.7)
         rows.append({"row": i, "key": "total" if i == 5 else f"r{i + 1}", "no": no, **({"subtotal": True} if i == 5 else {})})
 
+    my = _table_y(1050, variant)
     mxs = [100, 400, 818, 1236, 1554]                        # 계기: (인쇄된 이름) / 시작 / 종료 / 총 — 낮은 칸
-    mys = [1050, 1092, 1138]
-    _label(img, "Hour meter", 100, 1035, 0.8)
+    mys = [my(y) for y in (1050, 1092, 1138)]
+    _label(img, "Hour meter", 100, mys[0] - 15, 0.8)
     _grid(img, mys, mxs)
     for ci, s in enumerate(("", "Start", "End", "Total")):
         if s:
@@ -134,7 +154,9 @@ def build_usage_log() -> tuple[np.ndarray, dict]:
     _label(img, "Form SYN-USE-01 rev.1", 100, 1520, 0.6)
 
     spec = {
-        "name": T_USAGE, "title": "Equipment daily operation log (synthetic)", "reference_image": "reference.png",
+        "name": T_USAGE if variant == "a" else T_USAGE_B,
+        "title": "Equipment daily operation log (synthetic)" + ("" if variant == "a" else " - print variant B"),
+        "reference_image": "reference.png",
         "dpi": DPI, "page_size": list(PORTRAIT), "handler": "usage", "handler_options": {},
         "regions": [
             {"name": "work", "role": "activities", "grid": {"ys": ys, "xs": xs}, "header_rows": 1,
@@ -158,6 +180,26 @@ def build_usage_log() -> tuple[np.ndarray, dict]:
         ],
     }
     return img, spec
+
+
+def build_usage_log_b() -> tuple[np.ndarray, dict]:
+    return build_usage_log("b")
+
+
+def concurrent_specs(built: dict) -> None:
+    """판 A·B 의 spec 에 같은 family 와 concurrent: true 를 적는다 (usage_variants 일 때만 — 아니면 템플릿은 그대로)."""
+    for name in USAGE_LOGS:
+        built[name][1].update(family=T_USAGE, concurrent=True)
+
+
+def assign_variants(plans: list[list], rng) -> None:
+    """날마다 운행일보(T_USAGE) 쪽에 판 A·B 를 번갈아 준다 (시작하는 판은 rng 로) — 쪽이 둘 이상인 날은 두 판이 섞인다.
+    rng 는 따로 쓴다: 쪽의 내용(계획·글씨)의 난수 흐름은 판을 섞지 않은 것과 같다."""
+    for day in plans:
+        start = int(rng.integers(2))
+        for i, p in enumerate(q for q in day if q.template == T_USAGE):
+            if (i + start) % 2:
+                p.template = T_USAGE_B
 
 
 def build_loader_log() -> tuple[np.ndarray, dict]:
@@ -246,6 +288,7 @@ def build_loader_log() -> tuple[np.ndarray, dict]:
 
 
 BUILDERS = {T_USAGE: build_usage_log, T_LOADER: build_loader_log}
+VARIANT_BUILDERS = {T_USAGE_B: build_usage_log_b}           # usage_variants 일 때 더한다 (tasks/0006 단계 4)
 
 
 # ── 계획: 날마다 쪽마다 무엇을 적는가 (정답) ─────────────────────────────────
@@ -536,7 +579,7 @@ def truth_of(source: str, day: str, p: PagePlan) -> dict:
            "clock_end": tm.get("end") if clock else None,
            "reading_kind": "clock" if clock else ("meter" if num else "empty"),
            "shifts": {k: truth for k, (_t, truth) in p.shifts.items()} if p.template == T_LOADER else None,
-           "activity_rows": len(p.activities) if p.template == T_USAGE else None, "signed": int(p.signed),
+           "activity_rows": len(p.activities) if p.template != T_LOADER else None, "signed": int(p.signed),
            "tally": [{"row_key": rk, "column": col, "count": v} for (rk, col), v in sorted(p.tally.items())],
            "scenarios": p.scenarios}
     mins = None

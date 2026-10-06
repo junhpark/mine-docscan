@@ -188,12 +188,14 @@ class Pipeline:
         meta = self.site.page_meta(source_name, page_no)
 
         # classify
+        group = None
         if template:
             name, margin = template, None
         else:
             cands = [t.name for t in self.site.templates_for(meta.get("date"))]     # 그날 유효한 판만 (tasks/0002 4.4)
-            cr = self.classifier.classify(gray, candidates=cands)
-            name, margin = cr.template, cr.margin
+            groups = self.site.concurrent_groups(meta.get("date"))                 # 같은 날 섞여 쓰이는 판 (tasks/0006 4.6)
+            cr = self.classifier.classify(gray, candidates=cands, groups=groups)
+            name, margin, group = cr.template, cr.margin, cr.group
             if name and margin < self.settings.classify_min_margin:
                 s["low_margin"].append({"page_id": page_id, "template": name, "margin": round(margin, 2)})
         page["template_name"], page["classify_margin"] = name, margin
@@ -204,8 +206,12 @@ class Pipeline:
             page["status"] = "classified_only"
             return self._close_page(page)
 
-        # align
-        ar = align_to_template(gray, tpl.reference, tpl.regions, ref_features=tpl.features)
+        # align — 동시 판의 묶음이면 판마다 정합해 고른다. 판이 하나뿐인 양식은 지금처럼 한 번만
+        if group:
+            tpl, ar, errs = self._align_variants(gray, group)
+            page["template_name"], page["variant_errs"] = tpl.name, json.dumps(errs, sort_keys=True)
+        else:
+            ar = align_to_template(gray, tpl.reference, tpl.regions, ref_features=tpl.features)
         page.update(align_inliers=ar.n_inliers, align_grid_err=_finite(ar.grid_err_px), align_ok=int(ar.ok),
                     homography=homography_json(ar.homography) if ar.n_inliers else None,
                     render_dpi=self.settings.dpi)
@@ -250,6 +256,19 @@ class Pipeline:
         out = self._close_page(page)
         out.update(result)
         return out
+
+    def _align_variants(self, gray: np.ndarray, group: list[str]) -> tuple:
+        """동시 판마다 정합해 하나를 고른다 (tasks/0006 4.6): 통과한 판 중 괘선 오차가 가장 작은 판. 오차의 차이가 0.5 px 이내면
+        그 판에 정합한 인라이어가 많은 판, 그래도 같으면 이름 순서. 통과한 판이 없으면 같은 규칙으로 고른 판의 수치로 align_failed.
+        0.5 px: 괘선 오차는 재검출한 괘선 자리(정수)와의 거리의 중앙값이라 0.5 px 단위다 — 같거나 한 단위 차이는 가르지 않는다
+        (실제 중기운행일보의 판 B 쪽은 두 판의 오차 차이가 4 px 이상이었다 — tasks/0006 1절). 새 판정 임계값이 아니라 단위다.
+        돌려주는 값: (고른 판의 템플릿, 그 정합 결과, {판 이름: 괘선 오차 | None(유한하지 않음)})."""
+        results = []
+        for n in sorted(group):
+            t = self.site.templates[n]
+            results.append((t, align_to_template(gray, t.reference, t.regions, ref_features=t.features)))
+        errs = {t.name: _finite(ar.grid_err_px) for t, ar in results}
+        return (*choose_variant(results), errs)
 
     def _read_meta(self, tpl, obs, images: PageImages) -> tuple[set, dict, list]:
         """모델이 있는 메타 필드를 읽는다. 돌려주는 값: (읽은 칸의 id — 핸들러에 넘기지 않는다, {키: MachineRead},
@@ -312,6 +331,18 @@ def _meta_field_row(ctx: PageContext, o, read) -> dict:
     return field_row(ctx, o, has_value=True, value_raw=c.value, value_final=c.value, confidence=float(c.confidence),
                      candidates=c.candidates, backend=f"meta-{reader.reader}",
                      review_status="auto" if status == "auto" else "pending")
+
+
+VARIANT_TIE_PX = 0.5        # 동시 판의 괘선 오차가 이만큼 안이면 인라이어로 가른다 — 괘선 오차의 단위 (Pipeline._align_variants)
+
+
+def choose_variant(results: list[tuple]) -> tuple:
+    """[(템플릿, AlignResult)] (이름순) → 고른 (템플릿, AlignResult). Pipeline._align_variants 의 규칙: 통과한 것(없으면 전부) 중
+    괘선 오차가 가장 작은 것에서 VARIANT_TIE_PX 안의 것들 → 인라이어가 많은 것 → 이름이 앞인 것."""
+    pool = [r for r in results if r[1].ok] or list(results)
+    low = min(ar.grid_err_px for _t, ar in pool)
+    near = [r for r in pool if r[1].grid_err_px <= low + VARIANT_TIE_PX]
+    return min(near, key=lambda r: (-r[1].n_inliers, r[0].name))
 
 
 def update_document_status(con: sqlite3.Connection, document_id: str) -> str:

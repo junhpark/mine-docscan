@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 import yaml
 
-from conftest import clone_db, review_usage, usage_fields
+from conftest import clone_db, replay_classify, review_usage, usage_fields
 from minedocscan.config import ConfigError
 from minedocscan.evaluate.meta import _changed_pages
 from minedocscan.forms.equipment import equipment_id
@@ -23,7 +23,7 @@ from minedocscan.review.queue import build_queue
 from minedocscan.review.server import ReviewApp
 from minedocscan.review.store import Review, load, save
 from minedocscan.tools import synth_meta, synth_usage
-from minedocscan.tools.synth_usage import PRINTED_ITEMS, T_LOADER, T_USAGE
+from minedocscan.tools.synth_usage import PRINTED_ITEMS, T_LOADER, T_USAGE, T_USAGE_B
 from minedocscan.validate.usage import TOLERANCE, check_usage
 from test_review_store import TABLES, _dump
 
@@ -248,8 +248,12 @@ def test_digits_between_printed_labels_are_never_auto_emptied(usage_run, usage_s
 
 # ── 검수로 정답을 넣으면 ───────────────────────────────────────────────────
 def test_review_makes_usage_and_tally_equal_the_truth(reviewed, usage_synth):
+    """정답대로 검수하면 업무 테이블이 합성 정답과 같다 — 운행일보의 판 B 로 적재된 쪽도 (tasks/0006 단계 4: field_id 에 판 이름이
+    없고 키가 같으므로 같은 검수가 붙는다)."""
     con = reviewed["con"]
     rows, tally = _by_source(con), _tally(con)
+    assert {t["template"] for t in usage_synth.truth["usage"]} == {T_LOADER, T_USAGE, T_USAGE_B}
+    assert {u["source_form"] for u in rows.values()} == {T_LOADER, T_USAGE, T_USAGE_B}
     for t in usage_synth.truth["usage"]:
         u = rows[t["source"]]
         want_id = equipment_id(t["alias_key"]) if t["alias_key"] else None
@@ -303,10 +307,14 @@ def test_clock_pages_nothing_written_two_sheets_and_unknown_names(reviewed, usag
                                                             for k in {t["reading_kind"] for t in truth}}
 
 
-def test_review_file_rebuilds_the_same_db(reviewed, usage_run, usage_synth, tmp_path):
+def test_review_file_rebuilds_the_same_db(reviewed, usage_run, usage_synth, tmp_path, monkeypatch):
     """불변식: 검수를 저장한 직후의 DB = 같은 검수 파일로 새로 돌린 DB (새 테이블 포함). 같은 칸의 여러 검수, 장비명 바꾸기 포함.
-    인쇄 층을 켠 가동 일보다 (tasks/0006 6절) — 모든 쪽이 합성이 넣은 인쇄 층으로 쟀다 (doc_page.print_sha)."""
+    인쇄 층을 켠 가동 일보다 (tasks/0006 6절) — 모든 쪽이 합성이 넣은 인쇄 층으로 쟀다 (doc_page.print_sha). 운행일보는 두 판이
+    섞였고(판마다 정합해 고른 쪽 — doc_page 의 template_name·variant_errs 까지 같다), 판 B 의 쪽에도 검수가 있다.
+    새 실행의 분류만 세션 실행의 결과를 되쓴다 (replay_classify — 분류는 검수와 상관없고 결정적이다). 정합·판 고르기·칸·핸들러·검수
+    적용은 새로 한다."""
     fresh = Pipeline(replace(reviewed["settings"], work_root=tmp_path / "w"), recognizer=usage_run["pipe"].recognizer)
+    replay_classify(fresh, usage_run, monkeypatch)              # 분류만 usage_run 의 결과로 (시간 — 검수와 상관없다)
     fresh.run([usage_synth.scans])
     assert fresh.summary["reviews"]["imported"] == reviewed["n"]
     assert build_report(fresh.con) == build_report(reviewed["con"])
@@ -315,6 +323,8 @@ def test_review_file_rebuilds_the_same_db(reviewed, usage_run, usage_synth, tmp_
     sha = usage_synth.truth["print_layers"]
     pages = reviewed["con"].execute("SELECT template_name, print_sha FROM doc_page").fetchall()
     assert len(pages) == len(usage_synth.truth["usage"]) and all(p[1] == sha[p[0]] for p in pages)
+    assert reviewed["con"].execute("SELECT COUNT(DISTINCT r.field_id) FROM doc_review r JOIN doc_field f ON r.field_id = f.field_id "
+                                   "JOIN doc_page p ON f.page_id = p.page_id WHERE p.template_name = ?", (T_USAGE_B,)).fetchone()[0] > 20
 
 
 def test_bad_meter_input_is_refused_before_the_file(reviewed, tmp_path):
@@ -419,7 +429,7 @@ def test_equipment_alias_hash_is_canonical(usage_synth, tmp_path):
 def test_report_flags_equipment_ids_left_stale_by_an_alias_change(usage_synth, usage_run, reviewed, tmp_path, capsys,
                                                                     monkeypatch):
     """[equipment.aliases] 를 고친 뒤 (tasks/0006 단계 1): info 의 대응표 해시가 바뀌고, report 가 지금의 대응표와 장비 ID 가 다른
-    행을 한 줄로 센다 (이름·장비 키 없이). 그 문서들을 다시 돌리면 사라진다. 세는 수는 build_report 의 dict 밖이다 (regress).
+    행을 한 줄로 센다 (이름·장비 키 없이). 다시 돌린 문서의 것은 사라진다 (두 문서 중 하나만 — 시간). 세는 수는 build_report 의 dict 밖이다 (regress).
     장비명은 검수로 정해지므로(합성에는 라벨이 없다) 검수까지 한 DB(reviewed)에서 시작하고, 다시 돌릴 때도 같은 검수 파일을 쓴다."""
     import sqlite3
 
@@ -515,22 +525,25 @@ def test_report_flags_equipment_ids_left_stale_by_an_alias_change(usage_synth, u
     con = sqlite3.connect(work / "minedocscan.db")
     before = con.execute("SELECT COUNT(*), COUNT(equipment), COUNT(equipment_id) FROM eq_usage_daily").fetchone()
     con.close()
-    # 그 문서들만 다시 돌리면 사라진다
+    # 그 문서를 다시 돌리면 그 문서의 것이 사라진다 — 두 문서 중 하나만 다시 돌린다 (시간): 다시 돌린 문서의 행은 사라지고
+    # 다시 돌리지 않은 문서의 행은 남는다 (둘 다 다시 돌리면 0 — 같은 경로다)
     settings = replace(reviewed["settings"], site=site, work_root=work)
     pipe = Pipeline(settings, recognizer=OracleRecognizer(usage_run["answers"]))
-    for d in docs:
-        pipe.process_file(usage_synth.scans / f"{d}.pdf")
+    replay_classify(pipe, usage_run, monkeypatch)               # 분류만 usage_run 의 결과로 (시간 — 대응표와 상관없다)
+    pipe.process_file(usage_synth.scans / f"{docs[0]}.pdf")
     pipe.finalize()
     pipe.con.close()
     js, text = report()
-    assert js["stale_equipment_ids"] == zero and "[equipment.aliases]" not in text
+    assert js["stale_equipment_ids"] == {"eq_usage_daily": 1, "prod_tally": 0, "pages": 1, "documents": 1}
+    lines = [x for x in text.splitlines() if "[equipment.aliases]" in x]
+    assert len(lines) == 1 and "가동 기록 1행" in lines[0] and "문서 1건" in lines[0]
     # 장비 ID 를 다시 정했을 뿐 검수로 정한 장비명은 그대로다 (이름을 잃어 None == None 이 된 것이 아니다): 행 수·이름 수는 같고,
-    # 대응표에서 뺀 장비의 두 쪽만 ID 가 NULL 이 되었다
+    # 대응표에서 뺀 장비의 다시 돌린 쪽만 ID 가 NULL 이 되었다
     con = sqlite3.connect(work / "minedocscan.db")
     after = con.execute("SELECT COUNT(*), COUNT(equipment), COUNT(equipment_id) FROM eq_usage_daily").fetchone()
     n_drill = con.execute("SELECT COUNT(*) FROM eq_usage_daily WHERE equipment = 'DRILL' AND equipment_id IS NULL").fetchone()[0]
     con.close()
-    assert after[:2] == before[:2] and after[2] == before[2] - 2 and n_drill == 2, (before, after, n_drill)
+    assert after[:2] == before[:2] and after[2] == before[2] - 1 and n_drill == 1, (before, after, n_drill)
 
 
 # ── equipment 는 새 키일 뿐이다 ────────────────────────────────────────────

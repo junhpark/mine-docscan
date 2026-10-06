@@ -391,11 +391,12 @@ def _blank_forms(low: bool = False, meta: bool = False) -> dict:
 
 
 def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low: bool = False, meta: bool = False,
-                    usage: bool = False) -> Path:
+                    usage: bool = False, usage_variants: bool = False) -> Path:
     """합성 사이트 팩(site.toml + 템플릿 세 종)을 쓴다. revision_from(날짜)을 주면 행렬 양식이 두 판이 된다:
     그 전날까지 v1, 그날부터 v2 (같은 계열, 유효 기간으로 가린다). low: 운반 양식 두 종이 낮은 칸.
     meta: 일보에 월·일 필드, 차량번호가 네 자리 숫자인 행렬 머리글 (tasks/0004 단계 2).
-    usage: 가동 일보 두 종(tools/synth_usage.py)과 장비명 대응표 [equipment.aliases] (tasks/0005)."""
+    usage: 가동 일보 두 종(tools/synth_usage.py)과 장비명 대응표 [equipment.aliases] (tasks/0005).
+    usage_variants: 운행일보의 판 B(synth_usage_log_b)를 더하고 두 판에 family·concurrent: true (tasks/0006 단계 4)."""
     site = Path(site_dir)
     site.mkdir(parents=True, exist_ok=True)
     toml = SITE_TOML
@@ -407,6 +408,9 @@ def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low:
     built = _blank_forms(low, meta)
     if usage:
         built.update({name: b() for name, b in synth_usage.BUILDERS.items()})
+    if usage_variants:
+        built.update({name: b() for name, b in synth_usage.VARIANT_BUILDERS.items()})
+        synth_usage.concurrent_specs(built)
     if revision_from:
         last_v1 = (date.fromisoformat(revision_from) - timedelta(days=1)).isoformat()
         built[T_MATRIX] = build_haul_matrix(SLOTS, T_MATRIX, (None, last_v1), low=low)
@@ -792,7 +796,7 @@ class SynthResult:
 def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "2030-01-07",
              strength: float = 1.0, matrix_revision: bool = False, low_cells: bool = False,
              meta_fields: bool = False, mix_pages: bool = False, usage_logs: bool = False,
-             usage_only: bool = False, print_layers: bool = False) -> SynthResult:
+             usage_only: bool = False, print_layers: bool = False, usage_variants: bool = False) -> SynthResult:
     """out_dir 에 합성 사이트 팩(site/)과 스캔 문서(scans/), 정답(truth.json, answers.json)을 만든다.
 
     하루에 PDF 한 개: 점검표 1장 → 차량별 일보(일보를 낸 차량 수) → 행렬 1장.
@@ -807,16 +811,22 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     print_layers=True 면 (가동 일보와 함께) 두 양식의 인쇄 층을 합성 쪽에서 추정해 템플릿에 넣는다 (print.png + print_image,
     tasks/0006 단계 3): 스캔한 쪽(PDF 와 같은 JPEG)을 스캔 효과의 기하 행렬로 템플릿 좌표에 되돌려 imaging/printlayer.estimate.
     스캔 문서와 정답은 그대로다 (난수를 더 쓰지 않는다). truth["print_layers"] = {양식: print_sha}.
+    usage_variants=True 면 (가동 일보와 함께) 운행일보에 같은 날 섞여 쓰이는 판 B(synth_usage_log_b — 작업 표·계기 표만 10 px 아래,
+    줄 간격 +1 %)를 더한다 (tasks/0006 단계 4): 두 판에 family·concurrent: true, 날마다 운행일보 쪽에 두 판을 번갈아 (시작하는 판은
+    따로 쓰는 난수로 — 쪽의 내용은 판을 섞지 않은 것과 같다). 정답·truth 의 template 은 그 쪽의 판 이름. 인쇄 층은 판마다 따로.
     """
     if mix_pages and not meta_fields:
         raise ValueError("mix_pages 는 meta_fields 와 같이 쓴다")
     usage_logs = usage_logs or usage_only
     if print_layers and not usage_logs:
         raise ValueError("print_layers 는 usage_logs(또는 usage_only)와 같이 쓴다")
+    if usage_variants and not usage_logs:
+        raise ValueError("usage_variants 는 usage_logs(또는 usage_only)와 같이 쓴다")
     root = Path(out_dir)
     d0 = date.fromisoformat(start)
     revision_from = (d0 + timedelta(days=1)).isoformat() if matrix_revision else None
-    site = write_site_pack(root / "site", revision_from=revision_from, low=low_cells, meta=meta_fields, usage=usage_logs)
+    site = write_site_pack(root / "site", revision_from=revision_from, low=low_cells, meta=meta_fields, usage=usage_logs,
+                           usage_variants=usage_variants)
     scans = root / "scans"
     rng = np.random.default_rng(seed)
     blanks = _blank_forms(low_cells, meta_fields)
@@ -832,6 +842,9 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         rng_u = np.random.default_rng([seed, 5005])               # 가동 일보는 따로 — 앞의 쪽의 난수 흐름을 건드리지 않는다
         usage_blanks = {name: b() for name, b in synth_usage.BUILDERS.items()}
         usage_plan = synth_usage.plan_days([(d0 + timedelta(days=d)).isoformat() for d in range(days)], rng_u)
+        if usage_variants:                                          # 판을 섞는 난수도 따로 — 쪽의 내용은 그대로다
+            usage_blanks.update({name: b() for name, b in synth_usage.VARIANT_BUILDERS.items()})
+            synth_usage.assign_variants(usage_plan, np.random.default_rng([seed, 5005, 2]))
     layer_pages = {} if print_layers else None
     for d in range(days):
         day = (d0 + timedelta(days=d)).isoformat()
@@ -920,6 +933,8 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         truth["meta_fields"] = True
     if usage_logs:
         truth["usage"] = usage_truth
+    if usage_variants:
+        truth["usage_variants"] = True
     if print_layers:
         truth["print_layers"] = _write_print_layers(site, layer_pages)
     truth_path, answers_path = root / "truth.json", root / "answers.json"

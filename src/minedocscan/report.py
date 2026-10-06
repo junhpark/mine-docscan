@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 
@@ -11,7 +12,7 @@ def _pairs(con: sqlite3.Connection, sql: str) -> dict:
     return {("unknown" if r[0] is None else str(r[0])): r[1] for r in con.execute(sql)}
 
 
-def build_report(con: sqlite3.Connection) -> dict:
+def build_report(con: sqlite3.Connection, families: dict[str, str] | None = None) -> dict:
     one = lambda sql: con.execute(sql).fetchone()[0] or 0      # noqa: E731
     align = {}
     for r in con.execute("SELECT template_name, COUNT(*), SUM(align_ok), MIN(align_inliers), MAX(align_grid_err) "
@@ -78,7 +79,45 @@ def build_report(con: sqlite3.Connection) -> dict:
                        "GROUP BY 1 ORDER BY 1")
     if used:
         rep["print_layer"] = used
+    # 같은 날 섞여 쓰이는 판 (tasks/0006 4.6): 판마다 정합해 고른 쪽이 있을 때만 키가 생긴다 — 판이 하나뿐인 사이트의 리포트(와
+    # regress 의 기준)는 예전과 같다
+    variants = variant_summary(con, families)
+    if variants:
+        rep["variants"] = variants
     return rep
+
+
+NEAR_TIE_PX = 1.0          # 리포트: 두 판의 괘선 오차 차이가 이보다 작은 쪽 = 가르기 어려웠던 쪽 (tasks/0006 4.6·9절) — 세기만 한다
+
+
+def _variant_errs(raw: str | None) -> dict[str, float | None]:
+    return json.loads(raw) if raw else {}
+
+
+def near_tie(errs: dict[str, float | None]) -> bool:
+    """가르기 어려웠던 쪽: 괘선 오차가 작은 두 판의 오차가 모두 유한하고 차이가 NEAR_TIE_PX 미만."""
+    vals = sorted(v for v in errs.values() if v is not None)          # 유한하지 않은 오차(None)는 늘 뒤다
+    return len(vals) >= 2 and vals[1] - vals[0] < NEAR_TIE_PX
+
+
+def variant_summary(con: sqlite3.Connection, families: dict[str, str] | None = None) -> dict:
+    """계열마다: 판마다 고른 쪽 수(정합 실패는 빼고), 정합 실패 쪽 수, 가르기 어려웠던 쪽 수. 수만 (값·이름 없이).
+    families: {판 이름: 계열} (SitePack.variant_families — 사이트 팩이 있을 때). 계열을 모르는 쪽(사이트 팩 없이, 또는 지금 사이트
+    팩에 없는 판)은 그 쪽에서 정합한 판 이름들("A / B" — doc_page.variant_errs 의 키)로 묶는다. DB 에는 계열이 없다."""
+    out: dict = {}
+    for name, status, raw in con.execute("SELECT template_name, status, variant_errs FROM doc_page "
+                                         "WHERE variant_errs IS NOT NULL ORDER BY page_id"):
+        errs = _variant_errs(raw)
+        key = (families or {}).get(name) or " / ".join(sorted(errs))
+        g = out.setdefault(key, {"chosen": {}, "align_failed": 0, "near_tie": 0})
+        if status == "align_failed":
+            g["align_failed"] += 1
+        else:
+            g["chosen"][name] = g["chosen"].get(name, 0) + 1
+        g["near_tie"] += near_tie(errs)
+    for g in out.values():
+        g["chosen"] = dict(sorted(g["chosen"].items()))
+    return dict(sorted(out.items()))
 
 
 def xcheck_usage_summary(con: sqlite3.Connection) -> dict:
@@ -251,11 +290,13 @@ def format_meta_mismatch(rows: list[dict]) -> str:
 
 
 def list_pages(con: sqlite3.Connection, status: str | None = None, template: str | None = None,
-               low_margin: float | None = None) -> list[dict]:
-    """쪽 목록: 출처(파일명#쪽), 날짜, 양식, 분류 여유, 인라이어, 괘선 오차, 상태, 오류."""
+               low_margin: float | None = None, variants: bool = False) -> list[dict]:
+    """쪽 목록: 출처(파일명#쪽), 날짜, 양식, 분류 여유, 인라이어, 괘선 오차, 상태, 오류.
+    variants: 판마다 정합한 쪽 중 가르기 어려웠던 쪽만 (두 판의 괘선 오차 차이 < NEAR_TIE_PX — variant_errs 를 같이 낸다)."""
     sql = ("SELECT d.source_name || '#' || p.page_no AS source, p.page_id, p.document_id, p.page_no, p.work_date, "
-           "p.template_name, p.classify_margin, p.align_inliers, p.align_grid_err, p.status, p.error, d.source_path, d.source_rel "
-           "FROM doc_page p JOIN doc_document d ON p.document_id = d.document_id WHERE 1=1")
+           "p.template_name, p.classify_margin, p.align_inliers, p.align_grid_err, p.status, p.error, d.source_path, d.source_rel"
+           + (", p.variant_errs" if variants else "")
+           + " FROM doc_page p JOIN doc_document d ON p.document_id = d.document_id WHERE 1=1")
     args: list = []
     if status:
         sql += " AND p.status = ?"
@@ -266,8 +307,14 @@ def list_pages(con: sqlite3.Connection, status: str | None = None, template: str
     if low_margin is not None:
         sql += " AND p.classify_margin IS NOT NULL AND p.classify_margin < ?"
         args.append(low_margin)
+    if variants:
+        sql += " AND p.variant_errs IS NOT NULL"
     sql += " ORDER BY p.work_date, d.source_name, p.page_no"
-    return [dict(r) for r in con.execute(sql, args)]
+    rows = [dict(r) for r in con.execute(sql, args)]
+    if variants:
+        rows = [r | {"variant_errs": _variant_errs(r["variant_errs"])} for r in rows]
+        rows = [r for r in rows if near_tie(r["variant_errs"])]
+    return rows
 
 
 def format_pages(rows: list[dict]) -> str:
@@ -276,7 +323,9 @@ def format_pages(rows: list[dict]) -> str:
         m = "-" if r["classify_margin"] is None else f"{r['classify_margin']:.2f}"
         g = "-" if r["align_grid_err"] is None else f"{r['align_grid_err']:.1f}"
         lines.append(f"{r['source']:<28} {r['work_date'] or '-':<10} {r['template_name'] or '-':<24} {m:>5} "
-                     f"{str(r['align_inliers'] or '-'):>7} {g:>5} {r['status']:<16} {r['error'] or ''}")
+                     f"{str(r['align_inliers'] or '-'):>7} {g:>5} {r['status']:<16} {r['error'] or ''}"
+                     + ("" if "variant_errs" not in r else "  판마다 괘선 오차: " + ", ".join(
+                         f"{k} {'-' if v is None else v}" for k, v in sorted(r["variant_errs"].items()))))
     return "\n".join(lines)
 
 
@@ -304,6 +353,9 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
                      f"괘선 오차 최대 {a['max_grid_err']} px")
     if rep.get("print_layer"):
         lines.append("인쇄 층으로 값 유무를 잰 쪽: " + kv(rep["print_layer"]))
+    for group, v in (rep.get("variants") or {}).items():
+        lines.append(f"동시 판 {group}: 고른 쪽 {kv(v['chosen'])}, 정합 실패 {v['align_failed']}, "
+                     f"두 판의 괘선 오차 차이가 {NEAR_TIE_PX:g} px 미만인 쪽 {v['near_tie']} (pages --variants)")
     f, i, h = rep["fields"], rep["inspection"], rep["haul"]
     lines += [
         f"필드 {f['total']}개 (값 있음 {f['with_value']}, 검수 대기 {f['pending']})",

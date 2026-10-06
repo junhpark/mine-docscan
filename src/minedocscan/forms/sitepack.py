@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .equipment import META_KEY as EQUIPMENT_KEY
 from .equipment import equipment_id, master_keys
+from .formats import default_format
 from .template import Template, TemplateError
 
 
@@ -66,6 +67,26 @@ class SitePack:
     def templates_for(self, day: str | None) -> list[Template]:
         """그날 유효한 템플릿(분류 후보). 날짜를 모르면 전부."""
         return [t for t in self.templates.values() if t.valid_on(day)]
+
+    def concurrent_groups(self, day: str | None) -> dict[str, list[str]]:
+        """그날 같이 쓰이는 동시 판의 묶음 (tasks/0006 4.6): {계열: [판 이름 (이름순)]} — 그날 유효한 concurrent 판이 둘 이상인
+        계열만. 분류는 묶음을 한 후보로 보고(forms/classify.py), 파이프라인은 판마다 정합해 고른다. 판이 하나뿐인 날은 묶지 않는다."""
+        out: dict[str, list[str]] = {}
+        for t in self.templates_for(day):
+            if t.concurrent and t.family:
+                out.setdefault(t.family, []).append(t.name)
+        return {fam: sorted(names) for fam, names in sorted(out.items()) if len(names) > 1}
+
+    def variant_families(self) -> dict[str, str]:
+        """{판 이름: 계열} — 동시 판(concurrent)만. 리포트가 판마다 고른 쪽을 계열로 묶는 데 쓴다 (report.variant_summary)."""
+        return {n: t.family for n, t in self.templates.items() if t.concurrent and t.family}
+
+    def answer_key(self, template_name: str) -> str:
+        """정답·검수를 찾는 양식의 키 (tasks/0006 4.6): 동시 판(concurrent)이면 계열, 아니면 템플릿 이름 그대로.
+        정답을 템플릿 이름으로 찾는 곳(eval, export-answers 로 만든 정답, oracle)은 이 키로 맞춘다 — 판 A 로 적힌 정답이
+        판 B 로 적재된 같은 쪽에도 붙는다. 사이트 팩에 없는 이름은 그대로."""
+        t = self.templates.get(template_name)
+        return t.family if t is not None and t.concurrent and t.family else template_name
 
     # ── 페이지 메타 ────────────────────────────────────────────────────────
     @property
@@ -133,7 +154,10 @@ class SitePack:
 
 
 def _check_families(templates: dict[str, Template]) -> None:
-    """같은 family 안에서 유효 기간이 겹치면 오류다. 개정판끼리는 모양으로 가릴 수 없으므로 날짜가 틀림없이 갈라야 한다."""
+    """같은 family 안에서 유효 기간이 겹치면 오류다. 개정판끼리는 모양으로 가릴 수 없으므로 날짜가 틀림없이 갈라야 한다.
+    예외는 같은 날 섞여 쓰이는 판 (tasks/0006 4.6): 겹치는 두 판이 **둘 다** concurrent: true 면 허용한다 — 사람이 적은 것이다.
+    그 둘은 키(표 이름·role·열·행·필드)가 같아야 한다: field_id 에 템플릿 이름이 없어 키가 같으면 판이 바뀐 쪽에도 검수가 붙지만,
+    다르면 조용히 떨어진다. 괘선 좌표·bbox·기준 그림·인쇄 층·유효 기간만 다를 수 있다."""
     by_family: dict[str, list[Template]] = {}
     for t in templates.values():
         if t.family:
@@ -143,9 +167,50 @@ def _check_families(templates: dict[str, Template]) -> None:
             for b in ts[i + 1:]:
                 a0, a1 = a.valid_from or "0000-00-00", a.valid_to or "9999-99-99"
                 b0, b1 = b.valid_from or "0000-00-00", b.valid_to or "9999-99-99"
-                if a0 <= b1 and b0 <= a1:
+                if not (a0 <= b1 and b0 <= a1):
+                    continue
+                if not (a.concurrent and b.concurrent):
                     raise TemplateError(f"계열 '{fam}' 의 {a.name} 과 {b.name} 의 유효 기간이 겹칩니다 "
-                                        f"({a0}~{a1}, {b0}~{b1}). 옛 판에 valid_to, 새 판에 valid_from 을 적으세요")
+                                        f"({a0}~{a1}, {b0}~{b1}). 옛 판에 valid_to, 새 판에 valid_from 을 적으세요 "
+                                        "(같은 날 섞여 쓰이는 판이면 두 판 모두에 concurrent: true)")
+                diff = variant_key_diff(a, b)
+                if diff:
+                    raise TemplateError(f"계열 '{fam}' 의 동시 판 {a.name} 과 {b.name} 의 키가 다릅니다: {diff} — 동시 판끼리는 "
+                                        "표 이름·role·열(idx·name·kind·format)·행(row·key)·필드(name·kind·meta_key·format)가 "
+                                        "같아야 합니다 (괘선·bbox·기준 그림·인쇄 층만 다를 수 있다)")
+
+
+def variant_key_diff(a: Template, b: Template) -> str | None:
+    """동시 판 둘의 키가 처음 다른 항목의 종류 (같으면 None). 값(행 키·머리글)은 찍지 않는다 — 표 이름과 항목의 종류만."""
+    ra = {str(r.get("name")): r for r in a.regions}
+    rb = {str(r.get("name")): r for r in b.regions}
+    if sorted(ra) != sorted(rb):
+        return "표 이름"
+    for name in sorted(ra):
+        x, y = ra[name], rb[name]
+        if x.get("role") != y.get("role"):
+            return f"표 {name} 의 role"
+        if _variant_columns(x) != _variant_columns(y):
+            return f"표 {name} 의 열"
+        if _variant_rows(x) != _variant_rows(y):
+            return f"표 {name} 의 행"
+    if _variant_fields(a) != _variant_fields(b):
+        return "필드"
+    return None
+
+
+def _variant_columns(reg: dict) -> list[tuple]:
+    return sorted(((c.get("idx"), str(c.get("name")), str(c.get("kind")), str(c.get("format") or default_format(c.get("kind", ""))))
+                   for c in reg.get("columns") or []), key=repr)
+
+
+def _variant_rows(reg: dict) -> list[tuple]:
+    return sorted(((r.get("row"), str(r.get("key", "") or "")) for r in reg.get("rows") or []), key=repr)
+
+
+def _variant_fields(t: Template) -> list[tuple]:
+    return sorted(((str(f.get("name")), str(f.get("kind")), str(f.get("meta_key") or ""),
+                    str(f.get("format") or default_format(f.get("kind", "")))) for f in t.fields), key=repr)
 
 
 def _equipment_aliases(config: dict, templates: dict[str, Template]) -> dict[str, str]:

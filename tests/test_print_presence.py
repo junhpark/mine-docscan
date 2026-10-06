@@ -22,7 +22,7 @@ from minedocscan.report import build_report, format_report
 from minedocscan.review.export import export_crops
 from minedocscan.review.server import ReviewApp
 from minedocscan.review.store import Review, append, import_into
-from minedocscan.tools.synth_usage import PRINTED_ITEMS, T_LOADER, T_USAGE
+from minedocscan.tools.synth_usage import PRINTED_ITEMS, T_LOADER, T_USAGE, T_USAGE_B, USAGE_LOGS
 from test_review_store import _dump
 
 ROLE_REGIONS = ("meter", "shifts", "tally")
@@ -69,17 +69,20 @@ def _auto_empty(f: dict) -> bool:
 # ── 다시 적재하는 경로가 파이프라인과 같다 ─────────────────────────────────────
 def test_reloading_the_same_pages_with_the_layer_reproduces_the_pipeline(onoff, usage_synth, usage_pages):
     """켠 층으로 다시 적재한 DB = 파이프라인의 DB (업무 테이블·검산까지). 그래서 끈 DB 도 파이프라인이 껐을 때와 같다.
-    쪽마다 쓴 인쇄 층의 해시가 남고(doc_page.print_sha = 합성이 넣은 층), 리포트가 양식별로 센다."""
+    쪽마다 쓴 인쇄 층의 해시가 남고(doc_page.print_sha = 합성이 넣은 층 — 운행일보는 고른 판의 층), 리포트가 양식별로 센다."""
     on, relo = onoff["on"], onoff["relo"]
     for t in USAGE_DB_TABLES:
         assert _dump(relo, t) == _dump(on, t), t
     sha = usage_synth.truth["print_layers"]
-    assert set(sha) == {T_USAGE, T_LOADER}
+    assert set(sha) == {T_USAGE, T_USAGE_B, T_LOADER} and len(set(sha.values())) == 3       # 판마다 따로 (4.1)
     pages = on.execute("SELECT page_id, template_name, print_sha, variant_errs FROM doc_page ORDER BY page_id").fetchall()
     assert len(pages) == len(usage_pages) == len(usage_synth.truth["usage"])
-    assert all(p["print_sha"] == sha[p["template_name"]] and p["variant_errs"] is None for p in pages)
+    assert all(p["print_sha"] == sha[p["template_name"]] for p in pages)
+    assert all((p["variant_errs"] is None) == (p["template_name"] == T_LOADER) for p in pages)
     rep = build_report(on)
-    assert rep["print_layer"] == {name: sum(p["template_name"] == name for p in pages) for name in (T_LOADER, T_USAGE)}
+    assert rep["print_layer"] == {name: sum(p["template_name"] == name for p in pages)
+                                  for name in (T_LOADER, T_USAGE, T_USAGE_B)}
+    assert min(rep["print_layer"].values()) >= 4
     assert "인쇄 층으로 값 유무를 잰 쪽: " in format_report(rep)
     assert "print_layer" not in build_report(onoff["off"])                # 인쇄 층을 쓴 쪽이 없으면 키가 없다
     # 핸들러에서 오류가 난 쪽은 print_sha 가 남아도(어디까지 갔는지) 세지 않는다 — 그 쪽의 잰 값은 되돌려졌다
@@ -281,10 +284,10 @@ def test_layers_from_few_pages_do_not_lose_written_values(k, usage_pages, usage_
 
     answers, con = usage_run["answers"], usage_run["pipe"].con
     n_written = 0
-    for name in (T_LOADER, T_USAGE):                     # 로우더 먼저 — 잃는 칸은 작업량 칸이다
+    for name in (T_LOADER, *USAGE_LOGS):                 # 로우더 먼저 — 잃는 칸은 작업량 칸이다. 운행일보는 판마다 (4–5쪽)
         pgs = {pg["page_id"]: pg for pg in usage_pages if pg["tpl"].name == name}
         order = [pgs[r["page_id"]] for r in pick_order(candidate_pages(con, name))]
-        assert len(order) == len(pgs) > 5
+        assert len(order) == len(pgs) >= 4
         m = printlayer.mask(printlayer.estimate([pg["aligned"] for pg in order[:k]]))
         lost = []
         for pg in order:
@@ -299,11 +302,11 @@ def test_layers_from_few_pages_do_not_lose_written_values(k, usage_pages, usage_
 def test_crops_do_not_depend_on_the_layer(usage_run, usage_synth, onoff, tmp_path):
     """export-crops 와 검수 화면의 /crop: 같은 DB 를 인쇄 층이 있는 사이트 팩과 없는 사이트 팩으로, 그리고 인쇄 층을 끄고 잰 DB 를
     → PNG 가 바이트까지 같다. labels.jsonl 의 inked 는 인쇄만 있는 칸에서만 다르다: 끄면 True, 켜면 False (인식기에 가지 않는다 —
-    의도한 것). 첫날의 로우더 쪽 하나와 운행일보 쪽 하나만 (원본을 다시 렌더링하는 시간을 아낀다)."""
+    의도한 것). 로우더 쪽 하나와 운행일보의 판마다 쪽 하나만 (원본을 다시 렌더링하는 시간을 아낀다)."""
     con = clone_db(usage_run["pipe"].con)
     plain = tmp_path / "plain"
     shutil.copytree(usage_synth.site, plain, ignore=shutil.ignore_patterns("print.png"))
-    for name in (T_LOADER, T_USAGE):
+    for name in (T_LOADER, *USAGE_LOGS):
         p = plain / "templates" / name / "template.yaml"
         spec = yaml.safe_load(p.read_text(encoding="utf-8"))
         spec.pop("print_image")
@@ -313,8 +316,8 @@ def test_crops_do_not_depend_on_the_layer(usage_run, usage_synth, onoff, tmp_pat
     sites = {"on": usage_run["pipe"].site, "off": SitePack(plain)}
     assert sites["on"].templates[T_LOADER].uses_print_layer and not sites["off"].templates[T_LOADER].uses_print_layer
     cells = _cells(con, usage_run["answers"])
-    pages = sorted({f["page_id"] for f in cells.values() if f["template_name"] == T_LOADER})[:1] + \
-        sorted({f["page_id"] for f in cells.values() if f["template_name"] == T_USAGE})[:1]
+    pages = [sorted({f["page_id"] for f in cells.values() if f["template_name"] == name})[0]
+             for name in (T_LOADER, *USAGE_LOGS)]
     pick = {k: f for k, f in cells.items() if f["page_id"] in pages}
     printed = [k for k, f in pick.items() if _printed_only(k) and f["truth"] is None]
     assert printed and any(f["truth"] for f in pick.values())

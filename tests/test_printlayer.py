@@ -1,7 +1,8 @@
 """인쇄 층 만들기 (tasks/0006 단계 2): template print-layer, print_image, print_mask, check·preview --print·info.
 
 시험의 인쇄 층은 전부 합성 쪽으로 시험 중에 만든다 (tmp_path — 저장소에 넣지 않는다). 적재된 쪽은 usage_run(save_aligned=False)의
-호모그래피로 다시 펴고(4.2, 3일치), 수용 기준 1 은 10일치를 분류만 한 쪽들을 명령이 직접 정합해 만든 층(usage_layers10)으로 잰다.
+호모그래피로 다시 펴고(4.2, 3일치), 분류 전용 쪽은 명령이 직접 정합한다(usage_classify_only, 하루치). 수용 기준 1 은 합성
+10일치에서 같은 방법으로 추정한 층(synth --print-layers — 정합·파이프라인 없이)으로 잰다.
 """
 from __future__ import annotations
 
@@ -94,19 +95,22 @@ def _false_print(name: str, layer: np.ndarray, tpl: Template) -> tuple[int, int,
 
 
 # ── 수용 기준 1: 빈 양식의 인쇄를 덮고, role 표의 칸에는 인쇄가 거의 없다 ──────────────
-def test_layer_covers_the_blank_print_and_leaves_the_value_cells_clear(usage_layers10):
+def test_layer_covers_the_blank_print_and_leaves_the_value_cells_clear(synth10):
     """양식마다: 넓히지 않은 층(binary)이 빈 양식의 인쇄 화소를 99 % 이상 덮고, role 표의 손으로 쓰는 칸 전체에서 인쇄 아닌 화소 중
     인쇄로 잡힌 것이 1 % 미만이다. 2 px 넓힌 마스크로 재지 않는다 (괘선 둘레가 칸의 4 px 안쪽으로 들어온다).
-    층은 10일치(운행일보 31쪽, 로우더 20쪽)로 만든다 — 3일치(운행일보 9쪽)는 모든 쪽이 같은 자리에 계기 값을 써서 운행일보만
-    약 1.9 % (12절). 10일치에서 운행일보 0.46 %·로우더 0.56 % (OpenCV 5.0), 0.47 %·0.58 % (4.9 — 단계 3 의 "~" 뒤). 칸마다의 값은 메시지에만."""
+    층은 10일치(운행일보 31쪽, 로우더 20쪽)를 synth --print-layers 가 추정한 것 (정합 대신 스캔 효과의 기하 행렬로 되돌린 쪽 — 명령의
+    다시 펴기와 같은 추정) — 3일치(운행일보 9쪽)는 모든 쪽이 같은 자리에 계기 값을 써서 운행일보만 약 1.9 % (12절).
+    10일치에서 운행일보 0.46 %·로우더 0.56 % (OpenCV 5.0), 0.48 %·0.58 % (4.9), 덮음은 둘 다 1.0. 칸마다의 값은 메시지에만."""
+    pages = {name: sum(p["template"] == name for info in synth10.truth["documents"].values() for p in info) for name in USAGE}
+    assert pages == {synth_usage.T_USAGE: 31, synth_usage.T_LOADER: 20}
     for name in USAGE:
-        lay = usage_layers10["layers"][name]
-        layer = printlayer.binary(imread_gray(lay["dir"] / "print.png"))
+        tdir = synth10.site / "templates" / name
+        layer = printlayer.binary(imread_gray(tdir / "print.png"))
         blank_print = grid.binarize(synth_usage.BUILDERS[name]()[0]) > 0
         cov = float((layer & blank_print).sum() / blank_print.sum())
-        n, d, per = _false_print(name, layer, Template(lay["dir"] / "template.yaml"))
-        msg = f"{lay['summary']['pages']}쪽: 덮음 {cov:.4f}, 인쇄로 잡힌 칸 화소 {n}/{d} = {n / d:.4f}, 칸마다 {per}"
-        assert lay["summary"]["pages"] >= 20, msg
+        n, d, per = _false_print(name, layer, Template(tdir / "template.yaml"))
+        msg = f"{pages[name]}쪽: 덮음 {cov:.4f}, 인쇄로 잡힌 칸 화소 {n}/{d} = {n / d:.4f}, 칸마다 {per}"
+        assert printlayer.sha(imread_gray(tdir / "print.png")) == synth10.truth["print_layers"][name], msg
         assert cov >= 0.99, msg
         assert n / d < 0.01, msg
 
@@ -222,7 +226,7 @@ def test_default_build_writes_print_png_and_only_hints_the_key(layers):
         top = r["covered"][0]
         assert top["coverage"] == round(printlayer.coverage(printlayer.binary(layer), [boxes[top["cell"]]])[0], 4)
         assert top["coverage"] < round(printlayer.coverage(printlayer.mask(layer), [boxes[top["cell"]]])[0], 4)
-        # 3일치(다시 편 쪽)로도 빈 양식의 인쇄는 다 덮는다 (role 칸의 잔상은 usage_layers10 의 시험)
+        # 3일치(다시 편 쪽)로도 빈 양식의 인쇄는 다 덮는다 (role 칸의 잔상은 synth10 의 시험)
         blank_print = grid.binarize(synth_usage.BUILDERS[name]()[0]) > 0
         assert (printlayer.binary(layer) & blank_print).sum() / blank_print.sum() >= 0.99
 
@@ -255,20 +259,40 @@ def test_saved_aligned_images_and_the_rewarp_give_the_same_layer(layers, usage_s
 
 
 # ── 분류 전용 템플릿: 쪽을 직접 정합한다, DB 에는 쓰지 않는다 (4.2) ────────────────────────
-def test_classification_only_pages_are_aligned_by_the_command(usage_layers10):
-    """usage_layers10 의 사이트 팩은 두 양식의 칸 정의를 지웠다 → 쪽은 classified_only(호모그래피·정합 그림 없음).
-    print-layer 는 그 쪽들을 직접 정합해 만들고(aligned_now), DB 는 바이트까지 그대로다 (읽기 전용으로 연다)."""
-    con = sqlite3.connect(usage_layers10["db"])
-    rows = con.execute("SELECT template_name, status, homography, aligned_image FROM doc_page WHERE template_name IN (?, ?)",
-                       USAGE).fetchall()
+def test_classification_only_pages_are_aligned_by_the_command(usage_classify_only):
+    """usage_classify_only 의 사이트 팩은 두 양식의 칸 정의를 지웠다 → 쪽은 classified_only(호모그래피·정합 그림 없음).
+    print-layer 는 그 쪽들을 직접 정합해 만들고(aligned_now), DB 는 바이트까지 그대로다 (읽기 전용으로 연다). 하루치라 5장 미만 —
+    경고와 함께 만든다. 쪽은 판이 섞이지 않은 synth10 의 첫날이다 — 층에 생성기의 빈 양식의 인쇄와 표의 괘선이 다 남는다
+    (단계 6 의 add-region 이 이 층에서 괘선을 잡는다. 판이 반씩 섞인 쪽이면 75 백분위 층에서 표 괘선이 빠진다 — 4.2)."""
+    con = sqlite3.connect(usage_classify_only["db"])
+    rows = con.execute("SELECT template_name, status, homography, aligned_image FROM doc_page").fetchall()
     con.close()
     assert rows and {r[1] for r in rows} == {"classified_only"} and all(r[2] is None and r[3] is None for r in rows)
-    assert hashlib.sha256(usage_layers10["db"].read_bytes()).hexdigest() == usage_layers10["db_sha"]
+    assert {r[0] for r in rows} == set(USAGE)
+    assert hashlib.sha256(usage_classify_only["db"].read_bytes()).hexdigest() == usage_classify_only["db_sha"]
     for name in USAGE:
-        r = usage_layers10["layers"][name]["summary"]
+        r = usage_classify_only["layers"][name]["summary"]
         n = sum(t == name for t, *_ in rows)
-        assert r["by_source"] == {"aligned_now": n} and r["pages"] == r["candidates"] == n and r["skipped"] == {}
-        assert r["dates"] == 10 and r["warnings"] == [] and r["covered"]
+        assert r["by_source"] == {"aligned_now": n} and r["pages"] == r["candidates"] == n >= 2 and r["skipped"] == {}
+        assert r["dates"] == 1 and len(r["warnings"]) == 1 and "5장 미만" in r["warnings"][0] and r["covered"]
+        blank, spec = synth_usage.BUILDERS[name]()
+        layer = printlayer.binary(imread_gray(usage_classify_only["layers"][name]["dir"] / "print.png"))
+        blank_print = grid.binarize(blank) > 0
+        cov = float((layer & blank_print).sum() / blank_print.sum())
+        lines = _line_presence(layer, spec)
+        assert cov >= 0.99 and min(lines.values()) >= 0.99, (name, round(cov, 4), lines)
+
+
+def _line_presence(layer: np.ndarray, spec: dict) -> dict[str, float]:
+    """생성기의 표 괘선마다 그 길이 중 층의 인쇄 화소(±1 px 안)가 있는 비율 — 괘선이 층에서 빠졌는지 (4.2)."""
+    out = {}
+    for reg in spec["regions"]:
+        ys, xs = reg["grid"]["ys"], reg["grid"]["xs"]
+        for y in ys:
+            out[f"{reg['name']}/y{y}"] = round(float(layer[y - 1:y + 2, xs[0]:xs[-1]].any(axis=0).mean()), 3)
+        for x in xs:
+            out[f"{reg['name']}/x{x}"] = round(float(layer[ys[0]:ys[-1], x - 1:x + 2].any(axis=1).mean()), 3)
+    return out
 
 
 # ── 요약·오류 메시지에 값·이름이 없다 ──────────────────────────────────────────────
@@ -281,10 +305,10 @@ def _no_names(text: str) -> None:
     assert not found, found
 
 
-def test_summary_and_errors_have_no_values_or_names(layers, usage_layers10, usage_synth, usage_run, tmp_path, capsys):
+def test_summary_and_errors_have_no_values_or_names(layers, usage_classify_only, usage_synth, usage_run, tmp_path, capsys):
     from minedocscan.tools.printlayer import format_summary
 
-    for r in [x[n]["summary"] for x in (layers, usage_layers10["layers"]) for n in USAGE]:
+    for r in [x[n]["summary"] for x in (layers, usage_classify_only["layers"]) for n in USAGE]:
         _no_names(json.dumps(r, ensure_ascii=False))
         _no_names(format_summary(r))
         assert all(c["cell"].startswith(("fields/", "meter/", "shifts/", "tally/", "work/")) for c in r["covered"])
