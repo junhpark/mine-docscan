@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import Settings
-from ..forms.template import Template
+from ..forms.template import Template, TemplateError
 from ..imaging import printlayer
 from ..imaging.align import MIN_INLIERS, align_to_template, warp_to_template
 from ..imaging.io import imread_gray, imwrite, load_page, resolve_source
@@ -58,6 +58,8 @@ def build(template_dir: str | Path, settings: Settings, max_pages: int = MAX_PAG
         tpl = Template(path, validate=False)
     except (KeyError, TypeError, AttributeError) as e:          # 이름이 없는 YAML … — 오류 목록은 template check 가
         raise PrintLayerError(f"템플릿을 읽을 수 없습니다 ({type(e).__name__}) — {check_hint}") from e
+    except TemplateError as e:                                  # YAML 문법·없는 날짜 … (forms/template.load_yaml)
+        raise PrintLayerError(f"{str(e).splitlines()[0]} — {check_hint}") from e
     out = Path(out) if out is not None else tpl.dir / "print.png"
     if out.suffix.lower() != ".png":                          # 손실 없는 형식만 — 파일의 화소 = 요약의 print_sha (4.2)
         raise PrintLayerError(f"인쇄 층은 PNG 로 씁니다 (손실 압축이면 파일의 해시가 요약의 print_sha 와 달라진다): {out.name}")

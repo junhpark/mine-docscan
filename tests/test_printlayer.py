@@ -416,7 +416,11 @@ def test_print_image_problems_are_template_errors(layers, tmp_path):
     cases = {"missing": (None, "print.png", "인쇄 층 파일이 없습니다"),
              "size": (ref[:-10, :], "print.png", "크기"),
              "empty": (None, "", "파일 이름이어야"),
-             "jpeg": (ref, "print.jpg", "PNG 파일이어야")}
+             "jpeg": (ref, "print.jpg", "PNG 파일이어야"),
+             # 템플릿 폴더 바로 안의 파일 이름만 — 다른 판의 층(../<판 A>/print.png)이나 절대 경로는 판마다의 층이 아니다
+             "outside": (ref, "../print.png", "폴더·절대 경로 없이"),
+             "subdir": (None, "sub/print.png", "폴더·절대 경로 없이"),
+             "absolute": (ref, str(tmp_path / "abs.png"), "폴더·절대 경로 없이")}
     for case, (img, value, needle) in cases.items():
         d = tmp_path / case
         d.mkdir()

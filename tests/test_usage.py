@@ -552,6 +552,24 @@ def test_report_flags_equipment_ids_left_stale_by_an_alias_change(usage_synth, u
 
 
 # ── equipment 는 새 키일 뿐이다 ────────────────────────────────────────────
+def test_report_has_no_stale_key_without_usage_rows(synth, null_run, tmp_path, capsys):
+    """가동 기록(eq_usage_daily·prod_tally)이 없는 사이트(운반·점검표)는 사이트 팩이 있어도 report --json 에 stale_equipment_ids 가
+    없다 — JSON 이 예전(tasks/0006 전)과 같다. 가동 기록이 있으면 0 이어도 키가 있다 (위 시험)."""
+    import sqlite3
+
+    from minedocscan.cli import main
+
+    out = sqlite3.connect(tmp_path / "minedocscan.db")
+    null_run.con.backup(out)
+    out.close()
+    args = ["--site", str(synth.site), "--work-root", str(tmp_path)]
+    assert main(["report", "--json", *args]) == 0
+    assert set(json.loads(capsys.readouterr().out)) == {"report", "xcheck_by_date", "xcheck_usage_by_date"}
+    assert main(["report", *args]) == 0
+    text = capsys.readouterr().out
+    assert "[equipment.aliases]" not in text and "장비 ID 검사" not in text
+
+
 def test_equipment_key_goes_through_page_fields_and_exports(usage_run, tmp_path):
     from minedocscan.review.export import export_meta_crops
 
@@ -760,7 +778,7 @@ def test_readings_with_a_shifts_only_template(usage_run):
 
 
 # 점으로 쓴 시각 (tasks/0006 4.8): 화면이 묻는 조건. 화면의 스크립트(static/index.html 의 dottedClock)가 같은 규칙이다 —
-# 같은 벡터를 브라우저에서 확인한다
+# 정규식과 상한은 서버가 보낸다(dotted_clock_rule). 같은 벡터로 그 함수를 node 에서 돌려 견준다 (node 가 있을 때)
 DOTTED_ASKED = {"08.00": ("08:00", "8.00"), "17.30": ("17:30", "17.30"), "8.00": ("08:00", "8.00"), "24.00": ("24:00", "24.00"),
                 "00.00": ("00:00", "0.00"), " 9.59 ": ("09:59", "9.59")}     # 입력 → (콜론을 고르면, 그대로를 고르면 남는 값)
 DOTTED_NOT_ASKED = ("1234.5", "8.5", "25.30", "08.75", "24.30", "123.45", "08:00", "800", "8", "8.0", "08.000", ".00", "", None)
@@ -777,6 +795,42 @@ def test_dotted_clock_asks_only_for_two_digit_fractions_up_to_24():
     assert DOTTED_CLOCK.pattern == r"^([0-9]{1,2})\.([0-9]{2})$"        # 화면이 RegExp 로 그대로 쓴다 (JavaScript 문법)
 
 
+def _dotted_clock_js() -> tuple[str, str]:
+    """static/index.html 의 (대기열 JSON 에서 규칙을 받는 줄, dottedClock 함수) 원문."""
+    import re
+    from pathlib import Path
+
+    import minedocscan.review as review
+
+    html = (Path(review.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    m = re.search(r"\n  function dottedClock\(v\) \{\n.*?\n  \}\n", html, re.S)
+    a = re.search(r"state\.dotted = q\.dotted_clock \?.*?: null;", html, re.S)
+    assert m and a, "index.html 에 dottedClock 이나 state.dotted 가 없다"
+    return a.group(0), m.group(0)
+
+
+def test_screen_dotted_clock_takes_its_limits_from_the_server():
+    """화면의 dottedClock 에는 상한의 수가 없다 — 서버가 보낸 dotted_clock_rule() 만 쓴다 (규칙의 자리는 forms/formats 하나).
+    node 가 있으면 그 함수를 서버가 보내는 규칙으로 돌려 Python 의 dotted_clock 과 같은 벡터에서 같은 답인지 본다."""
+    import re
+    import subprocess
+
+    from minedocscan.forms.formats import dotted_clock, dotted_clock_rule
+
+    assign, fn = _dotted_clock_js()
+    assert set(re.findall(r"\b\d+\b", assign + fn)) <= {"0", "1", "2", "10", "60"}, fn   # 59·24·1440 따위를 적지 않는다
+    assert "maxMinute" in fn and "maxDay" in fn
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node 가 없다 — 수가 없다는 것만 보았다")
+    rule = dotted_clock_rule()
+    vectors = [*DOTTED_ASKED, *(v for v in DOTTED_NOT_ASKED if v is not None), "23.59", "24.01", "00.60", "9.60", "0.59"]
+    script = ("const q = {dotted_clock: " + json.dumps(rule) + "};\nconst state = {};\n" + assign + "\n" + fn
+              + "console.log(JSON.stringify(" + json.dumps(vectors) + ".map(dottedClock)));\n")
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=60, check=True).stdout
+    assert json.loads(out) == [dotted_clock(v) for v in vectors]
+
+
 def test_dotted_clock_cells_both_answers_and_the_report_counts(reviewed, tmp_path):
     """묻는 칸 = 계기의 시작·종료 (readings 와 usage-check 모두 — 총·근무 시각·작업량 칸은 아니다). 두 답이 서버에서 어떻게
     남는지: 콜론을 고르면 시각 08:00, 그대로를 고르면 계기 값 8.00. 리포트는 그런 쪽을 센다 — 값은 고치지 않는다."""
@@ -788,9 +842,9 @@ def test_dotted_clock_cells_both_answers_and_the_report_counts(reviewed, tmp_pat
     settings = replace(reviewed["settings"], reviews=tmp_path / "r.jsonl")
     shutil.copy(reviewed["settings"].reviews, settings.reviews)        # 검수 파일을 이어서 (같은 초의 앞 검수보다 뒤 줄이 이긴다)
     app = ReviewApp(con, site, settings, "jp", "readings")
-    from minedocscan.forms.formats import DOTTED_CLOCK
+    from minedocscan.forms.formats import dotted_clock_rule
 
-    assert app.queue_json({})["dotted_clock"] == DOTTED_CLOCK.pattern      # 화면이 같은 모양으로 묻는다
+    assert app.queue_json({})["dotted_clock"] == dotted_clock_rule()      # 화면이 같은 규칙으로 묻는다
     rows = _by_source(con)
     rep = build_report(con)
     assert (rep["usage_dotted_suspect"], rep["usage"]["reading"].get("mixed", 0)) == (0, 0)

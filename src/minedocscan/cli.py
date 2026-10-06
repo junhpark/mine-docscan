@@ -73,8 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="기계가 읽은 메타 값이 사람·파일명의 값과 다른 쪽 (날짜 포함). 값은 찍지 않는다 — 검수 화면 meta-check 에서 본다")
     p.add_argument("--meta-key", help="--meta-mismatch: 이 키만 (vehicle_no, operator, date.day …)")
     p.add_argument("--variants", action="store_true",
-                   help="같은 날 섞여 쓰이는 판(concurrent)을 고른 쪽 중 가르기 어려웠던 쪽: 두 판의 괘선 오차 차이가 1 px 미만 "
-                        "(판마다의 오차를 같이 낸다)")
+                   help="같은 날 섞여 쓰이는 판(concurrent)마다 정합한 쪽 중 두 판의 괘선 오차 차이가 1 px 미만인 쪽 "
+                        "(판마다의 오차를 같이 낸다. 두 판 모두 정합에 실패한 쪽도 상태 align_failed 로 나온다)")
 
     p = sub.add_parser("eval", parents=[common], help="정답과 비교")
     g = p.add_mutually_exclusive_group(required=True)
@@ -465,8 +465,8 @@ def cmd_report(a) -> int:
         text += "\n날짜별 가동 일보 검산:\n" + "\n".join(
             f"  {d['work_date']}: " + ", ".join(f"{k} {v}" for k, v in d.items() if k != "work_date") for d in usage_by_date)
     data = {"report": rep, "xcheck_by_date": by_date, "xcheck_usage_by_date": usage_by_date}
-    if site is not None:                                    # report 의 dict 밖에 둔다 — regress 가 비교하지 않는다
-        stale = stale_equipment_ids(con, site)
+    if site is not None and _has_usage_rows(con):           # report 의 dict 밖에 둔다 — regress 가 비교하지 않는다
+        stale = stale_equipment_ids(con, site)              # 가동 기록이 없는 사이트(운반·점검표)는 키가 없다 — JSON 이 예전과 같다
         data["stale_equipment_ids"] = stale
         line = format_stale_equipment_ids(stale)
         text += f"\n{line}" if line else ""
@@ -474,6 +474,11 @@ def cmd_report(a) -> int:
         text += f"\n{note}"
     _emit(a, data, text)
     return 0
+
+
+def _has_usage_rows(con) -> bool:
+    """eq_usage_daily 나 prod_tally 에 행이 있나 — 낡은 장비 ID 를 셀 것이 있는 DB."""
+    return any(con.execute(f"SELECT 1 FROM {t} LIMIT 1").fetchone() for t in ("eq_usage_daily", "prod_tally"))
 
 
 def _load_site(s: Settings) -> tuple:

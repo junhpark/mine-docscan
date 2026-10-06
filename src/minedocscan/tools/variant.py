@@ -16,6 +16,8 @@
 
 기존 판의 파일은 고치지 않는다: 기존 판에 적을 두 줄(family, concurrent: true)을 안내한다.
 새 기준 그림은 현장 스캔이다 — 출력 폴더가 git 작업 트리 안이면 거절한다. 이미 있는 폴더도 거절한다 (덮어쓰지 않는다).
+옆 템플릿(기존 판의 templates 폴더, 출력 폴더의 부모)이 이미 쓰는 이름도 거절한다 — 이름이 둘이면 사이트 팩이 읽히지 않는다.
+읽을 수 없는 기존 판(YAML, 이름 없음, 기준 이미지 없음·깨짐)은 한 줄로 거절하고 template check 를 안내한다.
 요약에는 값·이름이 없다: 표 이름, 괘선의 수와 움직인 폭, 인라이어 수.
 """
 from __future__ import annotations
@@ -52,25 +54,34 @@ def make_variant(template_dir: str | Path, scan: str | Path, page: int, name: st
         raise VariantError(f"template.yaml 이 없습니다: {path}")
     if not NAME_RE.match(name):
         raise VariantError(f"--name 은 영문·숫자·밑줄로: {name!r}")
+    check_hint = f"minedocscan template check {tdir}"
     try:
         tpl = Template(path)
     except TemplateError as e:
-        raise VariantError(f"기존 템플릿에 오류가 있습니다 — minedocscan template check {tdir}: {str(e).splitlines()[0]}") from e
+        raise VariantError(f"기존 템플릿에 오류가 있습니다 — {check_hint}: {str(e).splitlines()[0]}") from e
+    except (KeyError, TypeError, AttributeError) as e:          # 이름이 없는 YAML, 맨 위가 항목들이 아님 …
+        raise VariantError(f"기존 템플릿을 읽을 수 없습니다 ({type(e).__name__}) — {check_hint}") from e
     if name == tpl.name:
         raise VariantError(f"새 판의 이름이 기존 판과 같습니다: {name}")
     if not tpl.regions:
         raise VariantError(f"{tpl.name}: 표가 없는 템플릿입니다 — 판은 표의 괘선을 다시 잡는 것이다")
     out = Path(out_dir) if out_dir is not None else tpl.dir.parent / name
+    taken = _template_names(tpl.dir.parent, out.parent)
+    if name in taken:                                            # 사이트 팩이 읽히지 않는다 (이름은 사이트 팩 안에서 하나)
+        raise VariantError(f"이름 {name} 은 이미 다른 템플릿이 씁니다: {taken[name]}/ — 다른 --name 으로")
     if inside_git_tree(out):
         raise VariantError(f"{out} 은 git 작업 트리 안입니다. 새 판의 기준 이미지는 현장 스캔이므로 저장소 밖의 사이트 팩에 둡니다")
     if out.exists():
         raise VariantError(f"이미 있습니다: {out} (덮어쓰지 않습니다)")
     try:
+        ref = tpl.reference
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise VariantError(f"기준 이미지를 읽을 수 없습니다: {tpl.spec.get('reference_image')} — {check_hint}") from e
+    try:
         gray = load_page(scan, page, dpi, damaged)
     except (KeyError, OSError, ValueError, RuntimeError) as e:
         raise VariantError(f"스캔을 읽을 수 없습니다: {str(e).splitlines()[0] if str(e) else type(e).__name__}") from e
 
-    ref = tpl.reference
     H, inliers = header_homography(gray, ref, tpl.regions)
     if H is None or inliers < MIN_INLIERS:
         raise VariantError(f"표 영역 밖의 특징점으로 정합하지 못했습니다 (인라이어 {inliers} < {MIN_INLIERS}) — 머리·제목이 보이는 "
@@ -102,6 +113,21 @@ def make_variant(template_dir: str | Path, scan: str | Path, page: int, name: st
     return {"template": tpl.name, "variant": name, "out": str(out), "inliers": inliers, "family": family,
             "tables": tables, "fix_by_hand": [t["region"] for t in tables if not t["redetected"]],
             "existing_needs": add, "existing": str(path)}
+
+
+def _template_names(*dirs: Path) -> dict[str, str]:
+    """폴더들 바로 아래의 */template.yaml 이 쓰는 이름 → 폴더 이름. 읽을 수 없는 템플릿은 건너뛴다 (그 오류는 template check 가)."""
+    out: dict[str, str] = {}
+    for d in dict.fromkeys(dirs):
+        for p in sorted(d.glob("*/template.yaml")) if d.is_dir() else []:
+            try:
+                spec = yaml.safe_load(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError, yaml.YAMLError):
+                continue
+            n = spec.get("name") if isinstance(spec, dict) else None
+            if isinstance(n, str):
+                out.setdefault(n, p.parent.name)
+    return out
 
 
 def header_homography(gray: np.ndarray, ref: np.ndarray, regions: list[dict], ratio: float = 0.75):
@@ -193,7 +219,8 @@ def format_summary(r: dict) -> str:
             lines.append(f"  {t['region']}: 사람이 고칠 것 — {t['reason']}. 기존 판의 괘선을 그대로 두었습니다")
     lines.append("표 밖 필드의 bbox 는 그대로입니다 — minedocscan template preview 로 확인합니다 (새 판의 폴더로, --scan 으로 그 쪽 위에).")
     if r["existing_needs"]:
-        lines.append(f"기존 판의 template.yaml ({r['existing']}) 에 적을 줄 (이 명령은 기존 판을 고치지 않습니다):")
+        lines.append(f"기존 판의 template.yaml ({r['existing']}) 에 적을 줄 (이 명령은 기존 판을 고치지 않습니다 — 적기 전에는 "
+                     "계열에 동시 판이 하나뿐이라 사이트 팩이 읽히지 않습니다):")
         lines += [f"  {x}" for x in r["existing_needs"]]
     lines.append("새 판의 인쇄 층은 그 판으로 적재된 쪽으로 따로 만듭니다 (template print-layer). 기준 그림은 현장 스캔입니다 — "
                  "저장소에 넣지 마세요.")

@@ -15,7 +15,15 @@ import cv2
 import numpy as np
 import yaml
 
-from ..forms.template import CELL_KINDS, Template, TemplateError, cell_lines, region_cells
+from ..forms.template import (
+    CELL_KINDS,
+    Template,
+    TemplateError,
+    cell_lines,
+    load_yaml,
+    region_cells,
+    yaml_problem,
+)
 
 # 칸 종류마다의 색 (BGR)
 COLORS = {"handwritten_number": (200, 80, 0), "handwritten_text": (40, 150, 40), "checkmark": (0, 140, 255),
@@ -35,9 +43,9 @@ def check_template(tdir: str | Path) -> list[str]:
     if not path.exists():
         return [f"template.yaml 이 없습니다: {path}"]
     try:
-        spec = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as e:
-        return [f"YAML 을 읽을 수 없습니다: {getattr(e, 'problem_mark', '') or e}"]
+        spec = load_yaml(path)
+    except TemplateError as e:                                # 문법 오류, 없는 날짜(valid_to: 2030-02-30) …
+        return [f"YAML 을 읽을 수 없습니다: {yaml_problem(e.__cause__ or e)}"]
     if not isinstance(spec, dict):
         return ["template.yaml 의 맨 위는 항목들(키: 값)이어야 합니다"]
     out = [f"필수 항목이 없습니다: {k}" for k in ("name", "reference_image") if not spec.get(k)]

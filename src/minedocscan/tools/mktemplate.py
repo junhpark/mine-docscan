@@ -183,7 +183,7 @@ def add_region(template_dir: str | Path, roi: tuple[int, int, int, int], name: s
         notes.append(f"role 은 usage 핸들러의 표에만 씁니다 — 이 템플릿의 handler 는 {tpl.handler!r} (template check 가 오류로 낸다)")
     if tpl.concurrent and tpl.family:
         notes.append(f"이 판은 계열 {tpl.family!r} 의 동시 판(concurrent)입니다 — 같은 계열의 다른 동시 판에도 같은 표(같은 --name·"
-                     "--role, 같은 열·행)를 더해야 사이트 팩이 읽힙니다 (template check 는 판 하나만 본다)")
+                     "--role·--header-rows, 같은 열·행과 그 메타)를 더해야 사이트 팩이 읽힙니다 (template check 는 판 하나만 본다)")
     if source == "reference":
         notes.append("인쇄 층이 없어 기준 이미지에서 잡았습니다 — 기준 이미지가 채워진 스캔이면 손글씨의 세로획이 괘선으로 섞일 수 "
                      "있습니다 (template print-layer 로 인쇄 층을 만들고 print_image 를 적은 뒤에 잡는 것이 낫다)")

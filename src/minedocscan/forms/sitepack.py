@@ -42,6 +42,9 @@ class SitePack:
         self.templates: dict[str, Template] = {}
         for p in sorted((self.root / "templates").glob("*/template.yaml")):
             t = Template(p)
+            if t.name in self.templates:                    # 덮어쓰면 한 양식이 말없이 사라진다
+                raise TemplateError(f"템플릿 이름 '{t.name}' 이 둘입니다: {self.templates[t.name].dir.name}/, {t.dir.name}/ — "
+                                    "name 은 사이트 팩 안에서 하나여야 합니다")
             self.templates[t.name] = t
         _check_families(self.templates)
         self.equipment_aliases: dict[str, str] = _equipment_aliases(self.config, self.templates)
@@ -156,8 +159,10 @@ class SitePack:
 def _check_families(templates: dict[str, Template]) -> None:
     """같은 family 안에서 유효 기간이 겹치면 오류다. 개정판끼리는 모양으로 가릴 수 없으므로 날짜가 틀림없이 갈라야 한다.
     예외는 같은 날 섞여 쓰이는 판 (tasks/0006 4.6): 겹치는 두 판이 **둘 다** concurrent: true 면 허용한다 — 사람이 적은 것이다.
-    그 둘은 키(표 이름·role·열·행·필드)가 같아야 한다: field_id 에 템플릿 이름이 없어 키가 같으면 판이 바뀐 쪽에도 검수가 붙지만,
-    다르면 조용히 떨어진다. 괘선 좌표·bbox·기준 그림·인쇄 층·유효 기간만 다를 수 있다."""
+    그 둘은 괘선 좌표·bbox·기준 그림·인쇄 층·이름·제목·유효 기간 밖의 모든 것이 같아야 한다 (variant_key_diff): field_id 에 템플릿
+    이름이 없어 키가 같으면 판이 바뀐 쪽에도 검수가 붙지만, 다르면 조용히 떨어진다.
+    concurrent 판이 계열에 하나뿐이어도 오류다: `template variant` 가 새 판에만 적고 기존 판에 적을 두 줄을 안내한 채로 남은 상태 —
+    묶음이 생기지 않아 두 판이 따로 분류 후보가 되고, 쪽마다 모양으로 이긴 판 하나에만 정합한다 (판 B 쪽이 판 A 로 적재된다)."""
     by_family: dict[str, list[Template]] = {}
     for t in templates.values():
         if t.family:
@@ -176,12 +181,30 @@ def _check_families(templates: dict[str, Template]) -> None:
                 diff = variant_key_diff(a, b)
                 if diff:
                     raise TemplateError(f"계열 '{fam}' 의 동시 판 {a.name} 과 {b.name} 의 키가 다릅니다: {diff} — 동시 판끼리는 "
-                                        "표 이름·role·열(idx·name·kind·format)·행(row·key)·필드(name·kind·meta_key·format)가 "
-                                        "같아야 합니다 (괘선·bbox·기준 그림·인쇄 층만 다를 수 있다)")
+                                        "handler·handler_options, 표(이름·role·header_rows·열·행 — 메타까지), 필드(bbox 밖 전부)가 "
+                                        "같아야 합니다 (괘선·bbox·기준 그림·인쇄 층·이름·제목·유효 기간만 다를 수 있다)")
+        lone = [t for t in ts if t.concurrent]
+        if len(lone) == 1:
+            t = lone[0]
+            other = templates.get(fam)
+            where = (f"{other.name} 의 template.yaml" if other is not None and other is not t
+                     else "같은 날 섞여 쓰이는 다른 판의 template.yaml")
+            # 그 판이 이미 같은 계열(날짜로 가린 개정판)이면 빠진 것은 concurrent 한 줄이다
+            lines = ("concurrent: true" if other is not None and other is not t and other.family == fam
+                     else f"family: {fam} 과 concurrent: true")
+            raise TemplateError(f"계열 '{fam}' 의 동시 판(concurrent: true)이 {t.name} 하나뿐입니다 — {where} 에 "
+                                f"{lines} 를 적습니다 (template variant 가 안내한 줄). "
+                                f"섞여 쓰이는 판이 아니면 {t.name} 의 concurrent 를 지웁니다")
 
 
+# 동시 판끼리 다를 수 있는 것 (tasks/0006 4.6): 기하(괘선·나눔 선, 필드의 bbox), 기준 그림·인쇄 층, 이름·제목, 유효 기간.
+# 그 밖은 전부 같아야 한다 — 열·행의 메타(근무조·소계·장소·머리글 …)와 header_rows 가 다르면 같은 field_id 가 다른 뜻의 칸을 가리킨다.
 def variant_key_diff(a: Template, b: Template) -> str | None:
-    """동시 판 둘의 키가 처음 다른 항목의 종류 (같으면 None). 값(행 키·머리글)은 찍지 않는다 — 표 이름과 항목의 종류만."""
+    """동시 판 둘이 처음 다른 항목의 종류 (같으면 None). 값(행 키·머리글·메타 값)은 찍지 않는다 — 표 이름과 항목의 종류만."""
+    if a.handler != b.handler:
+        return "handler"
+    if _canon(a.handler_options) != _canon(b.handler_options):
+        return "handler_options"
     ra = {str(r.get("name")): r for r in a.regions}
     rb = {str(r.get("name")): r for r in b.regions}
     if sorted(ra) != sorted(rb):
@@ -190,27 +213,40 @@ def variant_key_diff(a: Template, b: Template) -> str | None:
         x, y = ra[name], rb[name]
         if x.get("role") != y.get("role"):
             return f"표 {name} 의 role"
+        if (x.get("header_rows") or 0) != (y.get("header_rows") or 0):      # 적지 않으면 0 (Template 과 같은 기본값)
+            return f"표 {name} 의 header_rows"
         if _variant_columns(x) != _variant_columns(y):
             return f"표 {name} 의 열"
         if _variant_rows(x) != _variant_rows(y):
             return f"표 {name} 의 행"
+        rest = {"grid", "columns", "rows", "role", "header_rows", "name"}
+        if _canon({k: v for k, v in x.items() if k not in rest}) != _canon({k: v for k, v in y.items() if k not in rest}):
+            return f"표 {name} 의 그 밖의 항목"
     if _variant_fields(a) != _variant_fields(b):
         return "필드"
     return None
 
 
-def _variant_columns(reg: dict) -> list[tuple]:
-    return sorted(((c.get("idx"), str(c.get("name")), str(c.get("kind")), str(c.get("format") or default_format(c.get("kind", ""))))
-                   for c in reg.get("columns") or []), key=repr)
+def _canon(v) -> str:
+    """비교용 정규형: 키 순서와 무관하게 (YAML 의 날짜·숫자는 문자열로)."""
+    return json.dumps(v, sort_keys=True, ensure_ascii=False, default=str)
 
 
-def _variant_rows(reg: dict) -> list[tuple]:
-    return sorted(((r.get("row"), str(r.get("key", "") or "")) for r in reg.get("rows") or []), key=repr)
+def _with_format(d: dict) -> dict:
+    """형식을 적지 않은 칸은 칸 종류의 기본 형식으로 본다 — 실제로 쓰는 형식을 비교한다."""
+    return {**d, "format": d.get("format") or default_format(d.get("kind", ""))}
 
 
-def _variant_fields(t: Template) -> list[tuple]:
-    return sorted(((str(f.get("name")), str(f.get("kind")), str(f.get("meta_key") or ""),
-                    str(f.get("format") or default_format(f.get("kind", "")))) for f in t.fields), key=repr)
+def _variant_columns(reg: dict) -> list[str]:
+    return sorted(_canon(_with_format(c)) for c in reg.get("columns") or [])
+
+
+def _variant_rows(reg: dict) -> list[str]:
+    return sorted(_canon(r) for r in reg.get("rows") or [])
+
+
+def _variant_fields(t: Template) -> list[str]:
+    return sorted(_canon({k: v for k, v in _with_format(f).items() if k != "bbox"}) for f in t.fields)
 
 
 def _equipment_aliases(config: dict, templates: dict[str, Template]) -> dict[str, str]:

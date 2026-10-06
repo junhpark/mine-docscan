@@ -78,7 +78,9 @@
     state.templates = q.templates || {};
     state.candidates = q.candidates || {};
     state.formats = q.formats || {};    // 형식마다 받는 글자·안내 (forms/formats.py — 서버가 다시 검사한다)
-    state.dotted = q.dotted_clock ? new RegExp(q.dotted_clock) : null;   // 점으로 쓴 시각의 모양 (forms/formats.DOTTED_CLOCK)
+    // 점으로 쓴 시각의 규칙 (forms/formats.dotted_clock_rule): 정규식과 분·하루의 상한 — 수는 서버에서만 온다
+    state.dotted = q.dotted_clock ? { re: new RegExp(q.dotted_clock.pattern), maxMinute: q.dotted_clock.max_minute,
+                                      maxDay: q.dotted_clock.max_day_minutes } : null;
     state.queue = q.name;
     $('qname').textContent = '대기열 ' + q.name + ' · ' + (q.site || '');
     // 숫자 정답을 만드는 대기열: 이 규칙이 인식기의 "빈 칸"과 "거절"의 정답이 된다 (tasks/0003 4.3, docs/DATA.md)
@@ -276,12 +278,14 @@
     return j;
   }
 
-  // 점으로 쓴 시각(tasks/0006 4.8): forms/formats.dotted_clock 과 같은 규칙 — 소수 두 자리, 24.00 이하, 소수부 00–59 → 'HH:MM', 아니면 null
+  // 점으로 쓴 시각(tasks/0006 4.8): forms/formats.dotted_clock 과 같은 규칙 — 정규식과 상한은 서버가 보낸 것(state.dotted)만 쓴다.
+  // 맞으면 'HH:MM', 아니면 null (tests/test_usage.py 가 같은 벡터로 이 함수를 돌려 Python 과 견준다)
   function dottedClock(v) {
-    const m = state.dotted ? state.dotted.exec(String(v).trim()) : null;
+    const d = state.dotted;
+    const m = d ? d.re.exec(String(v).trim()) : null;
     if (!m) return null;
     const h = parseInt(m[1], 10), mi = parseInt(m[2], 10);
-    if (mi > 59 || h * 60 + mi > 24 * 60) return null;
+    if (mi > d.maxMinute || h * 60 + mi > d.maxDay) return null;
     return String(h).padStart(2, '0') + ':' + m[2];
   }
 

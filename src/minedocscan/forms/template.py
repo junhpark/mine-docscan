@@ -89,14 +89,32 @@ def _iso_date(name: str, key: str, v) -> str | None:
         raise TemplateError(f"{name}: {key} 는 YYYY-MM-DD 여야 합니다: {v!r}") from e
 
 
+def yaml_problem(e: Exception) -> str:
+    """YAML 을 읽지 못한 까닭 한 줄: 문법 오류면 자리(줄·칸), 생성자의 오류(없는 날짜 2030-02-30 …)면 그 글."""
+    mark = getattr(e, "problem_mark", None)
+    if mark is not None:
+        return f"{getattr(e, 'problem', None) or getattr(e, 'context', None) or type(e).__name__} (줄 {mark.line + 1}, 칸 {mark.column + 1})"
+    text = str(e).strip()
+    return text.splitlines()[0] if text else type(e).__name__
+
+
+def load_yaml(path: str | Path):
+    """template.yaml 을 읽는다. 문법 오류와 YAML 생성자의 오류(따옴표 없는 없는 날짜 — valid_to: 2030-02-30 은 date 로 만들다가
+    ValueError)는 TemplateError 한 줄로 — `template check` 와 같은 글."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    except (yaml.YAMLError, ValueError) as e:              # UnicodeDecodeError 도 ValueError 다
+        raise TemplateError(f"{path}: YAML 을 읽을 수 없습니다: {yaml_problem(e)}") from e
+
+
 class Template:
     def __init__(self, path: str | Path, validate: bool = True):
         """validate=False: 오류가 있어도 읽기만 한다 (template check 가 problems() 로 전부 모은다)."""
         path = Path(path)
         self.path = path
         self.dir = path.parent
-        with open(path, encoding="utf-8") as f:
-            spec = yaml.safe_load(f)
+        spec = load_yaml(path)
         self.spec = spec
         self.name: str = spec["name"]
         self.title: str = spec.get("title", self.name)
@@ -162,12 +180,15 @@ class Template:
         return out
 
     def print_problems(self) -> list[str]:
-        """print_image: 빈 문자열이 아닌 파일 이름, 파일이 있고, 크기가 기준 이미지와 같다 (그림을 풀지 않고 머리만 읽는다)."""
+        """print_image: 빈 문자열이 아닌 파일 이름(템플릿 폴더 바로 안 — 폴더·절대 경로 없이), 파일이 있고, 크기가 기준 이미지와 같다
+        (그림을 풀지 않고 머리만 읽는다)."""
         if "print_image" not in self.spec:
             return []
         v = self.spec["print_image"]
         if not isinstance(v, str) or not v.strip():
             return [f"{self.name}: print_image 는 템플릿 폴더 안의 파일 이름이어야 합니다 (예: print.png)"]
+        if Path(v).is_absolute() or Path(v).name != v or v in (".", ".."):   # 다른 판의 층을 가리키면 판마다의 층이 아니다 (4.6)
+            return [f"{self.name}: print_image 는 템플릿 폴더 안의 파일 이름이어야 합니다 (폴더·절대 경로 없이, 예: print.png): {v}"]
         if Path(v).suffix.lower() != ".png":       # 손실 없는 형식만 — 화소가 template print-layer 가 만든 것(print_sha)과 같게
             return [f"{self.name}: print_image 는 PNG 파일이어야 합니다 (손실 압축이면 화소와 해시가 달라진다): {v}"]
         p = self.dir / v

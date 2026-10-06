@@ -130,6 +130,31 @@ def test_check_lists_every_problem_of_a_broken_template(pack, tmp_path, capsys):
     assert "오류 2개" in out and out.count("\n- ") + out.startswith("- ") == 2
     (d / "template.yaml").write_text("name: [broken\n", encoding="utf-8")
     assert check_template(d)[0].startswith("YAML 을 읽을 수 없습니다")
+    with pytest.raises(TemplateError, match="YAML 을 읽을 수 없습니다"):
+        Template(d / "template.yaml")
+
+
+def test_yaml_constructor_errors_are_template_errors(pack, tmp_path, capsys):
+    """따옴표 없는 없는 날짜(valid_to: 2030-02-30)는 YAML 생성자가 date 로 만들다 ValueError — Template 은 TemplateError 한 줄
+    ('<파일>: YAML 을 읽을 수 없습니다: …'), template check 는 같은 글의 오류 하나, 사이트 팩도 TemplateError. traceback 이 아니다."""
+    import shutil
+
+    from minedocscan.forms.sitepack import SitePack
+
+    site = shutil.copytree(pack, tmp_path / "site")                       # 모듈 공용 팩은 그대로 둔다
+    p = site / "templates" / synth_usage.T_LOADER / "template.yaml"
+    p.write_text(p.read_text(encoding="utf-8") + "valid_to: 2030-02-30\n", encoding="utf-8")
+    with pytest.raises(TemplateError) as e:
+        Template(p)
+    msg = str(e.value)
+    assert msg.startswith(f"{p}: YAML 을 읽을 수 없습니다: ") and "\n" not in msg and "day" in msg, msg
+    assert not isinstance(e.value.__cause__, TemplateError)
+    errs = check_template(p.parent)
+    assert len(errs) == 1 and errs[0].startswith("YAML 을 읽을 수 없습니다: "), errs
+    with pytest.raises(TemplateError, match="YAML 을 읽을 수 없습니다"):
+        SitePack(site)
+    assert main(["template", "check", str(p.parent)]) == 1
+    assert "YAML 을 읽을 수 없습니다" in capsys.readouterr().out
 
 
 def test_check_says_which_tables_were_left_out_of_the_geometry_checks(pack, tmp_path):

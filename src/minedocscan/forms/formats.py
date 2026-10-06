@@ -37,9 +37,11 @@ HINTS = {
 _DECIMAL = re.compile(r"^(\d+)(?:\.(\d+))?$")
 _HHMM = re.compile(r"^(\d{1,2})[:.](\d{2})$")
 _RANGE_SEP = re.compile(r"\s*[~-]\s*")
-# 점으로 쓴 시각의 모양 (dotted_clock — 시·분의 범위는 함수가 본다). 검수 화면이 같은 정규식을 쓴다 (서버가 원문을 보낸다 —
-# JavaScript 의 RegExp 와 같은 문법만)
+# 점으로 쓴 시각의 모양 (dotted_clock — 시·분의 범위는 아래 두 수로 함수가 본다). 검수 화면이 같은 정규식과 같은 두 수를 쓴다
+# (서버가 dotted_clock_rule() 을 보낸다 — 화면의 스크립트에는 수가 없다. 정규식은 JavaScript 의 RegExp 와 같은 문법만)
 DOTTED_CLOCK = re.compile(r"^([0-9]{1,2})\.([0-9]{2})$")
+CLOCK_MAX_MINUTE = 59                  # 분은 00–59 — 08.75 는 시각이 아니다
+CLOCK_MAX_DAY_MINUTES = 24 * 60        # 24.00 까지 (하루의 끝) — 24.30·25.30 은 시각이 아니다
 
 
 # 한글 입력기가 낼 수 있는 전각 글자 → ASCII (숫자, 콜론, 점, 물결, 붙임표)
@@ -93,14 +95,20 @@ def dotted_clock(text: str | None) -> str | None:
     """점으로 쓴 시각처럼 보이는 계기 칸의 입력(tasks/0006 4.8): 소수 두 자리이고 24.00 이하이며 소수부가 00–59 → 콜론으로 쓴
     시각("08.00" → "08:00", "8.00" → "08:00", "24.00" → "24:00"), 아니면 None. 검수 화면이 계기 표의 시작·종료 칸에 이런 값을
     넣으면 저장 전에 "시각이면 콜론으로, 계기 값이면 그대로"를 묻는다 — 화면의 스크립트(static/index.html 의 dottedClock)가 같은
-    규칙이다 (정규식은 DOTTED_CLOCK 을 서버가 보낸다). 규칙이 아니라 질문의 조건이다: normalize 는 여전히 콜론만 시각으로 본다."""
+    규칙이다 (정규식과 두 수는 서버가 dotted_clock_rule() 로 보낸다). 규칙이 아니라 질문의 조건이다: normalize 는 여전히 콜론만
+    시각으로 본다."""
     m = DOTTED_CLOCK.match("" if text is None else str(text).strip())
     if not m:
         return None
     h, mi = int(m[1]), int(m[2])
-    if mi > 59 or h * 60 + mi > 24 * 60:
+    if mi > CLOCK_MAX_MINUTE or h * 60 + mi > CLOCK_MAX_DAY_MINUTES:
         return None
     return f"{h:02d}:{mi:02d}"
+
+
+def dotted_clock_rule() -> dict:
+    """검수 화면에 보내는 dotted_clock 의 규칙: 정규식(원문)과 분·하루의 상한. 화면의 dottedClock 은 이것만 쓴다 — 수를 따로 적지 않는다."""
+    return {"pattern": DOTTED_CLOCK.pattern, "max_minute": CLOCK_MAX_MINUTE, "max_day_minutes": CLOCK_MAX_DAY_MINUTES}
 
 
 def try_normalize(fmt: str | None, text: str | None) -> str | None:

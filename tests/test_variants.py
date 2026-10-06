@@ -92,20 +92,60 @@ def test_concurrent_variants_load_as_one_group(pack):
     ("row", lambda site: _edit(site, T_USAGE_B, lambda s: s["regions"][0]["rows"][0].update(key="SECRET-ROW-KEY")),
      "표 work 의 행"),
     ("field", lambda site: _edit(site, T_USAGE_B, lambda s: s["fields"][1].update(meta_key="SECRET-KEY")), "필드"),
+    ("row meta", lambda site: _edit(site, T_USAGE_B, lambda s: s["regions"][0]["rows"][0].update(no="SECRET-9")),
+     "표 work 의 행"),
+    ("column meta", lambda site: _edit(site, T_USAGE_B, lambda s: s["regions"][1]["columns"][0].update(shift="SECRET-N")),
+     "표 meter 의 열"),
+    ("header_rows", lambda site: _edit(site, T_USAGE_B, lambda s: s["regions"][0].update(header_rows=0)),
+     "표 work 의 header_rows"),
+    ("handler_options", lambda site: _edit(site, T_USAGE_B, lambda s: s.update(handler_options={"SECRET-OPT": 1})),
+     "handler_options"),
+    # `template variant` 를 돌린 바로 뒤: 새 판에만 family·concurrent 가 있고 기존 판(이름 = 계열)은 그대로
+    ("lone", lambda site: _edit(site, T_USAGE, lambda s: [s.pop("family"), s.pop("concurrent")]), "하나뿐"),
+    ("lone, no namesake", lambda site: [_edit(site, T_USAGE, lambda s: [s.pop("family"), s.pop("concurrent")]),
+                                        _edit(site, T_USAGE_B, lambda s: s.update(family="fam_x"))], "다른 판의 template.yaml"),
+    # 이름이 계열인 판이 이미 그 계열(날짜로 가린 개정판)이면 빠진 것은 concurrent 한 줄이다
+    ("lone, namesake in family", lambda site: [_edit(site, T_USAGE, lambda s: [s.pop("concurrent"), s.update(valid_to="2030-01-07")]),
+                                               _edit(site, T_USAGE_B, lambda s: s.update(valid_from="2030-01-08"))], "하나뿐"),
 ])
 def test_site_pack_refuses_broken_concurrent_variants(pack, case, fn, needle):
-    """concurrent 가 한쪽에만, family 없이, true/false 가 아닌 값, 동시 판끼리 키(표 이름·role·열·행·필드)가 다르면 사이트 팩을 읽을 때
-    오류다. 키가 다를 때의 메시지는 두 판의 이름과 처음 다른 항목의 종류만 — 행 키·값은 찍지 않는다."""
+    """concurrent 가 한쪽에만, 계열에 하나뿐, family 없이, true/false 가 아닌 값, 동시 판끼리 키(handler_options, 표 이름·role·
+    header_rows·열·행 — 메타까지, 필드)가 다르면 사이트 팩을 읽을 때 오류다. 키가 다를 때의 메시지는 두 판의 이름과 처음 다른 항목의
+    종류만 — 행 키·값은 찍지 않는다. 계열에 하나뿐이면 그 판과 계열, 두 줄을 적을 판(계열과 이름이 같은 템플릿이 있으면 그것)을 말한다."""
     fn(pack)
     with pytest.raises(TemplateError) as e:
         SitePack(pack)
     msg = str(e.value)
     assert needle in msg, (case, msg)
     assert "SECRET" not in msg and "\n" not in msg
-    if case in ("table name", "role", "column", "row", "field"):
+    if case in ("table name", "role", "column", "row", "field", "row meta", "column meta", "header_rows", "handler_options"):
         assert T_USAGE in msg and T_USAGE_B in msg and "키가 다릅니다" in msg
     if case == "one side":
         assert "겹칩니다" in msg
+    if case == "lone":
+        assert f"{T_USAGE_B} 하나뿐" in msg and f"{T_USAGE} 의 template.yaml" in msg
+        assert f"family: {T_USAGE}" in msg and "concurrent: true" in msg
+    if case == "lone, no namesake":
+        assert f"{T_USAGE_B} 하나뿐" in msg and "family: fam_x" in msg
+    if case == "lone, namesake in family":
+        assert f"{T_USAGE} 의 template.yaml 에 concurrent: true 를" in msg and "family:" not in msg
+
+
+def test_header_rows_left_out_is_zero_for_the_key_check(pack):
+    """동시 판의 키 비교에서 적지 않은 header_rows 는 0 이다 (Template 이 읽는 기본값과 같다) — 0 과 생략은 같은 키다."""
+    _edit(pack, T_USAGE, lambda s: s["regions"][1].update(header_rows=0))
+    _edit(pack, T_USAGE_B, lambda s: s["regions"][1].pop("header_rows"))
+    site = SitePack(pack)
+    assert site.concurrent_groups(None) == {T_USAGE: [T_USAGE, T_USAGE_B]}
+
+
+def test_site_pack_refuses_two_templates_with_one_name(pack):
+    """이름(name)이 같은 템플릿이 둘이면 사이트 팩을 읽을 때 오류다 — 하나를 말없이 덮어쓰지 않는다. 메시지는 이름과 두 폴더만."""
+    shutil.copytree(pack / "templates" / T_LOADER, pack / "templates" / "zz_dup")
+    _edit(pack, "zz_dup", lambda s: s.update(title="SECRET-TITLE"))
+    with pytest.raises(TemplateError, match=f"'{T_LOADER}' 이 둘입니다") as e:
+        SitePack(pack)
+    assert "zz_dup/" in str(e.value) and "SECRET" not in str(e.value)
 
 
 def test_concurrent_is_a_template_key(tmp_path):
@@ -332,8 +372,9 @@ def test_answers_written_for_one_variant_find_the_other(usage_run):
 
 # ── 리포트·pages --variants ───────────────────────────────────────────────────────
 def test_report_counts_chosen_variants_and_near_ties(usage_run, null_run, capsys):
-    """리포트: 판의 묶음마다 판마다 고른 쪽, 정합 실패, 두 판의 오차 차이가 1 px 미만인 쪽(두 오차가 모두 유한할 때만). 판이 없는 사이트의
-    리포트에는 키가 없다 (regress 의 기준 그대로). pages --variants 는 가르기 어려웠던 쪽을 판마다의 오차와 함께 (값 없이)."""
+    """리포트: 판의 묶음마다 판마다 고른 쪽, 정합 실패, 두 판의 오차 차이가 1 px 미만인 쪽(두 오차가 모두 유한할 때만, 고른 쪽 중에서 —
+    두 판 모두 정합에 실패한 쪽은 판을 고르지 않았으므로 정합 실패로만 센다). 판이 없는 사이트의 리포트에는 키가 없다 (regress 의 기준
+    그대로). pages --variants 는 오차 차이가 1 px 미만인 쪽을 판마다의 오차·상태와 함께 (값 없이) — 정합 실패 쪽도 상태와 함께 나온다."""
     con = clone_db(usage_run["pipe"].con)
     families = usage_run["pipe"].site.variant_families()
     assert families == {T_USAGE: T_USAGE, T_USAGE_B: T_USAGE}
@@ -347,18 +388,21 @@ def test_report_counts_chosen_variants_and_near_ties(usage_run, null_run, capsys
     con.execute("UPDATE doc_page SET variant_errs = ? WHERE page_id = ?", (json.dumps({T_USAGE: 1.0, T_USAGE_B: 0.0}), ids[1]))
     con.execute("UPDATE doc_page SET variant_errs = ?, status = 'align_failed' WHERE page_id = ?",
                 (json.dumps({T_USAGE: 7.0, T_USAGE_B: None}), ids[2]))
+    con.execute("UPDATE doc_page SET variant_errs = ?, status = 'align_failed' WHERE page_id = ?",       # 둘 다 실패, 오차가 비슷
+                (json.dumps({T_USAGE: 7.0, T_USAGE_B: 7.5}), ids[3]))
     con.commit()
     v = build_report(con, families)["variants"][T_USAGE]
-    assert v["near_tie"] == 1 and v["align_failed"] == 1 and sum(v["chosen"].values()) == 8
-    rows = list_pages(con, variants=True)
-    assert [r["page_id"] for r in rows] == [ids[0]] and rows[0]["variant_errs"] == {T_USAGE: 0.0, T_USAGE_B: 0.5}
+    assert v["near_tie"] == 1 and v["align_failed"] == 2 and sum(v["chosen"].values()) == 7
+    rows = {r["page_id"]: r for r in list_pages(con, variants=True)}
+    assert sorted(rows) == sorted(ids[:1] + ids[3:4]) and rows[ids[0]]["variant_errs"] == {T_USAGE: 0.0, T_USAGE_B: 0.5}
+    assert rows[ids[3]]["status"] == "align_failed"
     assert list_pages(con, variants=False)[0].get("variant_errs") is None
     db = usage_run["root"] / "variants.db"
     out = sqlite3.connect(db)
     con.backup(out)
     out.close()
     assert main(["pages", "--variants", "--db-url", f"sqlite:///{db}", "--json"]) == 0
-    assert [r["page_id"] for r in json.loads(capsys.readouterr().out)["pages"]] == [ids[0]]
+    assert sorted(r["page_id"] for r in json.loads(capsys.readouterr().out)["pages"]) == sorted(rows)
     assert main(["pages", "--variants", "--db-url", f"sqlite:///{db}"]) == 0
     assert f"판마다 괘선 오차: {T_USAGE} 0.0, {T_USAGE_B} 0.5" in capsys.readouterr().out
     # report 명령은 사이트 팩으로 계열을 안다
@@ -367,7 +411,7 @@ def test_report_counts_chosen_variants_and_near_ties(usage_run, null_run, capsys
     assert json.loads(capsys.readouterr().out)["report"]["variants"] == {T_USAGE: v}
     assert main(["report", *site_args]) == 0
     c = v["chosen"]
-    assert f"동시 판 {T_USAGE}: 고른 쪽 {T_USAGE} {c[T_USAGE]}, {T_USAGE_B} {c[T_USAGE_B]}, 정합 실패 1" in capsys.readouterr().out
+    assert f"동시 판 {T_USAGE}: 고른 쪽 {T_USAGE} {c[T_USAGE]}, {T_USAGE_B} {c[T_USAGE_B]}, 정합 실패 2" in capsys.readouterr().out
 
 
 # ── template variant ──────────────────────────────────────────────────────────────
@@ -527,6 +571,42 @@ def test_variant_refuses_repo_existing_folder_and_reports_tables_it_cannot_redo(
     assert new.region("tally")["grid"] == old.region("tally")["grid"]
     assert _pair([100, 150, 200], [101, 149], 20) == ([101, 149, 200], 1)          # 짝 없는 괘선
     assert _pair([100, 150], [125], 30)[1] == 1                                      # 두 괘선이 한 괘선과 → 틀린 짝
+
+
+def test_variant_refuses_a_taken_name_and_unreadable_templates_in_one_line(clean_b, tmp_path):
+    """--name 이 옆 템플릿(기존 판의 templates 폴더, 출력 폴더의 부모)의 이름이면 거절한다 — 이름이 둘이면 사이트 팩이 읽히지 않는다.
+    폴더 이름이 달라도 template.yaml 의 name 으로 본다. 깨진 기존 판(YAML 문법, 이름 없음, 기준 이미지 없음·깨짐)은 traceback 이 아니라
+    한 줄로 거절하고 template check 를 안내한다. 아무것도 쓰지 않는다."""
+    site = clean_b["site"]
+    with pytest.raises(SystemExit) as e:
+        main(["template", "variant", *_args(clean_b, name=T_LOADER), "--out-dir", str(tmp_path / "elsewhere")])
+    assert "이미 다른 템플릿이 씁니다" in str(e.value.code) and "\n" not in str(e.value.code), e.value.code
+    assert not (tmp_path / "elsewhere").exists()
+    renamed = tmp_path / "pack" / "templates"                              # 폴더 이름 ≠ name
+    shutil.copytree(site / "templates" / T_USAGE, renamed / T_USAGE)
+    shutil.copytree(site / "templates" / T_LOADER, renamed / "zz_other")
+    with pytest.raises(VariantError, match="zz_other/"):
+        make_variant(renamed / T_USAGE, clean_b["scan"], 1, T_LOADER)
+    assert not (renamed / T_LOADER).exists()
+
+    def broken(case: str, fn) -> str:
+        d = tmp_path / case / T_USAGE
+        shutil.copytree(site / "templates" / T_USAGE, d)
+        fn(d)
+        with pytest.raises(SystemExit) as e:
+            main(["template", "variant", str(d), "--scan", str(clean_b["scan"]), "--name", "x_b"])
+        msg = str(e.value.code)
+        assert msg and "\n" not in msg and "Traceback" not in msg and "template check" in msg, (case, msg)
+        assert sorted(p.name for p in d.parent.iterdir()) == [T_USAGE], case
+        return msg
+
+    assert "기준 이미지를 읽을 수 없습니다" in broken("no_ref", lambda d: (d / "reference.png").unlink())
+    assert "기준 이미지를 읽을 수 없습니다" in broken("bad_ref", lambda d: (d / "reference.png").write_bytes(b"not a png"))
+    assert "YAML 을 읽을 수 없습니다" in broken("yaml", lambda d: (d / "template.yaml").write_text("name: [x\n",
+                                                                                                    encoding="utf-8"))
+    assert "KeyError" in broken("no_name", lambda d: (d / "template.yaml").write_text(
+        "\n".join(line for line in (d / "template.yaml").read_text(encoding="utf-8").splitlines()
+                  if not line.startswith("name:")), encoding="utf-8"))
 
 
 def _args(clean_b, name: str = "usage_b2", scan: Path | None = None) -> list[str]:

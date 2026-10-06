@@ -113,7 +113,8 @@ def near_tie(errs: dict[str, float | None]) -> bool:
 
 
 def variant_summary(con: sqlite3.Connection, families: dict[str, str] | None = None) -> dict:
-    """계열마다: 판마다 고른 쪽 수(정합 실패는 빼고), 정합 실패 쪽 수, 가르기 어려웠던 쪽 수. 수만 (값·이름 없이).
+    """계열마다: 판마다 고른 쪽 수(정합 실패는 빼고), 정합 실패 쪽 수, 가르기 어려웠던 쪽 수(고른 쪽 중에서 — 정합 실패 쪽은 판을
+    고르지 않았으므로 세지 않는다. 두 판 모두 실패한 쪽은 빠진 판을 가리키는 쪽이라 align_failed 로만). 수만 (값·이름 없이).
     families: {판 이름: 계열} (SitePack.variant_families — 사이트 팩이 있을 때). 계열을 모르는 쪽(사이트 팩 없이, 또는 지금 사이트
     팩에 없는 판)은 그 쪽에서 정합한 판 이름들("A / B" — doc_page.variant_errs 의 키)로 묶는다. DB 에는 계열이 없다."""
     out: dict = {}
@@ -126,7 +127,7 @@ def variant_summary(con: sqlite3.Connection, families: dict[str, str] | None = N
             g["align_failed"] += 1
         else:
             g["chosen"][name] = g["chosen"].get(name, 0) + 1
-        g["near_tie"] += near_tie(errs)
+            g["near_tie"] += near_tie(errs)
     for g in out.values():
         g["chosen"] = dict(sorted(g["chosen"].items()))
     return dict(sorted(out.items()))
@@ -367,7 +368,7 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
         lines.append("인쇄 층으로 값 유무를 잰 쪽: " + kv(rep["print_layer"]))
     for group, v in (rep.get("variants") or {}).items():
         lines.append(f"동시 판 {group}: 고른 쪽 {kv(v['chosen'])}, 정합 실패 {v['align_failed']}, "
-                     f"두 판의 괘선 오차 차이가 {NEAR_TIE_PX:g} px 미만인 쪽 {v['near_tie']} (pages --variants)")
+                     f"고른 쪽 중 두 판의 괘선 오차 차이가 {NEAR_TIE_PX:g} px 미만인 쪽 {v['near_tie']} (pages --variants)")
     f, i, h = rep["fields"], rep["inspection"], rep["haul"]
     lines += [
         f"필드 {f['total']}개 (값 있음 {f['with_value']}, 검수 대기 {f['pending']})",
