@@ -209,6 +209,12 @@ class FormHandler:
         """기계만으로 정했을 때의 value_final. 검수를 다시 적용하기 전에 행을 기계 상태로 되돌릴 때 쓴다."""
         return row["value_raw"]
 
+    def export_cells(self, template, fields: dict[str, dict]) -> tuple[dict[str, str], list[str]]:
+        """내보내기(엑셀)에서 쪽의 칸 상태를 고쳐 말한다 (tasks/0008 4.2 — 양식의 뜻을 아는 것은 핸들러다). fields: 그 쪽의 최종
+        doc_field 행 (field_id → 행). 돌려주는 값: (field_id → 상태 'empty' | 'present', 쪽의 머리에 적을 줄들).
+        DB 를 읽지도 쓰지도 않는다. 기본은 아무것도 고치지 않는다."""
+        return {}, []
+
     def on_review(self, con: sqlite3.Connection, site: SitePack, settings: Settings, field_id: str) -> None:
         """검수를 저장한 직후 호출된다: 이 필드로 만든 업무 행을 파이프라인을 다시 돌리지 않고 갱신한다.
         기본은 아무것도 하지 않는다 (업무 테이블이 없는 핸들러)."""

@@ -67,6 +67,8 @@ def check_template(tdir: str | Path) -> list[str]:
     for reg in tpl.regions:
         cols = [c.get("name") for c in reg.get("columns") or []]
         out += [f"{tpl.name}/{reg.get('name')}: 열 이름 {n!r} 이 겹칩니다" for n in sorted({n for n in cols if cols.count(n) > 1}, key=str)]
+        if "display" in cols:                                # 인쇄된 칸의 값은 행에서 열 이름으로 찾는다 — 행의 display 가 그 값이 된다
+            out.append(f"{tpl.name}/{reg.get('name')}: 열 이름 'display' 는 쓸 수 없습니다 (행의 표시 이름 키와 겹친다 — tasks/0008 4.5)")
         rows = [r.get("row") for r in reg.get("rows") or []]
         out += [f"{tpl.name}/{reg.get('name')}: 행 번호 {n} 가 겹칩니다" for n in sorted({n for n in rows if rows.count(n) > 1}, key=str)]
     for f in tpl.fields:

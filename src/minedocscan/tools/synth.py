@@ -31,6 +31,7 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import dataclass
@@ -558,13 +559,53 @@ def _blank_forms(low: bool = False, meta: bool = False) -> dict:
     return {T_INSP: build_inspection(), T_LOG: build_haul_log(low), T_MATRIX: build_haul_matrix(low=low)}
 
 
+# ── 표시 이름 (tasks/0008 4.5 — --display-names 일 때만. template.yaml 만 바뀐다: 스캔·정답·기준 이미지의 바이트는 그대로) ──
+TEMPLATE_DISPLAY = {T_INSP: "일일 장비 점검표", T_LOG: "덤프트럭 운반 일보", T_MATRIX: "상차 장비 운반 행렬",
+                    T_MATRIX_V2: "상차 장비 운반 행렬", "synth_usage_log": "중기 운행일보", "synth_usage_log_b": "중기 운행일보",
+                    "synth_loader_log": "로우더 작업일보"}
+REGION_DISPLAY = {"main": "점검", "haul": "운반 횟수", "side": "운행 기록", "matrix": "편 × 차량", "work": "작업", "meter": "계기",
+                  "tally": "작업량", "shifts": "근무 시각"}
+COLUMN_DISPLAY = {"category": "구분", "model": "모델", "registration": "등록번호", "remark": "점검내역", "abnormal_yes": "이상 유",
+                  "abnormal_no": "이상 무", "material": "광종", "level": "편", "trips_day": "주간", "trips_night": "야간",
+                  "label": "항목", "value": "값", "start": "시작", "end": "종료", "total": "총", "no": "번호", "location": "장소",
+                  "work": "작업내용", "hours": "운행시간", "remarks": "비고", "range": "시각", "item": "구분", "place": "장소",
+                  "shift": "근무", "a": "A조", "ot": "연장", "sub": "소계"}
+FIELD_DISPLAY = {"date_line": "날짜", "vehicle_no": "차량번호", "operator": "작성자", "approval_box": "결재", "date_month": "월",
+                 "date_day": "일", "equipment": "장비명", "signature": "서명", "notes": "특기사항", "fuel": "연료", "oil": "오일",
+                 "check": "점검 사항"}
+MATERIAL_DISPLAY = {"ORE": "광석", "WASTE": "폐석", "SURFACE": "갱외"}
+
+
+def add_display(name: str, spec: dict) -> dict:
+    """합성 템플릿에 display 를 넣는다 (그 자리의 이름이 표에 있으면). 운반 표의 행은 "광석 L0" 처럼, 행렬의 자리 열은 자리 이름."""
+    spec = copy.deepcopy(spec)
+    if name in TEMPLATE_DISPLAY:
+        spec["display"] = TEMPLATE_DISPLAY[name]
+    for reg in spec.get("regions") or []:
+        if reg.get("name") in REGION_DISPLAY:
+            reg["display"] = REGION_DISPLAY[reg["name"]]
+        for c in reg.get("columns") or []:
+            if c.get("slot"):
+                c["display"] = str(c["slot"])
+            elif c.get("name") in COLUMN_DISPLAY:
+                c["display"] = COLUMN_DISPLAY[c["name"]]
+        for r in reg.get("rows") or []:
+            if r.get("material") in MATERIAL_DISPLAY:
+                r["display"] = f"{MATERIAL_DISPLAY[r['material']]} {r.get('level', '')}".strip()
+    for f in spec.get("fields") or []:
+        if f.get("name") in FIELD_DISPLAY:
+            f["display"] = FIELD_DISPLAY[f["name"]]
+    return spec
+
+
 def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low: bool = False, meta: bool = False,
-                    usage: bool = False, usage_variants: bool = False) -> Path:
+                    usage: bool = False, usage_variants: bool = False, display_names: bool = False) -> Path:
     """합성 사이트 팩(site.toml + 템플릿 세 종)을 쓴다. revision_from(날짜)을 주면 행렬 양식이 두 판이 된다:
     그 전날까지 v1, 그날부터 v2 (같은 계열, 유효 기간으로 가린다). low: 운반 양식 두 종이 낮은 칸.
     meta: 일보에 월·일 필드, 차량번호가 네 자리 숫자인 행렬 머리글 (tasks/0004 단계 2).
     usage: 가동 일보 두 종(tools/synth_usage.py)과 장비명 대응표 [equipment.aliases] (tasks/0005).
-    usage_variants: 운행일보의 판 B(synth_usage_log_b)를 더하고 두 판에 family·concurrent: true (tasks/0006 단계 4)."""
+    usage_variants: 운행일보의 판 B(synth_usage_log_b)를 더하고 두 판에 family·concurrent: true (tasks/0006 단계 4).
+    display_names: 템플릿에 표시 이름(display)을 넣는다 (tasks/0008 4.5) — template.yaml 만 바뀐다."""
     site = Path(site_dir)
     site.mkdir(parents=True, exist_ok=True)
     toml = SITE_TOML
@@ -587,6 +628,8 @@ def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low:
         d = site / "templates" / name
         d.mkdir(parents=True, exist_ok=True)
         imwrite(d / "reference.png", img)
+        if display_names:
+            spec = add_display(name, spec)
         (d / "template.yaml").write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
     (site / "labels").mkdir(exist_ok=True)
     (site / "expected").mkdir(exist_ok=True)
@@ -969,7 +1012,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
              meta_fields: bool = False, mix_pages: bool = False, usage_logs: bool = False,
              usage_only: bool = False, print_layers: bool = False, usage_variants: bool = False,
              rotate_pages: bool = False, blank_backs: bool = False, rescans: bool = False,
-             intake: bool = False) -> SynthResult:
+             intake: bool = False, display_names: bool = False) -> SynthResult:
     """out_dir 에 합성 사이트 팩(site/)과 스캔 문서(scans/), 정답(truth.json, answers.json)을 만든다.
 
     하루에 PDF 한 개: 점검표 1장 → 차량별 일보(일보를 낸 차량 수) → 행렬 1장.
@@ -998,6 +1041,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     intake=True(넷째 날까지 — days ≥ 4)면 접수 폴더 시나리오 (tasks/0007 단계 6, _write_intake): OUT/inbox/ 에 일곱 가지 파일,
     OUT/baseline/ 에 견줄 묶음(네 날을 바로 선 채로·날짜 있는 이름·빈 쪽 없이 — scans/ 와 같은 파일). 이 묶음의 PDF 는 쪽을 무손실(PNG)로
     담는다. truth["intake"]: 접수 순서, 문서·쪽의 상태(넣을 결정을 적용한 뒤, null 인식기), 넣을 결정(날짜·버리기).
+    display_names=True 면 템플릿에 표시 이름(display)을 넣는다 (tasks/0008 4.5) — template.yaml 만 바뀐다.
     """
     if mix_pages and not meta_fields:
         raise ValueError("mix_pages 는 meta_fields 와 같이 쓴다")
@@ -1012,7 +1056,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     d0 = date.fromisoformat(start)
     revision_from = (d0 + timedelta(days=1)).isoformat() if matrix_revision else None
     site = write_site_pack(root / "site", revision_from=revision_from, low=low_cells, meta=meta_fields, usage=usage_logs,
-                           usage_variants=usage_variants)
+                           usage_variants=usage_variants, display_names=display_names)
     scans = root / "scans"
     rng = np.random.default_rng(seed)
     blanks = _blank_forms(low_cells, meta_fields)

@@ -224,6 +224,8 @@ def variant_key_diff(a: Template, b: Template) -> str | None:
             return f"표 {name} 의 그 밖의 항목"
     if _variant_fields(a) != _variant_fields(b):
         return "필드"
+    if a.spec.get("display") != b.spec.get("display"):          # 엑셀의 시트는 계열마다 하나다 (tasks/0008 4.5)
+        return "양식의 display"
     return None
 
 

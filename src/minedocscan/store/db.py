@@ -127,6 +127,21 @@ def write_txn(con: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         con.commit()
 
 
+@contextmanager
+def read_txn(con: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """읽는 트랜잭션 하나: BEGIN … (끝나면 되돌린다 — 아무것도 쓰지 않는다). 그 안의 읽기는 한 시점을 본다 (WAL) — 표마다 다른
+    시점을 보지 않게 (내보내기·싣기 — tasks/0008 4.1). 이미 열린 트랜잭션 안이면 그것을 그대로 쓴다."""
+    if con.in_transaction:
+        yield con
+        return
+    con.execute("BEGIN")
+    try:
+        yield con
+    finally:
+        if con.in_transaction:
+            con.rollback()
+
+
 def delete_pages(con: sqlite3.Connection, page_ids: list[str]) -> int:
     """그 쪽들이 만든 행을 지운다 (PAGE_TABLES, 자식부터). 돌려주는 값: 지운 쪽 수."""
     ids = sorted(set(page_ids))

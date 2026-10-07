@@ -60,6 +60,10 @@ class Settings:
     settle_seconds: float = 5.0          # 수정 시각이 이만큼 앞이고 열리는 파일만 가져온다 (스캐너가 다 쓰기를 기다린다)
     give_up_seconds: float = 120.0       # 이만큼 지나도 열리지 않으면 손상 방침대로 등록한다 (읽을 수조차 없으면 _failed 로)
     poll_seconds: float = 3.0            # watch·serve 가 접수 폴더를 훑는 간격
+    # 엑셀 내보내기 (tasks/0008 4.7): [export] excel_dir (또는 MINEDOCSCAN_EXCEL_DIR) — 없으면 자동 내보내기는 꺼져 있다
+    excel_dir: Path | None = None
+    export_sweep_minutes: float = 30.0   # 전체 훑기의 간격 (분). 0 이면 시작할 때만 — 다른 프로세스가 쓴 검수와 놓친 것을 잡는다
+    machine_values: bool = False         # 업무 시트·긴 표에 "기계 값(확정 아님)" 열을 따로 둔다 (기본은 싣지 않는다 — ADR 0008)
     extra: dict = field(default_factory=dict)
 
     @property
@@ -100,6 +104,7 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
     paths = _table(raw, "paths", path)
     pipe = _table(raw, "pipeline", path)
     intake = _table(raw, "intake", path)
+    export = _table(raw, "export", path)
     rec = _table(raw, "recognize", path)
     by_kind = rec.get("by_kind", {}) or {}
     if not isinstance(by_kind, dict):
@@ -126,6 +131,9 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         settle_seconds=_number(intake, "settle_seconds", 5.0, float, "[intake] settle_seconds", lo=0.0),
         give_up_seconds=_number(intake, "give_up_seconds", 120.0, float, "[intake] give_up_seconds", lo=0.0),
         poll_seconds=_number(intake, "poll_seconds", 3.0, float, "[intake] poll_seconds", lo=0.1),
+        excel_dir=_p(export.get("excel_dir")),
+        export_sweep_minutes=_number(export, "sweep_minutes", 30.0, float, "[export] sweep_minutes", lo=0.0),
+        machine_values=_flag(export, "machine_values", False, "[export] machine_values"),
         extra=raw,
     )
     env = os.environ
@@ -141,11 +149,13 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         s.reviews = Path(env["MINEDOCSCAN_REVIEWS"])
     if env.get("MINEDOCSCAN_INBOX"):
         s.inbox = Path(env["MINEDOCSCAN_INBOX"])
+    if env.get("MINEDOCSCAN_EXCEL_DIR"):
+        s.excel_dir = Path(env["MINEDOCSCAN_EXCEL_DIR"])
     if env.get("MINEDOCSCAN_DAMAGED_PDF"):
         s.damaged_pdf = env["MINEDOCSCAN_DAMAGED_PDF"]
     for k, v in overrides.items():
         if v is not None:
-            setattr(s, k, Path(v) if k in ("archive_root", "work_root", "site", "reviews", "inbox") else v)
+            setattr(s, k, Path(v) if k in ("archive_root", "work_root", "site", "reviews", "inbox", "excel_dir") else v)
     if s.damaged_pdf not in DAMAGED_PDF:
         raise ConfigError(f"[pipeline] damaged_pdf (또는 MINEDOCSCAN_DAMAGED_PDF) 는 {' | '.join(DAMAGED_PDF)}: "
                           f"{s.damaged_pdf!r}")

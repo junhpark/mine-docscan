@@ -24,9 +24,30 @@ from ..store.db import upsert
 from ..store.order import page_key
 from .base import FormHandler, PageContext, apply_reviews, field_id, field_row
 
+NO_MARKS = "점검 표시 없음 — 체크 열 전체가 비었다 (점검하지 않은 날)"     # 내보내기의 쪽 머리 (tasks/0008 4.2)
+
 
 class InspectionHandler(FormHandler):
     name = "inspection"
+
+    def export_cells(self, template, fields: dict[str, dict]) -> tuple[dict[str, str], list[str]]:
+        """엑셀의 ✓ 칸 (tasks/0008 4.2): 점검하지 않은 쪽(체크 칸 전부의 기계 판정이 NULL — review/checks.py 의 column_unused 와 같은
+        유도)은 ✓ 칸을 비우고 쪽의 머리에 한 줄. 여백 행(장비 행이 아닌 행)의 ✓ 칸은 기계가 표시를 보지 못했으면 비운다 — 날마다 검수
+        대기이고 검수할 길이 없는 칸이다. 사람이 본 칸(검수가 있는 칸)은 고치지 않는다."""
+        region, yes_col, no_col, _text = layout(template)
+        marks = [f for f in fields.values()
+                 if f["region"] == region and f["kind"] == "checkmark" and f["field_name"] in (yes_col, no_col)]
+        if not marks:
+            return {}, []
+
+        def machine_pending(f: dict) -> bool:
+            return f["review_status"] == "pending" and f["reviewed_by"] is None
+
+        if all(f["has_value_raw"] is None for f in marks):
+            return {f["field_id"]: "empty" for f in marks if machine_pending(f)}, [NO_MARKS]
+        eq_rows = {r["row"] for r in template.region(region)["rows"] if is_equipment_row(r)}
+        return {f["field_id"]: "empty" for f in marks
+                if f["row_no"] not in eq_rows and machine_pending(f) and f["has_value_raw"] != 1}, []
 
     def load(self, ctx: PageContext) -> dict:
         tpl = ctx.template

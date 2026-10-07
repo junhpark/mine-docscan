@@ -32,8 +32,8 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install -e ".[dev]" "opencv-python-headless==4.9.0.80" "numpy==1.26.4"
-      - run: python -c "import cv2, numpy; print(cv2.__version__, numpy.__version__)"
+      - run: pip install -e ".[dev]" "opencv-python-headless==4.9.0.80" "numpy==1.26.4" "openpyxl==3.1.0"
+      - run: python -c "import cv2, numpy, openpyxl; print(cv2.__version__, numpy.__version__, openpyxl.__version__)"
       - run: pytest
 
   slow:

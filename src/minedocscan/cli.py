@@ -74,6 +74,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-watch", action="store_true",
                    help="감시·처리를 하지 않는다 (화면만 — 결정은 남고 처리는 watch 가 한다)")
 
+    p = sub.add_parser("export", parents=[common], help="내보내기 — 엑셀(일별). DB 의 사본이다 (tasks/0008)")
+    esub = p.add_subparsers(dest="export_command", required=True)
+    e = esub.add_parser("excel", parents=[common],
+                        help="엑셀 폴더에 일별 파일을 쓴다 — 바뀐 파일만 (내용의 해시). 파이프라인 잠금을 잡는다 (serve·watch 가 돌면 그쪽이 쓴다)")
+    e.add_argument("out", nargs="?", help="엑셀 폴더 (없으면 [export] excel_dir 또는 MINEDOCSCAN_EXCEL_DIR). 있어야 한다 — 만들지 않는다")
+    g = e.add_mutually_exclusive_group()
+    g.add_argument("--date", help="그 날짜만 (YYYY-MM-DD)")
+    g.add_argument("--month", help="그 달만 (YYYY-MM)")
+    g.add_argument("--from", dest="date_from", help="이 날짜부터 (--to 와 같이)")
+    e.add_argument("--to", dest="date_to", help="이 날짜까지 (양 끝 포함)")
+    e.add_argument("--allow-in-repo", action="store_true", help="저장소 안에 쓰기 (합성 데이터만 — 엑셀에는 현장의 값이 들어 있다)")
+
     p = sub.add_parser("run", parents=[common], help="스캔 파일/폴더를 처리해 DB 에 적재")
     p.add_argument("paths", nargs="*", help="파일 또는 폴더. 없으면 archive_root 전체. 상대경로는 archive_root 기준으로도 찾는다")
     p.add_argument("--recognizer", help="기본 인식 백엔드 ([recognize] backend 대신). [recognize.by_kind] 에 적힌 종류는 그쪽 "
@@ -202,6 +214,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "OUT/baseline — 넷째 날까지 (tasks/0007). 넣을 결정은 truth.json 의 intake.decisions")
     p.add_argument("--rescans", action="store_true",
                    help="첫날의 쪽 몇 장을 다른 흔들기로 다시 찍은 파일을 더한다 (JPEG 재압축·90° 돌린 것 포함 — 다시 스캔한 쪽, tasks/0007)")
+    p.add_argument("--display-names", action="store_true",
+                   help="합성 템플릿에 표시 이름(display — 엑셀에 보이는 이름)을 넣는다 (tasks/0008). template.yaml 만 바뀐다")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
@@ -964,7 +978,7 @@ def cmd_synth(a) -> int:
     r = generate(a.out, days=days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
                  usage_logs=a.usage_logs, usage_only=a.usage_only, print_layers=a.print_layers,
                  usage_variants=a.usage_variants, rotate_pages=a.rotate_pages, blank_backs=a.blank_backs,
-                 rescans=a.rescans, intake=a.intake)
+                 rescans=a.rescans, intake=a.intake, display_names=a.display_names)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")
@@ -1283,9 +1297,73 @@ def _recognizer_eval_meta(a, s: Settings, site, model_dir: Path) -> int:
     return 0
 
 
+def _export_days(a) -> tuple[set[str] | None, set[str] | None]:
+    """--date · --month · --from/--to → (다시 볼 날짜들, 다시 볼 달들). 범위를 주지 않으면 (None, None) — 전부 훑는다."""
+    from datetime import date, timedelta
+
+    def iso(v: str, what: str) -> date:
+        try:
+            return date.fromisoformat(v)
+        except ValueError:
+            raise SystemExit(f"{what} 는 YYYY-MM-DD: {v!r}") from None
+
+    if a.date_to and not a.date_from:
+        raise SystemExit("--to 는 --from 과 같이 씁니다")
+    if a.date:
+        d = iso(a.date, "--date")
+        return {d.isoformat()}, {d.isoformat()[:7]}
+    if a.month:
+        try:
+            first = date.fromisoformat(a.month + "-01")
+        except ValueError:
+            raise SystemExit(f"--month 는 YYYY-MM: {a.month!r}") from None
+        nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return {(first + timedelta(days=i)).isoformat() for i in range((nxt - first).days)}, {a.month}
+    if a.date_from:
+        lo, hi = iso(a.date_from, "--from"), iso(a.date_to or a.date_from, "--to")
+        if hi < lo:
+            raise SystemExit("--to 가 --from 보다 앞입니다")
+        if (hi - lo).days > 3660:
+            raise SystemExit("범위가 너무 깁니다 (10년 넘게)")
+        days = {(lo + timedelta(days=i)).isoformat() for i in range((hi - lo).days + 1)}
+        return days, {d[:7] for d in days}
+    return None, None
+
+
+def cmd_export(a) -> int:
+    """export excel: 파이프라인 잠금을 잡고 (serve·watch 가 돌면 한 줄로 알리고 끝낸다 — 4.1), 작업 DB 를 읽기 전용으로 열어 쓴다."""
+    from .export.writer import ExportError, check_out_dir, export_excel, format_result
+    from .store.db import open_db_readonly
+
+    s = _settings(a)
+    site = _need_site(s)
+    out = Path(a.out) if a.out else s.excel_dir
+    if out is None:
+        raise SystemExit("엑셀 폴더가 없습니다: OUT 또는 [export] excel_dir (MINEDOCSCAN_EXCEL_DIR)")
+    try:
+        check_out_dir(out, s, allow_in_repo=a.allow_in_repo)
+    except ExportError as e:
+        raise SystemExit(str(e)) from None
+    days, months = _export_days(a)
+    lock = _pipeline_lock(s)
+    try:
+        try:
+            con = open_db_readonly(s.resolved_db_url)
+        except FileNotFoundError as e:
+            raise SystemExit(f"{e} — 먼저 run·watch 로 처리합니다") from None
+        try:
+            r = export_excel(con, site, out, days=days, months=months, full=days is None, machine_values=s.machine_values)
+        finally:
+            con.close()
+    finally:
+        lock.release()
+    _emit(a, {"excel": r.as_dict(), "written": r.written, "deleted": r.deleted, "failed": r.failed}, format_result(r))
+    return 1 if (r.failed or r.missing_dir) else 0
+
+
 COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "pages": cmd_pages, "eval": cmd_eval,
             "regress": cmd_regress, "template": cmd_template, "synth": cmd_synth, "review": cmd_review,
-            "doc": cmd_doc, "watch": cmd_watch, "serve": cmd_serve,
+            "doc": cmd_doc, "watch": cmd_watch, "serve": cmd_serve, "export": cmd_export,
             "recognizer": cmd_recognizer}
 
 
