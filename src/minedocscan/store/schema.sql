@@ -155,7 +155,7 @@ CREATE TABLE IF NOT EXISTS doc_page_sig (
   document_id     TEXT NOT NULL,
   family          TEXT NOT NULL,             -- 템플릿의 family, 없으면 템플릿 이름 — 같은 계열 안에서만 비교한다
   work_date       TEXT NOT NULL,             -- 같은 날 안에서만 비교한다
-  sig             TEXT NOT NULL              -- 칸의 수 "가로x세로:" + 칸마다의 잉크 화소 수 (쉼표로)
+  sig             TEXT NOT NULL              -- "높이x너비:" + 칸마다의 잉크 화소 수(uint8)의 base64 (imaging/signature.encode)
 );
 CREATE INDEX IF NOT EXISTS ix_doc_page_sig_day ON doc_page_sig(work_date, family);
 

@@ -260,12 +260,13 @@ def test_save_for_unknown_field_only_records(day1):
 
 
 # ── 다시 처리의 불변식 (tasks/0007 4.8) ────────────────────────────────────
+@pytest.mark.slow
 def test_reprocess_invariant_with_decisions_and_reviews(world):
-    """기본 시험: 종류마다 한 번씩 (여섯 번). 더 긴 흔들기는 -m fuzz (CI 의 fuzz 작업 — 기본 시험 시간을 1.25배 안에)."""
+    """종류마다 한 번씩 (여섯 번). 더 긴 흔들기는 아래 (둘 다 -m slow — CI 의 slow 작업, 기본 시험 시간을 1.25배 안에)."""
     reprocess_fuzz(world, steps=6, seed=70072)
 
 
-@pytest.mark.fuzz
+@pytest.mark.slow
 @pytest.mark.parametrize("seed", [1, 2, 3])
 def test_reprocess_invariant_long(world, seed):
     reprocess_fuzz(world, steps=40, seed=seed)

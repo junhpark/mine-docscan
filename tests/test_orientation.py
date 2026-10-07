@@ -109,6 +109,7 @@ def _dump(con) -> dict:
 
 
 # ── 수용 기준 1: 정확히 돌린 쪽의 결과 = 바로 선 쪽의 결과 ─────────────────────────────────
+@pytest.mark.slow
 def test_exactly_rotated_pages_give_the_upright_result(orient):
     up, rot = orient["up"].con, orient["rot"].con
     a, b = _dump(up), _dump(rot)
@@ -131,6 +132,7 @@ def test_exactly_rotated_pages_give_the_upright_result(orient):
     assert list_pages(up, rotated=True) == []
 
 
+@pytest.mark.slow
 def test_saved_homography_maps_the_original_page(orient):
     """저장한 호모그래피는 렌더링한 원래(돌아간) 쪽 → 템플릿: 그것으로 원래 쪽을 다시 편 그림이 정합 그림과 같다 (보간 자리만
     조금 다를 수 있다 — 4.4). 원본 해상도 크롭은 방향을 몰라도 바로 선 쪽의 크롭과 같은 칸을 보여 준다 (같은 크기, 평균 차 2 이하)."""
@@ -158,6 +160,7 @@ def test_saved_homography_maps_the_original_page(orient):
 
 
 # ── 수용 기준 2: 돌린 쪽을 담은 PDF, 돌린 뒤 흔든 쪽 ─────────────────────────────────────
+@pytest.mark.slow
 def test_rotated_pdf_and_rotated_then_shaken_pages_load_upright(orient, usage_synth, synth):
     """JPEG 로 담은 PDF(돌린 뒤에 담았다)와, 돌린 뒤 흔들기(scan_effect)를 건 쪽 — 정확한 90° 가 아니다 — 도 전부 loaded 이고 방향이
     맞게 읽힌다. 값 유무가 바로 선 PNG 문서와 달라진 칸의 수는 보고만 한다 (JPEG·흔들기로 조금은 다르다)."""
@@ -253,6 +256,7 @@ def test_align_upright_aligns_once_for_upright_pages_and_twice_for_turned():
 
 
 # ── 도구: template init --rotate, preview --scan, print-layer 의 직접 정합 ─────────────────
+@pytest.mark.slow
 def test_template_tools_upright_turned_scans(orient, usage_synth, tmp_path, capsys):
     from minedocscan.tools.mktemplate import init_template
     from minedocscan.tools.printlayer import page_image

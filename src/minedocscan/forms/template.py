@@ -323,7 +323,7 @@ class Template:
         """다시 스캔한 쪽의 서명(imaging/signature.py)에서 지우는 자리 (tasks/0007 4.6): 인쇄(인쇄 층이 있으면 그 마스크, 없으면
         기준 이미지를 인쇄 층으로 본 마스크)와 표 밖 필드(fields — 날짜 줄·차량번호·작성자)의 칸. 표 밖 필드는 같은 날의 쪽마다 같은
         글자(그날의 날짜, 비슷한 차량번호)를 같은 자리에 쓴다 — 합성 글씨는 사람마다 획이 같아 그 칸들이 서명 질량의 58–66 % 였고
-        같은 날의 다른 종이가 0.81 까지 올라갔다 (기준 0.80, 다시 찍은 쪽 최소 0.9986). 표 안의 손글씨로만 견준다. 한 번만 계산한다."""
+        같은 날의 다른 종이가 0.81 까지 올라갔다 (기준 0.80, 다시 찍은 쪽 최소 0.998). 표 안의 손글씨로만 견준다. 한 번만 계산한다."""
         if "sig_mask" not in self._print:
             base = self.print_mask if self.print_path is not None else printlayer.mask(self.reference)
             m = base.copy()

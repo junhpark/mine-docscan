@@ -267,6 +267,7 @@ def test_rebuilding_from_the_archive_equals_the_intake_db(box):
     assert_same(dump(box["pipe"].con, skip), dump(fresh.con, skip), "보관 폴더로 다시")
 
 
+@pytest.mark.slow
 def test_a_day_split_in_two_files_equals_one_file(box, rescan_synth):
     """하루치를 두 파일로 나눠 넣은 결과가 한 파일일 때와 같다 (쪽 번호가 달라지므로 내용으로 비교한다)."""
     first = sorted(rescan_synth.scans.glob("scan_*.pdf"))[0]

@@ -16,7 +16,6 @@
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import sqlite3
@@ -26,7 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ..imaging.io import IMAGE_EXT, SUPPORTED_EXT, count_pages, imread_gray
-from ..store.order import INTAKE_DIR
+from ..store.order import INTAKE_DIR, document_id
 
 TEMP_SUFFIX = ".part"                    # 복사 중인 임시 파일 — SUPPORTED_EXT 가 아니라 run 이 줍지 않는다
 ALREADY, FAILED = "_already", "_failed"
@@ -201,7 +200,7 @@ class Inbox:
 
     def _ingest(self, path: Path, pipe) -> tuple[str, str]:
         data = path.read_bytes()
-        doc = hashlib.sha256(data).hexdigest()[:16]
+        doc = document_id(data)
         if self.con.execute("SELECT 1 FROM doc_document WHERE document_id = ?", (doc,)).fetchone() is not None:
             self._move(path, ALREADY, doc)                             # 같은 바이트 — DB 는 그대로
             return "already", doc
@@ -221,7 +220,7 @@ class Inbox:
             return None
         for folder in sorted(base.glob(f"*/*-{doc}")):
             p = folder / name
-            if p.is_file() and hashlib.sha256(p.read_bytes()).hexdigest()[:16] == doc:
+            if p.is_file() and document_id(p.read_bytes()) == doc:
                 return p
         return None
 
@@ -253,7 +252,7 @@ class Inbox:
             os.fsync(f.fileno())
         dest = folder / path.name
         os.replace(tmp, dest)
-        if hashlib.sha256(dest.read_bytes()).hexdigest()[:16] != doc:      # 복사한 것을 다시 확인한다
+        if document_id(dest.read_bytes()) != doc:      # 복사한 것을 다시 확인한다
             raise OSError("보관 폴더의 사본이 원본과 다릅니다")
         return dest
 

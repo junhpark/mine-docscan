@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -194,6 +195,103 @@ def _write_rescans(scans: Path, clean: list, labels: dict, rng, strength: float)
             labels[f"{stem}#{len(pages)}"] = dict(labels[source])
     _write_pdf(scans / f"{stem}.pdf", pages)
     return out
+
+
+# ── 접수 폴더 시나리오 (tasks/0007 단계 6) ────────────────────────────────────────────────────────────
+INTAKE_BASE_MTIME = 1_893_456_000          # 접수 폴더 파일의 수정 시각 (2030-01-01 UTC) + 번호 × 60 초 — 접수 순서가 정해지게
+
+
+def _write_intake(root: Path, scans: Path, day_pages: dict, clean_first: list, labels: dict, rng, strength: float) -> dict:
+    """OUT/inbox/ 에 접수 순서대로 (수정 시각 = INTAKE_BASE_MTIME + 번호 × 60):
+      1 첫날, 날짜 있는 이름, 바로 선 것              2 둘째 날을 두 파일로 — 둘째 파일은 90° 돌려서
+      3 셋째 날, 날짜 규칙에 맞지 않는 이름(scan0003)  4 넷째 날, 양면 (쪽마다 빈 뒷면)
+      5 첫날의 두 쪽(일보 하나·행렬)을 다시 스캔한 것 (다른 흔들기, 첫날의 날짜가 든 이름)
+      6 1번과 바이트가 같은 파일 (다른 이름)           7 가운데에서 잘린 PDF (1번의 앞 절반)
+    OUT/baseline/ = scans/ 의 네 날 (같은 화소, 바로 선 것, 날짜 있는 이름, 빈 쪽 없이). 라벨은 이 파일들의 이름#쪽으로 더한다.
+    돌려주는 값 truth["intake"]: {"files": [...], "decisions": [...], "baseline": [...], "expected": {"documents", "pages",
+    "already", "failed"}} — 넣을 결정(셋째 날의 날짜, 5번의 쪽 버리기)을 적용한 뒤 null 인식기로 처리했을 때 (적재된 쪽이 있는
+    문서는 needs_review — 손글씨 칸이 검수 대기다)."""
+    from ..store.order import document_id
+
+    stems = list(day_pages)
+    d1, d2, d3, d4 = stems[:4]
+    inbox, base = root / "inbox", root / "baseline"
+    base.mkdir(parents=True, exist_ok=True)
+    for st in stems:
+        (base / f"{st}.pdf").write_bytes((scans / f"{st}.pdf").read_bytes())
+    files: list[dict] = []
+
+    def put(name: str, pages: list, info: list[dict], kind: str, date: str) -> dict:
+        _write_pdf(inbox / name, pages, lossless=True)
+        f = {"name": name, "kind": kind, "date": date, "document_id": document_id((inbox / name).read_bytes()), "pages": info}
+        files.append(f)
+        return f
+
+    def relabel(src_stem: str, mapping: list[tuple[int, int]], new_stem: str) -> None:
+        for old, new in mapping:
+            if f"{src_stem}#{old}" in labels:
+                labels[f"{new_stem}#{new}"] = dict(labels[f"{src_stem}#{old}"])
+
+    def pinfo(info: list[dict], rotation: int = 0) -> list[dict]:
+        return [{"page": k, "template": i["template"], "status": "loaded", "rotation": rotation} for k, i in enumerate(info, 1)]
+
+    def date_of(stem: str) -> str:
+        return stem.removeprefix("scan_")
+
+    pages, info = day_pages[d1]                                                # 1 첫날
+    first = put(f"{d1}.pdf", pages, pinfo(info), "day", date_of(d1))
+    pages, info = day_pages[d2]                                                # 2 둘째 날을 두 파일로 (쪽 번호는 파일마다 1부터)
+    k = len(pages) // 2
+    put(f"{d2}_1.pdf", pages[:k], pinfo(info[:k]), "split", date_of(d2))
+    relabel(d2, [(n, n) for n in range(1, k + 1)], f"{d2}_1")
+    put(f"{d2}_2.pdf", [rotate_scan(pg, 90) for pg in pages[k:]], pinfo(info[k:], rotation=90), "split_rotated", date_of(d2))
+    relabel(d2, [(n, n - k) for n in range(k + 1, len(pages) + 1)], f"{d2}_2")
+    pages, info = day_pages[d3]                                                # 3 날짜 규칙에 맞지 않는 이름
+    put("scan0003.pdf", pages, pinfo(info), "undated", date_of(d3))
+    relabel(d3, [(n, n) for n in range(1, len(pages) + 1)], "scan0003")
+    pages, info = day_pages[d4]                                                # 4 양면 — 쪽마다 빈 뒷면 (종류는 차례로)
+    both, binfo = [], []
+    for n, (pg, i) in enumerate(zip(pages, info, strict=True), 1):
+        both += [pg, blank_back(pg, rng, BLANK_KINDS[(n - 1) % len(BLANK_KINDS)])]
+        binfo += [{"page": 2 * n - 1, "template": i["template"], "status": "loaded", "rotation": 0},
+                  {"page": 2 * n, "template": None, "status": "blank", "rotation": None}]
+    put(f"{d4}_duplex.pdf", both, binfo, "duplex", date_of(d4))
+    relabel(d4, [(n, 2 * n - 1) for n in range(1, len(pages) + 1)], f"{d4}_duplex")
+    # 5 첫날의 두 쪽(점검표가 아닌 첫 쪽 — 일보, 마지막 쪽 — 행렬)을 다른 흔들기로 다시 스캔 — 1번의 쪽에 붙잡히고, 넣을 결정이 버린다
+    picks = [next((n, c) for n, c in enumerate(clean_first, 1) if c[1] != T_INSP), (len(clean_first), clean_first[-1])]
+    re_pages, re_info = [], []
+    for n, (img, template, _source, _extra) in picks:
+        re_pages.append(scan_effect(img, rng, strength))
+        re_info.append({"page": len(re_pages), "template": template, "status": "discarded", "rotation": 0,
+                        "held_by": f"{first['document_id']}-p{n}"})
+    resc = put(f"{d1}_rescan.pdf", re_pages, re_info, "rescan", date_of(d1))
+    relabel(d1, [(n, k) for k, (n, _c) in enumerate(picks, 1)], f"{d1}_rescan")
+    same = inbox / "copy_of_first.pdf"                                         # 6 1번과 같은 바이트 — _already
+    same.write_bytes((inbox / first["name"]).read_bytes())
+    files.append({"name": same.name, "kind": "same_bytes", "date": None, "document_id": first["document_id"], "pages": []})
+    cut = inbox / "scan_2030-02-01.pdf"                                        # 7 가운데에서 잘린 PDF — failed 문서
+    data = (inbox / first["name"]).read_bytes()
+    cut.write_bytes(data[: len(data) // 2])
+    files.append({"name": cut.name, "kind": "truncated", "date": None, "document_id": document_id(cut.read_bytes()), "pages": []})
+    for n, f in enumerate(files):                                              # 접수 순서 = 수정 시각의 순서
+        t = INTAKE_BASE_MTIME + 60 * n
+        os.utime(inbox / f["name"], (t, t))
+        f["order"] = n + 1
+    undated = next(f for f in files if f["kind"] == "undated")
+    decisions = [{"target": undated["document_id"], "kind": "date", "value": undated["date"]}] + \
+                [{"target": f"{resc['document_id']}-p{p['page']}", "kind": "discard"} for p in resc["pages"]]
+    docs, pages_out = {}, {}
+    for f in files:
+        if f["kind"] == "same_bytes":
+            continue
+        if f["kind"] == "truncated":
+            docs[f["document_id"]] = "failed"
+            continue
+        for p in f["pages"]:
+            pages_out[f"{f['document_id']}-p{p['page']}"] = p["status"]
+        docs[f["document_id"]] = "needs_review" if any(p["status"] == "loaded" for p in f["pages"]) else "processed"
+    return {"files": files, "decisions": decisions, "baseline": [f"{st}.pdf" for st in stems],
+            "expected": {"documents": docs, "pages": pages_out, "already": 1, "failed": 1}}
 
 
 def jpeg_roundtrip(img: np.ndarray) -> np.ndarray:
@@ -760,14 +858,17 @@ def _fill_matrix(blank, spec, dt, rng, low: bool = False) -> np.ndarray:
     return img
 
 
-def _write_pdf(path: Path, pages: list[np.ndarray], dpi: int = DPI) -> None:
+def _write_pdf(path: Path, pages: list[np.ndarray], dpi: int = DPI, lossless: bool = False) -> None:
+    """쪽들을 PDF 로. 기본은 복합기 스캔처럼 JPEG(품질 85), lossless=True 면 PNG — 돌린 쪽이 바로 선 쪽을 정확히 돌린 것이어야 할 때
+    (synth --intake: 접수 묶음과 견줄 묶음이 같은 화소)."""
     import pymupdf
 
     doc = pymupdf.open()
     for img in pages:
         h, w = img.shape
         page = doc.new_page(width=w * 72 / dpi, height=h * 72 / dpi)
-        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])    # 복합기 스캔처럼 JPEG 로 담는다
+        ok, buf = (cv2.imencode(".png", img) if lossless else
+                   cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85]))     # 복합기 스캔처럼 JPEG 로 담는다
         if not ok:
             raise ValueError("페이지를 인코딩할 수 없습니다")
         page.insert_image(page.rect, stream=buf.tobytes())
@@ -867,7 +968,8 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
              strength: float = 1.0, matrix_revision: bool = False, low_cells: bool = False,
              meta_fields: bool = False, mix_pages: bool = False, usage_logs: bool = False,
              usage_only: bool = False, print_layers: bool = False, usage_variants: bool = False,
-             rotate_pages: bool = False, blank_backs: bool = False, rescans: bool = False) -> SynthResult:
+             rotate_pages: bool = False, blank_backs: bool = False, rescans: bool = False,
+             intake: bool = False) -> SynthResult:
     """out_dir 에 합성 사이트 팩(site/)과 스캔 문서(scans/), 정답(truth.json, answers.json)을 만든다.
 
     하루에 PDF 한 개: 점검표 1장 → 차량별 일보(일보를 낸 차량 수) → 행렬 1장.
@@ -893,6 +995,9 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     단계 3): 같은 깨끗한 쪽을 다른 흔들기(따로 쓰는 난수)로 — 하나는 JPEG 로 한 번 더 거칠게 압축하고 하나는 90° 돌려서. 파일 이름이
     첫 묶음보다 뒤라 문서의 순서도 뒤다. truth["rescans"] = [{"page", "of": "<원래 파일>#<쪽>", "how"}]. 난수를 따로 쓰므로 앞의
     묶음은 바이트까지 그대로다.
+    intake=True(넷째 날까지 — days ≥ 4)면 접수 폴더 시나리오 (tasks/0007 단계 6, _write_intake): OUT/inbox/ 에 일곱 가지 파일,
+    OUT/baseline/ 에 견줄 묶음(네 날을 바로 선 채로·날짜 있는 이름·빈 쪽 없이 — scans/ 와 같은 파일). 이 묶음의 PDF 는 쪽을 무손실(PNG)로
+    담는다. truth["intake"]: 접수 순서, 문서·쪽의 상태(넣을 결정을 적용한 뒤, null 인식기), 넣을 결정(날짜·버리기).
     """
     if mix_pages and not meta_fields:
         raise ValueError("mix_pages 는 meta_fields 와 같이 쓴다")
@@ -901,6 +1006,8 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         raise ValueError("print_layers 는 usage_logs(또는 usage_only)와 같이 쓴다")
     if usage_variants and not usage_logs:
         raise ValueError("usage_variants 는 usage_logs(또는 usage_only)와 같이 쓴다")
+    if intake and (days < 4 or usage_only or rotate_pages or blank_backs or rescans or mix_pages):
+        raise ValueError("intake 는 넷째 날까지(days ≥ 4), 다른 접수 선택(rotate_pages·blank_backs·rescans·mix_pages·usage_only) 없이 쓴다")
     root = Path(out_dir)
     d0 = date.fromisoformat(start)
     revision_from = (d0 + timedelta(days=1)).isoformat() if matrix_revision else None
@@ -926,7 +1033,8 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
             synth_usage.assign_variants(usage_plan, np.random.default_rng([seed, 5005, 2]))
     layer_pages = {} if print_layers else None
     rng_i = np.random.default_rng([seed, 7007]) if (rotate_pages or blank_backs) else None   # 접수의 쪽 — 따로
-    clean_first: list = []                                                  # rescans: 첫날의 깨끗한 쪽 (원래 쪽 번호와 함께)
+    clean_first: list = []                                                  # rescans·intake: 첫날의 깨끗한 쪽 (원래 쪽 번호와 함께)
+    day_pages: dict = {}                                                    # intake: 날마다 (스캔한 쪽, 쪽 정보)
     for d in range(days):
         day = (d0 + timedelta(days=d)).isoformat()
         v2 = bool(revision_from) and day >= revision_from
@@ -937,7 +1045,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         pages, page_info = [], []
 
         def add(img, template, _pages=pages, _info=page_info, _rng=rng, _trace=None, _d=d, _stem=stem, **extra):
-            if rescans and _d == 0:
+            if (rescans or intake) and _d == 0:
                 clean_first.append((img, template, f"{_stem}#{len(_pages) + 1}", dict(extra)))
             scanned = scan_effect(img, _rng, strength, _trace)
             if rotate_pages:
@@ -954,7 +1062,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
 
         if usage_only:
             _add_usage_pages(add, usage_plan[d], usage_blanks, rng_u, stem, day, answers, usage_truth, layer_pages)
-            _write_pdf(scans / f"{stem}.pdf", pages)
+            _write_pdf(scans / f"{stem}.pdf", pages, lossless=intake)
             documents[stem] = page_info
             continue
         dt = _day_truth(d, day, rng, slots, meta=meta_fields)
@@ -993,11 +1101,14 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
                             "text": str(r["trips"])})
         if usage_logs:
             _add_usage_pages(add, usage_plan[d], usage_blanks, rng_u, stem, day, answers, usage_truth, layer_pages)
-        _write_pdf(scans / f"{stem}.pdf", pages)
+        _write_pdf(scans / f"{stem}.pdf", pages, lossless=intake)
         documents[stem] = page_info
+        day_pages[stem] = (pages, page_info)
         day_truths.append(dt)
 
     rescan_truth = _write_rescans(scans, clean_first, labels, np.random.default_rng([seed, 8008]), strength) if rescans else None
+    intake_truth = (_write_intake(root, scans, day_pages, clean_first, labels, np.random.default_rng([seed, 9009]), strength)
+                    if intake else None)
     (site / "labels" / "pages.json").write_text(json.dumps(labels, ensure_ascii=False, indent=1), encoding="utf-8")
     insp = [r for dt in day_truths for r in dt["inspection"]]
     pages_by_form: dict[str, int] = {}
@@ -1036,6 +1147,8 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         truth["expected"]["blank"] = sum(p["template"] is None for info in documents.values() for p in info)
     if rescans:
         truth["rescans"] = rescan_truth
+    if intake:
+        truth["intake"] = intake_truth
     if print_layers:
         truth["print_layers"] = _write_print_layers(site, layer_pages)
     truth_path, answers_path = root / "truth.json", root / "answers.json"

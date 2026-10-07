@@ -8,6 +8,7 @@ document_id). 성분은 코드포인트로 견준다 — 파이썬의 글자열 
 """
 from __future__ import annotations
 
+import hashlib
 from pathlib import PurePath
 
 INTAKE_DIR = "intake"        # archive_root 아래 접수한 문서의 보관 폴더 (intake/inbox.py)
@@ -31,3 +32,8 @@ def row_document_key(row) -> tuple:
 
 def page_key(source_rel: str | None, source_path: str | None, document_id: str, page_no: int) -> tuple:
     return (document_key(source_rel, source_path, document_id), int(page_no))
+
+
+def document_id(data: bytes) -> str:
+    """문서 ID = 파일 바이트의 SHA-256 앞 16자리 — 같은 스캔은 한 문서 (등록·접수·합성의 truth 가 같이 쓴다)."""
+    return hashlib.sha256(data).hexdigest()[:16]

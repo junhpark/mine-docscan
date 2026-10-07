@@ -60,6 +60,7 @@ from ..recognize import Recognizer, build_recognizer
 from ..recognize.meta.model import build_meta_readers
 from ..review.store import import_into
 from ..store.db import delete_pages, open_db, upsert, write_txn
+from ..store.order import document_id as document_id_of
 from ..store.order import row_document_key
 from ..validate.usage import equipment_ref
 
@@ -124,7 +125,7 @@ class Pipeline:
         "pages", "warning" | "error" | "skipped"}."""
         path = Path(path)
         try:
-            document_id = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+            document_id = document_id_of(path.read_bytes())
         except OSError as e:
             if strict:
                 raise
@@ -165,7 +166,7 @@ class Pipeline:
         path = Path(path)
         source_name = source_name or path.stem
         if document_id is None:
-            document_id = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+            document_id = document_id_of(path.read_bytes())
         warnings: list[str] = []
         try:
             n_pages = count_pages(path, self.settings.damaged_pdf, warnings)
@@ -225,7 +226,8 @@ class Pipeline:
         err = _error_text(e)
         try:
             with write_txn(self.con):
-                self._clear_document(document_id)
+                before = self._clear_document(document_id)
+                self._request_later(document_id, before.groups)   # 지운 쪽 때문에 붙잡혀 있던 뒤 문서 (4.6 ①)
                 self.con.execute("UPDATE doc_document SET status = 'failed', error = ?, work_done = work_requested "
                                  "WHERE document_id = ?", (err, document_id))
         except sqlite3.Error:
@@ -424,7 +426,8 @@ class Pipeline:
         row = self._document_row(document_id, path, source_name, "failed", err, source_rel=source_rel)
         row["received_at"] = received_at or _received_now(row["source_rel"])
         with write_txn(self.con):
-            self._clear_document(document_id)
+            before = self._clear_document(document_id)
+            self._request_later(document_id, before.groups)       # 지운 쪽 때문에 붙잡혀 있던 뒤 문서 (4.6 ①)
             upsert(self.con, "doc_document", row, insert_only=("received_at",))
             self.con.execute("UPDATE doc_document SET status = 'failed', error = ?, work_done = work_requested "
                              "WHERE document_id = ?", (err, document_id))

@@ -109,6 +109,38 @@ def test_pages_of_another_day_are_not_compared(held):
     assert {r["status"] for r in pages_of(p.con, z).values()} == {"loaded"}
 
 
+def test_a_failed_original_releases_the_held_pages(held, monkeypatch):
+    """앞 문서가 다시 처리하다 실패해(처리 밖의 예외 — fail_processing, 읽지 못한 문서 — _fail_document) 행이 지워지면, 그 쪽 때문에
+    붙잡혀 있던 뒤 문서에 다시 처리를 요청한다 — 다음 처리에서 풀려 적재된다."""
+    p = run(held)
+    ids = doc_ids(p.con)
+    x, y = ids["x_2030-01-07"], ids["y_2030-01-07"]
+    waiting = "SELECT work_requested > work_done FROM doc_document WHERE document_id = ?"
+    assert {r["status"] for r in pages_of(p.con, y).values()} == {"duplicate"}
+    p.con.execute("UPDATE doc_document SET work_requested = work_requested + 1 WHERE document_id = ?", (x,))
+    p.con.commit()
+    real = Pipeline.process_document
+
+    def boom(self, document_id, **kw):
+        if document_id == x:
+            raise RuntimeError("처리 밖의 예외")
+        return real(self, document_id, **kw)
+
+    monkeypatch.setattr(Pipeline, "process_document", boom)
+    p.process_pending(catch=True)
+    assert p.con.execute("SELECT status FROM doc_document WHERE document_id = ?", (x,)).fetchone()[0] == "failed"
+    assert {r["status"] for r in pages_of(p.con, y).values()} == {"loaded"}     # 같은 바퀴에서 뒤 문서까지
+    # 읽지 못한 문서: 다시 붙잡힌 상태에서 앞 문서가 등록에서 실패한다
+    monkeypatch.setattr(Pipeline, "process_document", real)
+    q = run(held, "again")
+    x2, y2 = doc_ids(q.con)["x_2030-01-07"], doc_ids(q.con)["y_2030-01-07"]
+    q._fail_document(x2, held["scans"] / "x_2030-01-07.pdf", "x_2030-01-07", OSError("읽지 못한다"))
+    assert q.con.execute(waiting, (y2,)).fetchone()[0] == 1
+    q.process_pending()
+    assert {r["status"] for r in pages_of(q.con, y2).values()} == {"loaded"}
+
+
+@pytest.mark.slow
 def test_processing_order_does_not_matter(held):
     """뒤 문서를 먼저 처리하든, 앞 문서를 뒤늦게 다시 처리하든(날짜 바꾸기·되살리기) 처음부터 문서의 순서대로 만든 DB 와 같다.
     앞 문서를 버리거나 다른 날짜로 옮기면 붙잡혀 있던 뒤쪽이 풀려 적재된다."""
@@ -123,19 +155,18 @@ def test_processing_order_does_not_matter(held):
     x, y = ids["x_2030-01-07"], ids["y_2030-01-07"]
     path = held["st"].decisions_path(held["site"].root)
 
-    def decide(items, compare=True):
+    def decide(items):
         decs.save(p.con, path, items, "jp", received=RECEIVED)
         p.process_pending()
         no_null_dates(p.con)
-        if compare:                                                   # 처음부터 만든 DB 와 (나머지는 -m fuzz 의 흔들기가 본다)
-            fresh = run(held, f"fresh{len(decs.load(path)[0])}")
-            assert_same(dump(p.con), dump(fresh.con), items)
+        fresh = run(held, f"fresh{len(decs.load(path)[0])}")
+        assert_same(dump(p.con), dump(fresh.con), items)
 
     decide([{"target": x, "kind": "date", "value": "2030-01-09"}])          # 앞 문서를 다른 날로 → 뒤쪽이 풀린다
     assert {r["status"] for r in pages_of(p.con, y).values()} == {"loaded"}
-    decide([{"target": x, "kind": "date", "value": "2030-01-07"}], compare=False)   # 되돌리면 다시 붙잡힌다
+    decide([{"target": x, "kind": "date", "value": "2030-01-07"}])          # 되돌리면 다시 붙잡힌다
     assert {r["status"] for r in pages_of(p.con, y).values()} == {"duplicate"}
-    decide([{"target": x, "kind": "discard"}], compare=False)              # 앞 문서를 버리면 풀린다
+    decide([{"target": x, "kind": "discard"}])                             # 앞 문서를 버리면 풀린다
     assert {r["status"] for r in pages_of(p.con, y).values()} == {"loaded"}
     decide([{"target": x, "kind": "restore"}])
     assert {r["status"] for r in pages_of(p.con, y).values()} == {"duplicate"}

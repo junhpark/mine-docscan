@@ -197,6 +197,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="스캔한 쪽마다 0·90·180·270° 중 하나로 돌려서 담는다 (B5 가로를 세로로 넣은 스캐너 — tasks/0007)")
     p.add_argument("--blank-backs", action="store_true",
                    help="쪽마다 빈 뒷면(흰 종이·티·가장자리 그림자·옅게 비친 앞면)을 붙인다 (양면 스캔 — tasks/0007)")
+    p.add_argument("--intake", action="store_true",
+                   help="합성 접수 폴더 OUT/inbox (돌아간 쪽, 날짜 없는 이름, 양면, 다시 스캔, 같은 바이트, 잘린 PDF)와 견줄 묶음 "
+                        "OUT/baseline — 넷째 날까지 (tasks/0007). 넣을 결정은 truth.json 의 intake.decisions")
     p.add_argument("--rescans", action="store_true",
                    help="첫날의 쪽 몇 장을 다른 흔들기로 다시 찍은 파일을 더한다 (JPEG 재압축·90° 돌린 것 포함 — 다시 스캔한 쪽, tasks/0007)")
 
@@ -957,13 +960,18 @@ def cmd_synth(a) -> int:
         raise SystemExit("--print-layers 는 --usage-logs 또는 --usage-only 와 같이 씁니다")
     if a.usage_variants and not (a.usage_logs or a.usage_only):
         raise SystemExit("--usage-variants 는 --usage-logs 또는 --usage-only 와 같이 씁니다")
-    r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
+    days = max(a.days, 4) if a.intake else a.days
+    r = generate(a.out, days=days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
                  usage_logs=a.usage_logs, usage_only=a.usage_only, print_layers=a.print_layers,
                  usage_variants=a.usage_variants, rotate_pages=a.rotate_pages, blank_backs=a.blank_backs,
-                 rescans=a.rescans)
+                 rescans=a.rescans, intake=a.intake)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")
+    if a.intake:
+        text += (f"\n접수 폴더   {r.root / 'inbox'} (견줄 묶음 {r.root / 'baseline'})\n"
+                 f"실행 예: MINEDOCSCAN_INBOX={r.root / 'inbox'} minedocscan watch --once --settle-seconds 0 --give-up-seconds 0 "
+                 f"--site {r.site} --archive-root {r.root / 'archive'} --work-root {r.root / 'work'}  → doc list → doc date …")
     _emit(a, {"root": str(r.root), "site": str(r.site), "scans": str(r.scans), "truth": str(r.truth_path),
               "answers": str(r.answers_path), "expected": r.truth["expected"]}, text)
     return 0

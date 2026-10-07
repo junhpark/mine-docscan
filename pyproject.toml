@@ -32,11 +32,11 @@ packages = ["src/minedocscan"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # 기본 실행에서 학습 테스트(train)는 뺀다 — torch 가 있어도. 돌리려면 `pytest -m train`
-addopts = "-q -m 'not train and not fuzz'"
+addopts = "-q -m 'not train and not slow'"
 markers = [
   "realdata: 실제 현장 데이터가 필요한 회귀 테스트 (MINEDOCSCAN_SITE, MINEDOCSCAN_ARCHIVE_ROOT 가 없으면 건너뜀)",
   "train: 숫자 인식기를 학습하는 테스트 (torch 필요, 몇 분 걸린다). `pytest -m train` 으로만 돈다",
-  "fuzz: 다시 처리의 불변식을 길게 흔드는 시험 (tasks/0007 4.8, 몇 분). `pytest -m fuzz` 로만 돈다 — CI 의 fuzz 작업",
+  "slow: 기본 시험 시간을 지금의 1.25배 안에 두려고 떼어 낸 무거운 시험 (tasks/0007 6절 — 다시 처리의 불변식 흔들기, 합성 접수 시나리오, 정확히 돌린 쪽의 비교, 처리 순서 흔들기, 몇 분). `pytest -m slow` 로만 돈다 — CI 의 slow 작업",
 ]
 
 [tool.ruff]
