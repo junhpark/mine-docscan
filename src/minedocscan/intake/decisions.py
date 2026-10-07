@@ -220,10 +220,11 @@ def normalize_target(target: str) -> str:
 
 
 def save(con: sqlite3.Connection, path: str | Path, items: list[dict], reviewer: str,
-         received: date | None = None, now: str | None = None) -> dict:
+         received: date | None = None, now: str | None = None, dry_run: bool = False) -> dict:
     """결정 여럿을 한 번에 저장한다. items: [{target, kind, value?, note?}]. 전부 검사한 뒤에야 쓴다 — 하나라도 틀리면
     DecisionError 이고 파일에도 DB 에도 아무것도 남지 않는다. 날짜는 intake.dates 로 읽는다 (받은 날: received, 없으면 그 문서의
     received_at). 저장 = 파일에 줄을 붙이고(먼저) → doc_decision → 그 문서들의 work_requested +1. 읽는 것부터 쓰는 트랜잭션 안에서.
+    dry_run=True 면 검사만 하고 아무것도 쓰지 않는다 (화면이 경고를 되묻기 전에).
     돌려주는 값: {"decisions": [Decision], "warnings": [한 줄], "documents": [다시 처리를 요청한 문서]}."""
     if not reviewer:
         raise DecisionError("결정한 사람이 없습니다 (--reviewer)")
@@ -255,6 +256,8 @@ def save(con: sqlite3.Connection, path: str | Path, items: list[dict], reviewer:
             d = Decision(target=target, kind=kind, value=value, decided_by=reviewer, note=str(it.get("note") or ""),
                          decided_at=now or "")
             out.append(d)
+        if dry_run:
+            return {"decisions": out, "warnings": warnings, "documents": sorted({d.document_id for d in out})}
         seqs = append(path, out)                              # 파일이 원본: 먼저 쓴다
         upsert(con, "doc_decision", [d.db_row(seq) for d, seq in zip(out, seqs, strict=True)])
         docs = sorted({d.document_id for d in out})

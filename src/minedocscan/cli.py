@@ -67,6 +67,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--give-up-seconds", type=float,
                    help="이만큼 지나도 열리지 않는 파일은 손상 방침대로 등록한다 (기본 [intake] give_up_seconds = 120)")
 
+    p = sub.add_parser("serve", parents=[common],
+                       help="운영 화면 (127.0.0.1) + 접수 폴더 감시: 홈, 문서 화면, 날짜·버리기·다시 스캔 결정, 대기열로 가는 길")
+    p.add_argument("--reviewer", help="검수·결정을 남기는 사람 (짧은 영문). 없으면 띄우지 않는다")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--no-watch", action="store_true",
+                   help="감시·처리를 하지 않는다 (화면만 — 결정은 남고 처리는 watch 가 한다)")
+
     p = sub.add_parser("run", parents=[common], help="스캔 파일/폴더를 처리해 DB 에 적재")
     p.add_argument("paths", nargs="*", help="파일 또는 폴더. 없으면 archive_root 전체. 상대경로는 archive_root 기준으로도 찾는다")
     p.add_argument("--recognizer", help="기본 인식 백엔드 ([recognize] backend 대신). [recognize.by_kind] 에 적힌 종류는 그쪽 "
@@ -560,6 +567,67 @@ def cmd_watch(a) -> int:
     finally:
         lock.release()
     _emit(a, {"watch": r}, format_round(r))
+    return 0
+
+
+def cmd_serve(a) -> int:
+    """운영 화면 (tasks/0007 4.9): 한 프로세스에 스레드 둘 — 작업 스레드가 접수·처리 바퀴를 돌고(자기 DB 연결), 화면 스레드는
+    단일 스레드 HTTP 서버(자기 연결)다. 화면의 쓰기는 검수 저장과 결정 저장뿐. --no-watch 면 작업 스레드가 없다 (잠금도 잡지 않는다)."""
+    import threading
+
+    from .intake import decisions as decs
+    from .intake.worker import Worker, format_round
+    from .pipeline import Pipeline
+    from .review.ops import OpsApp
+    from .review.server import ReviewApp, serve
+    from .review.store import import_into
+    from .store.db import open_db
+
+    if not a.reviewer:
+        raise SystemExit("검수자를 지정하세요: --reviewer <짧은 영문 식별자>. 검수·결정 기록마다 남습니다.")
+    s = _settings(a)
+    site = _need_site(s)
+    lock = worker = thread = None
+    stop, wake = threading.Event(), threading.Event()
+    if not a.no_watch:
+        _check_inbox(s)
+        recognizer, meta_readers = _backends(s, site)
+        lock = _pipeline_lock(s)
+    try:
+        if not a.no_watch:
+            pipe = Pipeline(s, recognizer=recognizer, meta_readers=meta_readers)      # 작업 스레드의 사이트 팩·연결 (화면과 따로)
+            worker = Worker(pipe, _open_inbox(s, pipe.con, continuous=True))
+
+            def show(out):
+                if out.get("processed") or out.get("received") or out.get("already") or out.get("moved_failed"):
+                    print(format_round(out), file=sys.stderr)          # 수와 문서 ID 만
+
+            thread = threading.Thread(target=worker.run_forever, args=(stop, s.poll_seconds, wake, show), daemon=True,
+                                      name="minedocscan-worker")
+        con = open_db(s.resolved_db_url)                                # 화면 스레드의 연결
+        import_into(con, s.reviews_path(site.root))
+        decs.import_into(con, s.decisions_path(site.root))              # --no-watch 여도 결정 파일을 비춘다
+        from .forms.sitepack import SitePack
+
+        screen_site = SitePack(site.root)
+        ops = OpsApp(con, screen_site, s, a.reviewer, worker=worker, watching=not a.no_watch, wake=wake)
+        try:
+            app = ReviewApp(con, screen_site, s, a.reviewer, "pending", ops=ops)
+        except ValueError as e:
+            raise SystemExit(str(e)) from None
+        if thread is not None:
+            thread.start()
+        try:
+            serve(app, port=a.port)
+        except OSError as e:
+            raise SystemExit(str(e)) from e
+    finally:
+        stop.set()
+        wake.set()
+        if thread is not None:
+            thread.join(timeout=60)
+        if lock is not None:
+            lock.release()
     return 0
 
 
@@ -1209,7 +1277,7 @@ def _recognizer_eval_meta(a, s: Settings, site, model_dir: Path) -> int:
 
 COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "pages": cmd_pages, "eval": cmd_eval,
             "regress": cmd_regress, "template": cmd_template, "synth": cmd_synth, "review": cmd_review,
-            "doc": cmd_doc, "watch": cmd_watch,
+            "doc": cmd_doc, "watch": cmd_watch, "serve": cmd_serve,
             "recognizer": cmd_recognizer}
 
 

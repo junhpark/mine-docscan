@@ -2,9 +2,15 @@
 
 cv2.imread / cv2.imwrite 는 Windows 에서 한글 경로를 읽고 쓰지 못한다. 현장 파일명은 대부분 한글이므로
 항상 여기의 함수를 쓴다 (np.fromfile + imdecode, imencode + tofile).
+
+PyMuPDF 는 여러 스레드에서 같이 쓰면 안 된다 (tasks/0007 4.9 — serve 의 작업 스레드는 쪽을 렌더링하고 화면 스레드는 크롭과 쪽 그림을
+렌더링한다). PyMuPDF 를 부르는 곳(열기·쪽 꺼내기·렌더링·닫기)은 전부 이 파일에 있고 PDF_LOCK 하나로 감싼다. 공개 함수가 잠금을
+잡고, 밑줄로 시작하는 도우미는 잡힌 채로 불린다고 본다. load_pages 는 쪽을 내주는 동안(yield)에는 잠금을 놓는다.
+(합성 PDF 를 쓰는 tools/synth._write_pdf 는 시험·합성 명령의 주 스레드에서만 돈다 — 화면과 같이 돌지 않는다.)
 """
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -13,6 +19,7 @@ import numpy as np
 
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 SUPPORTED_EXT = IMAGE_EXT | {".pdf"}
+PDF_LOCK = threading.RLock()        # PyMuPDF 를 부르는 곳 전부 (위의 설명)
 
 
 def imread_gray(path: str | Path) -> np.ndarray:
@@ -96,9 +103,17 @@ def load_pages(path: str | Path, dpi: int = 200, damaged: str = "fail",
     path = Path(path)
     ext = path.suffix.lower()
     if ext == ".pdf":
-        with _open_pdf(path, damaged, warnings) as doc:
-            for i, page in enumerate(doc, 1):
-                yield i, _render_page(page, dpi)
+        with PDF_LOCK:
+            doc = _open_pdf(path, damaged, warnings)
+            n = doc.page_count
+        try:
+            for i in range(1, n + 1):
+                with PDF_LOCK:                                         # 쪽 하나를 렌더링하는 동안만 — 내주는 동안은 놓는다
+                    img = _render_page(doc.load_page(i - 1), dpi)
+                yield i, img
+        finally:
+            with PDF_LOCK:
+                doc.close()
     elif ext in IMAGE_EXT:
         yield 1, imread_gray(path)
     else:
@@ -111,7 +126,7 @@ def count_pages(path: str | Path, damaged: str = "fail", warnings: list[str] | N
     path = Path(path)
     ext = path.suffix.lower()
     if ext == ".pdf":
-        with _open_pdf(path, damaged, warnings) as doc:
+        with PDF_LOCK, _open_pdf(path, damaged, warnings) as doc:
             return doc.page_count
     if ext in IMAGE_EXT:
         imread_gray(path)
@@ -130,7 +145,7 @@ def load_page(path: str | Path, page_no: int, dpi: int = 200, damaged: str = "fa
     """한 쪽만 렌더링한다 (1부터). 원본 해상도 크롭처럼 쪽 하나가 필요할 때 — 앞쪽을 전부 렌더링하지 않는다."""
     path = Path(path)
     if path.suffix.lower() == ".pdf":
-        with _open_pdf(path, damaged) as doc:
+        with PDF_LOCK, _open_pdf(path, damaged) as doc:
             if not 1 <= page_no <= doc.page_count:
                 raise KeyError(f"{path} 에 {page_no}쪽이 없습니다 (전체 {doc.page_count}쪽)")
             return _render_page(doc[page_no - 1], dpi)
