@@ -4,6 +4,10 @@
 화소마다 밝기의 백분위(기본 75)를 잡으면, 쪽의 대부분에서 어두운 화소(인쇄)만 남는다. 새 임계값은 없다 — 이진화는 값 유무와
 같은 `grid.binarize` 다.
 
+백분위는 보간하지 않는다(numpy method="higher" — 그 자리 위의 실제 쪽 값). 보간하면 쪽이 적을 때 한 쪽의 손글씨가 층에 섞인다:
+3장의 75 백분위는 둘째·셋째 밝기의 중간이라, 두 쪽이 같은 자리에 쓴 값이 층에 반쯤 남아 마스크가 그 값을 지웠다 (합성 가동 일보:
+3장으로 만든 로우더 층이 작업량의 두 자리 값 4칸을 잃었다). "higher" 는 3·4장에서 가장 밝은 쪽 — 모든 쪽에 있는 것만 남는다.
+
   estimate(pages)   인쇄 층 (회색조 uint8). 같은 쪽·같은 백분위면 바이트까지 같다
   binary(layer)     인쇄 화소 (넓히지 않은 것) — 요약의 "덮인 비율", 미리보기의 색
   mask(layer)       인쇄 마스크 = binary 를 2 px 넓힌 것 — 값 유무를 잴 때 지우는 자리 (4.3, 단계 3)
@@ -27,7 +31,7 @@ MASK_GROW = 2           # 인쇄 마스크를 넓히는 폭 (px). 실데이터�
 
 
 def estimate(pages: Iterable[np.ndarray], percentile: float = 75) -> np.ndarray:
-    """템플릿 좌표로 편 회색조 그림들(같은 크기) → 인쇄 층 (uint8). 쪽마다 erode 3×3 뒤 화소마다 밝기의 백분위."""
+    """템플릿 좌표로 편 회색조 그림들(같은 크기) → 인쇄 층 (uint8). 쪽마다 erode 3×3 뒤 화소마다 밝기의 백분위 (보간 없이)."""
     if not 0 <= percentile <= 100:
         raise ValueError(f"백분위는 0–100: {percentile}")
     eroded = []
@@ -44,8 +48,7 @@ def estimate(pages: Iterable[np.ndarray], percentile: float = 75) -> np.ndarray:
     out = np.empty((h, w), np.uint8)
     for y0 in range(0, h, ROW_BLOCK):
         block = np.stack([e[y0:y0 + ROW_BLOCK] for e in eroded])
-        p = np.percentile(block, percentile, axis=0)
-        out[y0:y0 + ROW_BLOCK] = np.clip(np.rint(p), 0, 255).astype(np.uint8)
+        out[y0:y0 + ROW_BLOCK] = np.percentile(block, percentile, axis=0, method="higher").astype(np.uint8)
     return out
 
 

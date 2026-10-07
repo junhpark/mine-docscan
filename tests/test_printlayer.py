@@ -1,7 +1,7 @@
 """인쇄 층 만들기 (tasks/0006 단계 2): template print-layer, print_image, print_mask, check·preview --print·info.
 
 시험의 인쇄 층은 전부 합성 쪽으로 시험 중에 만든다 (tmp_path — 저장소에 넣지 않는다). 적재된 쪽은 usage_run(save_aligned=False)의
-호모그래피로 다시 펴고(4.2, 3일치), 분류 전용 쪽은 명령이 직접 정합한다(usage_classify_only, 하루치). 수용 기준 1 은 합성
+호모그래피로 다시 펴고(4.2, 3일치), 분류 전용 쪽은 명령이 직접 정합한다(usage_classify_only, 이틀치). 수용 기준 1 은 합성
 10일치에서 같은 방법으로 추정한 층(synth --print-layers — 정합·파이프라인 없이)으로 잰다.
 """
 from __future__ import annotations
@@ -27,7 +27,14 @@ from minedocscan.imaging import grid, printlayer
 from minedocscan.imaging.align import align_to_template
 from minedocscan.imaging.io import image_size, imread_gray, imwrite, load_page
 from minedocscan.tools import synth_usage
-from minedocscan.tools.printlayer import PrintLayerError, build, page_image, pick_order, rewarp
+from minedocscan.tools.printlayer import (
+    PrintLayerError,
+    build,
+    format_summary,
+    page_image,
+    pick_order,
+    rewarp,
+)
 from minedocscan.tools.tpltools import PRINT_COLOR, check_template, draw, handwritten_boxes, preview
 
 USAGE = (synth_usage.T_USAGE, synth_usage.T_LOADER)
@@ -99,8 +106,9 @@ def test_layer_covers_the_blank_print_and_leaves_the_value_cells_clear(synth10):
     """양식마다: 넓히지 않은 층(binary)이 빈 양식의 인쇄 화소를 99 % 이상 덮고, role 표의 손으로 쓰는 칸 전체에서 인쇄 아닌 화소 중
     인쇄로 잡힌 것이 1 % 미만이다. 2 px 넓힌 마스크로 재지 않는다 (괘선 둘레가 칸의 4 px 안쪽으로 들어온다).
     층은 10일치(운행일보 31쪽, 로우더 20쪽)를 synth --print-layers 가 추정한 것 (정합 대신 스캔 효과의 기하 행렬로 되돌린 쪽 — 명령의
-    다시 펴기와 같은 추정) — 3일치(운행일보 9쪽)는 모든 쪽이 같은 자리에 계기 값을 써서 운행일보만 약 1.9 % (12절).
-    10일치에서 운행일보 0.46 %·로우더 0.56 % (OpenCV 5.0), 0.48 %·0.58 % (4.9), 덮음은 둘 다 1.0. 칸마다의 값은 메시지에만."""
+    다시 펴기와 같은 추정) — 3일치(운행일보 9쪽)는 모든 쪽이 같은 자리에 계기 값을 써서 운행일보만 약 1.9 % (보간하던 때, 12절).
+    10일치에서 운행일보 0.31 %·로우더 0.46 % (OpenCV 5.0), 0.32 %·0.48 % (4.9), 덮음은 둘 다 1.0 — 백분위를 보간 없이 (보간하던 때
+    0.46 %·0.56 %, 0.48 %·0.58 %). 칸마다의 값은 메시지에만."""
     pages = {name: sum(p["template"] == name for info in synth10.truth["documents"].values() for p in info) for name in USAGE}
     assert pages == {synth_usage.T_USAGE: 31, synth_usage.T_LOADER: 20}
     for name in USAGE:
@@ -115,12 +123,13 @@ def test_layer_covers_the_blank_print_and_leaves_the_value_cells_clear(synth10):
         assert n / d < 0.01, msg
 
 
-# ── 수용 기준 2: 1장이면 거절, 3장이면 경고, 같은 쪽이면 같은 해시 ──────────────────────
-def test_one_page_is_refused_three_pages_warn_and_the_layer_is_deterministic(usage_synth, usage_run, tmp_path):
+# ── 수용 기준 2: 2장이면 거절, 3장이면 경고, 같은 쪽이면 같은 해시 ──────────────────────
+def test_two_pages_are_refused_three_pages_warn_and_the_layer_is_deterministic(usage_synth, usage_run, tmp_path):
     tdir = _copy_template(usage_synth.site, synth_usage.T_LOADER, tmp_path)
     s = usage_run["settings"]
-    with pytest.raises(PrintLayerError, match="2장 이상") as e:          # 인자의 거절 (쪽을 보기 전에)
-        build(tdir, s, max_pages=1)
+    for k in (1, 2):
+        with pytest.raises(PrintLayerError, match="3장 이상") as e:      # 인자의 거절 (쪽을 보기 전에)
+            build(tdir, s, max_pages=k)
     assert "\n" not in str(e.value) and not (tdir / "print.png").exists()
 
     a = build(tdir, s, max_pages=3, out=tmp_path / "a.png")
@@ -133,9 +142,12 @@ def test_one_page_is_refused_three_pages_warn_and_the_layer_is_deterministic(usa
     assert not (tdir / "print.png").exists()                        # --out 이면 템플릿 폴더에 쓰지 않는다
     assert yaml.safe_load((tdir / "template.yaml").read_text(encoding="utf-8")).get("print_image") is None
     assert "print_image: a.png" not in (a["hint"] or "")            # 템플릿 폴더 밖이면 파일 이름을 그대로 안내하지 않는다
-    # --percentile 이 그림에 닿는다 (같은 세 쪽, 50 이면 다른 그림)
+    # --percentile 이 그림에 닿는다 (같은 세 쪽, 50 이면 다른 그림). 75 미만이면 괘선을 잡는 데만 쓰라고 경고하고, 안내도 그렇게
     c = build(tdir, s, max_pages=3, percentile=50, out=tmp_path / "c.png")
     assert c["percentile"] == 50 and c["pages"] == 3 and c["sha"] != a["sha"]
+    assert len(c["warnings"]) == 2 and "75 미만" in c["warnings"][1] and "add-region" in c["warnings"][1]
+    assert "add-region" in c["hint"] and "75" in c["hint"] and "add-region" not in (a["hint"] or "")
+    assert "75 미만" in format_summary(c) and "75 미만" not in format_summary(a)
 
     # 키가 파일보다 먼저 있어도 만든다 (검증 없이 읽는다 — 4.2). 이미 이 파일을 가리키므로 안내는 없다
     _with_print(tdir)
@@ -145,7 +157,7 @@ def test_one_page_is_refused_three_pages_warn_and_the_layer_is_deterministic(usa
     assert k["sha"] == a["sha"] and k["hint"] is None and (tdir / "print.png").is_file()
     assert Template(tdir / "template.yaml").print_sha == a["sha"]    # 이제 검증을 통과한다
 
-    # 분류된 쪽이 2장 미만이면 (없는 양식 이름) 거절
+    # 분류된 쪽이 3장 미만이면 (없는 양식 이름) 거절
     spec = yaml.safe_load((tdir / "template.yaml").read_text(encoding="utf-8"))
     spec["name"] = "synth_nothing_here"
     (tdir / "template.yaml").write_text(yaml.safe_dump(spec), encoding="utf-8")
@@ -154,7 +166,7 @@ def test_one_page_is_refused_three_pages_warn_and_the_layer_is_deterministic(usa
 
 
 def test_pages_that_cannot_be_used_are_counted_and_replaced(usage_synth, usage_run, tmp_path):
-    """쓸 수 있는 쪽이 1장이면 거절 (인자가 아니라 쪽을 모은 뒤의 검사). 뺀 쪽은 이유별로 세고, 다음 쪽으로 채운다."""
+    """쓸 수 있는 쪽이 2장이면 거절 (인자가 아니라 쪽을 모은 뒤의 검사). 뺀 쪽은 이유별로 세고, 다음 쪽으로 채운다."""
     name = synth_usage.T_LOADER
     tdir = _copy_template(usage_synth.site, name, tmp_path)
     s = usage_run["settings"]
@@ -168,14 +180,13 @@ def test_pages_that_cannot_be_used_are_counted_and_replaced(usage_synth, usage_r
         con.executemany("UPDATE doc_document SET source_path = ?, source_rel = NULL WHERE document_id = ?",
                         [(str(tmp_path / "gone.pdf"), d) for d in doc_ids])
 
-    lose(ids[:2])                                                   # 남은 하루치 두 쪽 — 앞의 날짜 쪽은 빠지고 그것으로 채운다
-    r = build(tdir, s, max_pages=3, out=tmp_path / "two.png", con=con)
-    assert r["pages"] == 2 and r["skipped"] == {"no_source": 4} and r["dates"] == 1 and r["warnings"]
-    con.execute("UPDATE doc_page SET status = 'align_failed' WHERE page_id = (SELECT page_id FROM doc_page "
-                "WHERE document_id = ? AND template_name = ? ORDER BY page_no DESC LIMIT 1)", (ids[2], name))
-    with pytest.raises(PrintLayerError, match="1장뿐") as e:
-        build(tdir, s, out=tmp_path / "one.png", con=con)
-    assert "no_source 4" in str(e.value) and "\n" not in str(e.value) and not (tmp_path / "one.png").exists()
+    lose(ids[:1])                                                   # 남은 이틀치 네 쪽 — 하루치 두 쪽은 빠진다
+    r = build(tdir, s, out=tmp_path / "four.png", con=con)
+    assert r["pages"] == 4 and r["skipped"] == {"no_source": 2} and r["dates"] == 2 and r["warnings"]
+    lose(ids[1:2])                                                  # 남은 하루치 두 쪽 — 3장 미만
+    with pytest.raises(PrintLayerError, match="2장뿐") as e:
+        build(tdir, s, out=tmp_path / "two.png", con=con)
+    assert "no_source 4" in str(e.value) and "\n" not in str(e.value) and not (tmp_path / "two.png").exists()
     # 분류 전용 쪽을 정합하지 못하면 (인라이어 부족) 뺀다: 아무것도 없는 흰 쪽
     tpl = Template(tdir / "template.yaml")
     imwrite(tmp_path / "white.png", np.full(tpl.reference.shape, 255, np.uint8))
@@ -200,10 +211,10 @@ def test_output_inside_a_git_tree_needs_allow_in_repo(usage_synth, usage_run, tm
     tdir = _copy_template(usage_synth.site, synth_usage.T_LOADER, tmp_path)
     (tmp_path / ".git").mkdir()                                    # tmp_path 를 작업 트리로
     with pytest.raises(PrintLayerError, match="git 작업 트리"):
-        build(tdir, usage_run["settings"], max_pages=2)
+        build(tdir, usage_run["settings"], max_pages=3)
     assert not (tdir / "print.png").exists()
-    r = build(tdir, usage_run["settings"], max_pages=2, allow_in_repo=True)
-    assert r["pages"] == 2 and (tdir / "print.png").is_file()
+    r = build(tdir, usage_run["settings"], max_pages=3, allow_in_repo=True)
+    assert r["pages"] == 3 and (tdir / "print.png").is_file()
 
 
 def test_default_build_writes_print_png_and_only_hints_the_key(layers):
@@ -261,8 +272,8 @@ def test_saved_aligned_images_and_the_rewarp_give_the_same_layer(layers, usage_s
 # ── 분류 전용 템플릿: 쪽을 직접 정합한다, DB 에는 쓰지 않는다 (4.2) ────────────────────────
 def test_classification_only_pages_are_aligned_by_the_command(usage_classify_only):
     """usage_classify_only 의 사이트 팩은 두 양식의 칸 정의를 지웠다 → 쪽은 classified_only(호모그래피·정합 그림 없음).
-    print-layer 는 그 쪽들을 직접 정합해 만들고(aligned_now), DB 는 바이트까지 그대로다 (읽기 전용으로 연다). 하루치라 5장 미만 —
-    경고와 함께 만든다. 쪽은 판이 섞이지 않은 synth10 의 첫날이다 — 층에 생성기의 빈 양식의 인쇄와 표의 괘선이 다 남는다
+    print-layer 는 그 쪽들을 직접 정합해 만들고(aligned_now), DB 는 바이트까지 그대로다 (읽기 전용으로 연다). 로우더는 4쪽이라 5장 미만 —
+    경고와 함께 만든다. 쪽은 판이 섞이지 않은 synth10 의 첫 이틀이다 — 층에 생성기의 빈 양식의 인쇄와 표의 괘선이 다 남는다
     (단계 6 의 add-region 이 이 층에서 괘선을 잡는다. 판이 반씩 섞인 쪽이면 75 백분위 층에서 표 괘선이 빠진다 — 4.2)."""
     con = sqlite3.connect(usage_classify_only["db"])
     rows = con.execute("SELECT template_name, status, homography, aligned_image FROM doc_page").fetchall()
@@ -274,7 +285,8 @@ def test_classification_only_pages_are_aligned_by_the_command(usage_classify_onl
         r = usage_classify_only["layers"][name]["summary"]
         n = sum(t == name for t, *_ in rows)
         assert r["by_source"] == {"aligned_now": n} and r["pages"] == r["candidates"] == n >= 2 and r["skipped"] == {}
-        assert r["dates"] == 1 and len(r["warnings"]) == 1 and "5장 미만" in r["warnings"][0] and r["covered"]
+        assert r["dates"] == 2 and r["covered"]
+        assert [("5장 미만" in w) for w in r["warnings"]] == ([True] if n < 5 else [])     # 로우더 4쪽은 경고, 운행일보는 아니다
         blank, spec = synth_usage.BUILDERS[name]()
         layer = printlayer.binary(imread_gray(usage_classify_only["layers"][name]["dir"] / "print.png"))
         blank_print = grid.binarize(blank) > 0
@@ -306,8 +318,6 @@ def _no_names(text: str) -> None:
 
 
 def test_summary_and_errors_have_no_values_or_names(layers, usage_classify_only, usage_synth, usage_run, tmp_path, capsys):
-    from minedocscan.tools.printlayer import format_summary
-
     for r in [x[n]["summary"] for x in (layers, usage_classify_only["layers"]) for n in USAGE]:
         _no_names(json.dumps(r, ensure_ascii=False))
         _no_names(format_summary(r))
@@ -547,8 +557,20 @@ def test_info_says_which_templates_have_a_print_layer(layers, usage_synth, tmp_p
 def test_estimate_in_row_blocks_equals_the_whole_stack_and_drops_minority_ink():
     rng = np.random.default_rng(1)
     pages = [rng.integers(0, 256, (150, 90), dtype=np.uint8) for _ in range(7)]
-    whole = np.percentile(np.stack([cv2.erode(p, np.ones((3, 3), np.uint8)) for p in pages]), 75, axis=0)
-    assert np.array_equal(printlayer.estimate(pages), np.clip(np.rint(whole), 0, 255).astype(np.uint8))
+    whole = np.percentile(np.stack([cv2.erode(p, np.ones((3, 3), np.uint8)) for p in pages]), 75, axis=0, method="higher")
+    assert np.array_equal(printlayer.estimate(pages), whole.astype(np.uint8))
+    # 보간하지 않는다: 층의 화소는 늘 어느 쪽의 실제 값이다. 3장이면 75 백분위 = 가장 밝은 쪽 (두 쪽에 같은 자리에 쓴 값도 빠진다)
+    three = [np.full((9, 9), v, np.uint8) for v in (40, 40, 220)]
+    assert (printlayer.estimate(three) == 220).all()
+    # 그 대가: 50 백분위도 보간하지 않으므로 한 판의 괘선은 그 판이 쪽의 절반을 넘을 때만 남는다 — 두 판이 꼭 반씩이면 둘 다 빠진다
+    # (판이 섞인 양식의 첫 층 --percentile 50, 괘선을 잡는 데만 쓰는 층). 합성 운행일보 판 A·B 의 빈 그림으로
+    a_img, a_spec = synth_usage.build_usage_log()
+    b_img = synth_usage.build_usage_log("b")[0]
+    line = a_spec["regions"][0]["grid"]["ys"][2]
+    for n_a, n_b, kept in ((3, 2, True), (2, 2, False)):
+        layer = printlayer.binary(printlayer.estimate([a_img] * n_a + [b_img] * n_b, 50))
+        frac = float(layer[line - 1:line + 2, 200:1500].any(axis=0).mean())
+        assert (frac > 0.9) if kept else (frac < 0.1), (n_a, n_b, frac)
     assert printlayer.estimate(iter(pages)).tobytes() == printlayer.estimate(pages).tobytes()
     # 모든 쪽의 선(인쇄)은 남고, 두 쪽에만 있는 획(손글씨)은 빠진다. 선은 1 px 넓어진다 (erode 3×3)
     base = np.full((60, 60), 240, np.uint8)

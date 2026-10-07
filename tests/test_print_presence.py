@@ -268,18 +268,25 @@ def test_wrong_layers_only_add_reviews(usage_pages, usage_run):
     assert back["other"] > 0 and sum(back.values()) > back["other"]     # 틀린 층: 일부가 검수 대기로 돌아간다
 
 
-# ── 적은 쪽으로 만든 인쇄 층 (4.3 의 "2–5장으로 만든 층") ───────────────────────────────────
-FEW_PAGES_LOSE = ("2–3장으로 만든 층은 4.3 이 말한 것과 달리 값이 적힌 칸을 잃는다 (합성 3일치, 명령의 차례: 로우더 작업량의 두 자리 값 "
-                  "2장 1칸, 3장 4칸 — 여러 쪽의 같은 자리에 쓴 손글씨가 75 백분위에 남는다). 리드·사람의 결정을 기다린다 "
-                  "(MIN_PAGES 를 올리거나 4.3 을 '4장부터'로 고친다) — 결정되면 이 표시를 바꾼다")
+# ── 적은 쪽으로 만든 인쇄 층 (4.3 의 "3–5장으로 만든 층") ───────────────────────────────────
+def test_two_pages_are_refused(usage_synth, usage_run, tmp_path):
+    """2장의 층은 두 쪽 중 밝은 쪽이라 두 쪽이 같은 자리에 쓴 값이 층에 남아 지워진다 (합성: 로우더 작업량의 두 자리 값 1칸) —
+    template print-layer 가 거절한다. 인자로도, 쓸 수 있는 쪽이 2장뿐이어도 (test_printlayer)."""
+    from minedocscan.tools.printlayer import MIN_PAGES, PrintLayerError, build
+
+    tdir = tmp_path / T_LOADER
+    shutil.copytree(usage_synth.site / "templates" / T_LOADER, tdir)
+    assert MIN_PAGES == 3
+    with pytest.raises(PrintLayerError, match="3장 이상"):
+        build(tdir, usage_run["settings"], max_pages=2)
 
 
-@pytest.mark.parametrize("k", [pytest.param(2, marks=pytest.mark.xfail(strict=True, reason=FEW_PAGES_LOSE)),
-                               pytest.param(3, marks=pytest.mark.xfail(strict=True, reason=FEW_PAGES_LOSE)), 4, 5])
+@pytest.mark.parametrize("k", [3, 4, 5])
 def test_layers_from_few_pages_do_not_lose_written_values(k, usage_pages, usage_run):
     """template print-layer 가 경고와 함께 만드는 층 (5장 미만 — 4.2): 명령과 같은 차례(pick_order — 날짜별로 돌아가며)의 앞 k장을
-    같은 방법(imaging/printlayer.estimate, 백분위 75 → mask)으로 겹친 층으로 그 양식의 모든 쪽을 잰다. 값이 적힌 role 칸을 잃지
-    않아야 한다 (4.3, 7절). 다시 편 그림(usage_pages)은 명령이 다시 펴는 그림과 바이트까지 같다 (tools/printlayer.page_image)."""
+    같은 방법(imaging/printlayer.estimate, 백분위 75 보간 없이 → mask)으로 겹친 층으로 그 양식의 모든 쪽을 잰다. 값이 적힌 role 칸을
+    잃지 않아야 한다 (4.3, 7절). 다시 편 그림(usage_pages)은 명령이 다시 펴는 그림과 바이트까지 같다 (tools/printlayer.page_image).
+    보간하던 때는 3장의 층이 로우더 작업량의 두 자리 값 4칸을 잃었다 (75 백분위가 둘째·셋째 밝기의 중간)."""
     from minedocscan.tools.printlayer import candidate_pages, pick_order
 
     answers, con = usage_run["answers"], usage_run["pipe"].con

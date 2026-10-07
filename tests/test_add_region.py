@@ -3,7 +3,7 @@
 수용 기준 1: 분류 전용 템플릿(칸 정의 없음)에서 print-layer(쪽을 직접 정합 — 4.2) → add-region 세 번 → 괘선이 생성기와 2 px 안.
 수용 기준 2: 채워진 쪽(손글씨가 괘선 가까이)에서 잡으면 틀리는 괘선이 인쇄 층에서는 맞는다 — 인쇄 층에서 잡는 이유.
 그 밖: template.yaml 을 글자로 고친다 — 주석·필드·다른 키는 그대로, 같은 이름은 거절, role 의 자리표시, `regions: []`.
-쪽은 usage_classify_only(세션 픽스처 — synth10 의 첫날, 분류 전용 실행과 그 인쇄 층)를 같이 쓴다. 파이프라인을 더 돌리지 않는다.
+쪽은 usage_classify_only(세션 픽스처 — synth10 의 첫 이틀, 분류 전용 실행과 그 인쇄 층)를 같이 쓴다. 파이프라인을 더 돌리지 않는다.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from minedocscan.imaging.grid import detect_grid_roi
 from minedocscan.imaging.io import imread_gray, imwrite
 from minedocscan.tools import mktemplate, synth_usage
 from minedocscan.tools.mktemplate import AddRegionError, add_region
-from minedocscan.tools.printlayer import candidate_pages, page_image
+from minedocscan.tools.printlayer import build, candidate_pages, page_image
 from minedocscan.tools.tpltools import check_template
 
 LOADER = synth_usage.T_LOADER
@@ -62,7 +62,7 @@ def test_classification_only_template_to_three_tables(usage_classify_only, loade
     assert main(["template", "print-layer", str(tdir), "--work-root", str(s.work_root), "--archive-root",
                  str(s.archive_root), "--json"]) == 0
     r = json.loads(capsys.readouterr().out)
-    assert r["by_source"] == {"aligned_now": 2} and r["covered"] == []        # 덮인 칸을 잴 칸이 없다
+    assert r["by_source"] == {"aligned_now": 4} and r["covered"] == []        # 덮인 칸을 잴 칸이 없다
     assert r["sha"] == usage_classify_only["layers"][LOADER]["summary"]["sha"]  # 칸 정의가 있는 템플릿에서 만든 층과 같다
     with open(tdir / "template.yaml", "a", encoding="utf-8") as f:           # 사람이 적는 키 (4.2)
         f.write("print_image: print.png\n")
@@ -115,7 +115,7 @@ def test_print_layer_gives_the_lines_a_filled_page_gets_wrong(usage_classify_onl
     wrong = [(i, name) for i, page in enumerate(filled_loader_pages) for name, reg in loader_gen.items()
              if not _same(detect_grid_roi(page, _roi(reg)), reg)]
     assert wrong, "채워진 쪽에서도 모든 표의 괘선이 맞았다 — 이 시험이 막는 실패가 합성에 없다"
-    assert {name for _i, name in wrong} == {"meter"}, wrong
+    assert "meter" in {name for _i, name in wrong} <= {"meter", "shifts"}, wrong   # 손으로 쓴 값의 세로획 (작업량 표는 맞다)
 
     i = wrong[0][0]
     meter = loader_gen["meter"]
@@ -348,22 +348,23 @@ def test_role_placeholders(tmp_path, capsys):
 def test_usage_log_meter_placeholders_and_few_page_layer_residue(synth10, usage_classify_only, tmp_path, capsys):
     """운행일보의 계기 표는 첫 열이 인쇄된 이름 칸이고 시작·종료·총이 뒤의 세 열이다 — 자리표시도 뒤의 세 열에 붙고(앞 열은
     printed), 요약에 그 자리를 적는다 (template check 는 자리를 보지 않는다).
-    같은 영역에서: 빈 양식과 10일치로 만든 층은 생성기의 괘선이고, 첫날 4쪽(print-layer 가 5장 미만이라 경고하는 층)으로 만든
-    층에서는 같은 자리에 쓴 계기 값의 잔상이 시작 칸 안의 세로 괘선으로 잡힌다 — 여유를 넓혀 피할 일이 아니라 층을 쪽이 쌓인 뒤
-    다시 만들 일이다 (요약이 그렇게 알린다)."""
+    같은 영역에서: 빈 양식, 10일치로 만든 층, 쪽이 적은 층(3·4장 — print-layer 가 5장 미만이라 경고하는 층)이 다 생성기의 괘선이다.
+    백분위를 보간하던 때는 4장의 층에 같은 자리에 쓴 계기 값의 잔상이 남아 시작 칸 안의 세로 괘선으로 잡혔다 (보간 없이(higher)
+    3·4장의 75 백분위는 가장 밝은 쪽 — 모든 쪽에 있는 것만 남는다)."""
     from minedocscan.tools.printlayer import WARN_PAGES
 
     img, spec = synth_usage.build_usage_log()
     meter = next(r for r in spec["regions"] if r["name"] == "meter")
-    gx = meter["grid"]["xs"]
     ten = synth10.site / "templates" / synth_usage.T_USAGE / "print.png"
-    one = usage_classify_only["layers"][synth_usage.T_USAGE]
-    assert one["summary"]["pages"] < WARN_PAGES and one["summary"]["warnings"]
     assert _same(detect_grid_roi(img, _roi(meter)), meter)
     assert _same(detect_grid_roi(imread_gray(ten), _roi(meter)), meter)
-    _, fx = detect_grid_roi(imread_gray(one["dir"] / "print.png"), _roi(meter))
-    extra = [x for x in fx if min(abs(x - g) for g in gx) > 2]
-    assert extra and all(gx[1] < x < gx[2] for x in extra), (fx, gx)       # 시작 칸 안 (쓴 값의 자리)
+    s = usage_classify_only["settings"]
+    for k in (3, 4):
+        few = tmp_path / f"few{k}"
+        shutil.copytree(usage_classify_only["layers"][synth_usage.T_USAGE]["dir"], few, ignore=shutil.ignore_patterns("print.png"))
+        r = build(few, s, max_pages=k)
+        assert r["pages"] == k < WARN_PAGES and r["warnings"]
+        assert _same(detect_grid_roi(imread_gray(few / "print.png"), _roi(meter)), meter), k
 
     d = tmp_path / synth_usage.T_USAGE
     d.mkdir()

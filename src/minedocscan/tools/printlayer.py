@@ -7,7 +7,8 @@
              300 dpi·CUBIC 이라 쓰지 않는다).
              classified_only: 칸 정의가 없는 템플릿의 쪽은 정합하지 않았다(호모그래피가 없다) — 여기서 원본을 settings.dpi 로
              렌더링해 정합한다. 표가 없어 괘선 오차가 없으므로 인라이어(MIN_INLIERS)만 본다. 못 미치는 쪽은 뺀다.
-  만들기     imaging/printlayer.estimate (쪽마다 erode 3×3 → 화소마다 밝기의 백분위). 2장 미만이면 거절, 5장 미만이면 경고.
+  만들기     imaging/printlayer.estimate (쪽마다 erode 3×3 → 화소마다 밝기의 백분위, 보간 없이). 3장 미만이면 거절, 5장 미만이면
+             경고. 백분위가 75 미만이면 경고 — 그 층은 괘선을 잡는 데(add-region)만 쓴다.
 
 DB 에는 쓰지 않는다 (읽기 전용으로 연다) — runner·report·regress 의 수치는 그대로다. 쓰는 파일은 print.png 하나뿐이고
 template.yaml 은 고치지 않는다: `print_image: print.png` 는 사람이 적는다 (파일보다 키가 먼저 있으면 템플릿 오류로 사이트 팩
@@ -37,8 +38,11 @@ from .tpltools import handwritten_boxes
 
 STATUSES = ("loaded", "classified_only")        # 인쇄 층을 만드는 쪽: 그 템플릿으로 분류된 쪽 (정합 실패·오류는 빼고)
 MAX_PAGES = 40                                  # 기본 최대 쪽 수 (tasks/0006 9절)
-MIN_PAGES = 2                                   # 이보다 적으면 거절 — 한 장의 "백분위"는 그 쪽 그대로다 (손글씨까지)
+MIN_PAGES = 3                                   # 이보다 적으면 거절 — 2장의 층은 두 쪽 중 밝은 쪽이라, 두 쪽이 같은 자리에 쓴 값이
+                                                # 층에 남아 지워진다 (합성 가동 일보: 로우더 작업량의 두 자리 값 3칸. 3장부터 0칸)
 WARN_PAGES = 5                                  # 이보다 적으면 경고하고 만든다 (4.2)
+VALUE_PERCENTILE = 75                           # 값 유무에 쓰는 층의 백분위 (4.2). 이보다 낮은 층(판이 섞인 양식의 첫 층 --percentile 50)은
+                                                # 괘선을 잡는 데만 쓴다 — 낮을수록 같은 자리에 쓴 값의 잔상이 층에 남아 마스크가 값을 지운다
 TOP_COVERED = 10                                # 요약에 싣는 "인쇄에 덮인 칸"의 수
 
 
@@ -119,15 +123,20 @@ def build(template_dir: str | Path, settings: Settings, max_pages: int = MAX_PAG
     warnings = []
     if len(used) < WARN_PAGES:
         # 잔상의 결과: 여러 쪽의 같은 자리에 쓴 손글씨가 층에 남으면 그 자리에 쓴 값까지 지워 빈 칸으로 자동 적재될 수 있다
-        # (합성 가동 일보 3일치: 2–3장으로 만든 로우더 층에서 작업량의 두 자리 값 1–4칸을 잃었다, 4–5장에서는 0 — tasks/0006 4.3)
+        # (합성 가동 일보 3일치: 보간하던 때 3장으로 만든 로우더 층이 작업량의 두 자리 값 4칸을 잃었다. 보간 없이 3–5장은 0칸이지만,
+        # 실제 양식에서 늘 같은 자리에 쓰는 값은 쪽이 적을수록 층에 남기 쉽다 — tasks/0006 4.3·12절)
         warnings.append(f"쪽이 {len(used)}장뿐입니다 ({WARN_PAGES}장 미만) — 손글씨의 잔상이 남아 같은 자리에 쓴 값이 지워지고 "
                         "빈 칸으로 자동 적재될 수 있습니다. 쪽이 쌓이면 다시 만드세요")
+    if percentile < VALUE_PERCENTILE:
+        warnings.append(f"백분위 {percentile:g} ({VALUE_PERCENTILE} 미만) — 이 층은 괘선을 잡는 데(template add-region)만 씁니다. "
+                        f"값 유무에 쓰는 층(print_image 를 적고 run)은 판을 나눈 뒤 판마다 백분위 {VALUE_PERCENTILE} 로 다시 만듭니다 — "
+                        "낮은 백분위의 층에는 같은 자리에 쓴 값의 잔상이 더 남아 그 값이 빈 칸으로 자동 적재될 수 있습니다")
     return {"template": tpl.name, "out": str(out), "pages": len(used), "candidates": len(rows),
             "dates": len({r["work_date"] for r in used if r["work_date"]}),
             "undated": sum(not r["work_date"] for r in used),
             "by_source": dict(sorted(how.items())), "skipped": dict(sorted(skipped.items())),
             "percentile": percentile, "print_ratio": round(float(b.mean()), 4), "sha": printlayer.sha(layer),
-            "warnings": warnings, "hint": _hint(tpl, out), "covered": covered}
+            "warnings": warnings, "hint": _hint(tpl, out, percentile), "covered": covered}
 
 
 def candidate_pages(con: sqlite3.Connection, template_name: str) -> list[sqlite3.Row]:
@@ -188,13 +197,15 @@ def rewarp(gray: np.ndarray, homography_json: str, ref_shape: tuple[int, ...]) -
     return warp_to_template(gray, json.loads(homography_json), ref_shape)
 
 
-def _hint(tpl: Template, out: Path) -> str | None:
-    """print_image 키의 안내. 명령은 template.yaml 을 고치지 않는다."""
+def _hint(tpl: Template, out: Path, percentile: float = VALUE_PERCENTILE) -> str | None:
+    """print_image 키의 안내. 명령은 template.yaml 을 고치지 않는다. 75 미만의 층은 괘선을 잡는 데만 (add-region)."""
     in_dir = out.resolve().parent == tpl.dir.resolve()
     if "print_image" not in tpl.spec:
+        what = ("켜려면" if percentile >= VALUE_PERCENTILE
+                else f"add-region 이 괘선을 잡게 하려면 (run 전에 백분위 {VALUE_PERCENTILE} 로 다시 만든다)")
         if in_dir:
-            return f"켜려면 template.yaml 에 `print_image: {out.name}` 를 적습니다 (이 명령은 template.yaml 을 고치지 않습니다)"
-        return "켜려면 이 파일을 템플릿 폴더에 두고 template.yaml 에 `print_image: <파일 이름>` 를 적습니다"
+            return f"{what} template.yaml 에 `print_image: {out.name}` 를 적습니다 (이 명령은 template.yaml 을 고치지 않습니다)"
+        return f"{what} 이 파일을 템플릿 폴더에 두고 template.yaml 에 `print_image: <파일 이름>` 를 적습니다"
     if tpl.print_path is not None and in_dir and tpl.print_path.resolve() == out.resolve():
         return None                                  # 이미 이 파일을 쓴다
     return f"template.yaml 의 print_image 는 다른 파일을 가리킵니다: {tpl.spec.get('print_image')!s}"

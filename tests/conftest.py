@@ -337,21 +337,21 @@ def synth10(tmp_path_factory):
     """합성 가동 일보 10일치(seed 0, 판 B 없이 — 운행일보는 판 A 하나)와 그 쪽들로 추정한 인쇄 층 (synth --print-layers: 스캔한
     쪽을 스캔 효과의 기하 행렬로 템플릿 좌표에 되돌려 imaging/printlayer.estimate — template print-layer 와 같은 방법·차례·기본 설정
     (최대 40장, 백분위 75), 정합(ORB)과 파이프라인 없이). 단계 2 의 수용 기준 1 을 재는 층이고(test_printlayer.py — usage_synth 의
-    3일치는 운행일보의 판마다 4–5쪽이라 같은 자리에 쓴 계기 값의 잔상이 남는다), 첫날 묶음은 분류 전용 실행(usage_classify_only)의
+    3일치는 운행일보의 판마다 4–5쪽이라 같은 자리에 쓴 계기 값의 잔상이 남는다), 첫 이틀 묶음은 분류 전용 실행(usage_classify_only)의
     입력이다."""
     return generate(tmp_path_factory.mktemp("synth10"), days=10, seed=0, usage_only=True, print_layers=True)
 
 
 @pytest.fixture(scope="session")
 def usage_classify_only(synth10, tmp_path_factory) -> dict:
-    """분류 전용 템플릿의 인쇄 층 (tasks/0006 4.2 — print-layer 가 쪽을 직접 정합하는 경로): synth10 의 첫날 묶음 하나(운행일보 4쪽 —
-    모두 판 A, 로우더 2쪽)를 두 양식의 칸 정의를 지운 사이트 팩으로 분류만 하고(classified_only — 호모그래피·정합 그림 없음),
+    """분류 전용 템플릿의 인쇄 층 (tasks/0006 4.2 — print-layer 가 쪽을 직접 정합하는 경로): synth10 의 첫 이틀 묶음(로우더 4쪽 —
+    print-layer 는 3장 미만을 거절한다)을 두 양식의 칸 정의를 지운 사이트 팩으로 분류만 하고(classified_only — 호모그래피·정합 그림 없음),
     `template print-layer` 의 기본 설정으로 층을 만든다. 판이 섞이지 않은 쪽이라 층에 그 양식의 괘선이 다 남는다 — 판 A·B 가
     반씩 섞인 쪽으로 75 백분위 층을 만들면 두 판의 표 괘선이 다 빠진다 (4.2). 그래서 usage_synth(판이 섞였다)가 아니라 synth10 이다.
     운반 양식은 뺀다 (점검표는 장비 마스터라 둔다). 인쇄 층은 칸 정의가 있는 원래 템플릿 폴더(인쇄 층 없이)의 복사본에 쓴다.
     DB 는 print-layer 가 쓰지 않는다 — db_sha 는 만들기 전의 해시. 단계 6(add-region)도 이 층에서 괘선을 잡을 수 있다
     (test_printlayer.py 가 생성기의 괘선이 층에 남았는지 본다).
-    {"settings", "db", "db_sha", "pdf", "layers": {양식: {"dir", "summary"}}}"""
+    {"settings", "db", "db_sha", "pdfs", "layers": {양식: {"dir", "summary"}}}"""
     import hashlib
     import shutil
 
@@ -373,17 +373,17 @@ def usage_classify_only(synth10, tmp_path_factory) -> dict:
             if strip:
                 spec["regions"], spec["fields"] = [], []
             p.write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    pdf = sorted(synth10.scans.glob("*.pdf"))[0]
+    pdfs = sorted(synth10.scans.glob("*.pdf"))[:2]
     settings = Settings(site=site, archive_root=synth10.scans, work_root=root / "work", reviews=root / "reviews.jsonl",
                         save_aligned=False)
     pipe = Pipeline(settings)
-    pipe.run([pdf])
+    pipe.run(pdfs)
     pipe.con.close()
     db = root / "work" / "minedocscan.db"
     db_sha = hashlib.sha256(db.read_bytes()).hexdigest()
     layers = {name: {"dir": root / "templates" / name, "summary": build(root / "templates" / name, settings)}
               for name in (T_USAGE, T_LOADER)}
-    return {"settings": settings, "db": db, "db_sha": db_sha, "pdf": pdf, "layers": layers}
+    return {"settings": settings, "db": db, "db_sha": db_sha, "pdfs": pdfs, "layers": layers}
 
 
 @pytest.fixture(scope="session")

@@ -117,9 +117,10 @@ def build_parser() -> argparse.ArgumentParser:
     t = tsub.add_parser("print-layer", parents=[common],
                         help="그 양식으로 분류된 쪽들에서 인쇄 층(손글씨가 빠진 빈 양식)을 만든다 → <템플릿 폴더>/print.png + 요약")
     t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
-    t.add_argument("--max-pages", type=int, default=40, help="쓸 쪽의 최대 수 — 날짜별로 고르게 (기본 40, 2장 미만이면 거절)")
+    t.add_argument("--max-pages", type=int, default=40, help="쓸 쪽의 최대 수 — 날짜별로 고르게 (기본 40, 3장 미만이면 거절)")
     t.add_argument("--percentile", type=_number, default=75,
-                   help="화소마다 밝기의 백분위 (기본 75). 판이 섞였을 수 있는 양식의 첫 층은 50 (tasks/0006 4.2)")
+                   help="화소마다 밝기의 백분위 (기본 75). 판이 섞였을 수 있는 양식의 첫 층은 50 — 괘선을 잡는 데(add-region)만 쓰고, "
+                        "값 유무에 쓰는 층은 판을 나눈 뒤 75 로 다시 만든다 (75 미만이면 요약이 경고한다)")
     t.add_argument("--out", help="출력 PNG 파일 (기본 <템플릿 폴더>/print.png). git 작업 트리 안은 거절한다")
     t.add_argument("--allow-in-repo", action="store_true", help="저장소 안에도 쓴다 (합성 사이트 팩만)")
     t = tsub.add_parser("variant", parents=[common],
