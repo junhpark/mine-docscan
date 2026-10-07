@@ -46,6 +46,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("info", parents=[common], help="설정·사이트 팩·백엔드 확인")
 
+    p = sub.add_parser("doc", parents=[common],
+                       help="문서·쪽: 목록과 결정(날짜·버리기·되살리기·다른 종이) — 결정을 남기기만 한다. 처리는 watch·serve·run")
+    dsub = p.add_subparsers(dest="doc_command", required=True)
+    d = dsub.add_parser("list", parents=[common], help="문서 목록: 받은 시각, 쪽 수, 날짜, 상태, 다시 처리 대기")
+    d.add_argument("--status", help="received | needs_date | processed | needs_review | failed | discarded")
+    for name, what in (("date", "날짜를 정한다"), ("discard", "버린다 (걸린 스캔, 다시 스캔한 쪽)"), ("restore", "버린 것을 되살린다"),
+                       ("keep", "다시 스캔한 것이 아니다 — 다른 종이다 (쪽만)")):
+        d = dsub.add_parser(name, parents=[common], help=what)
+        d.add_argument("target", help="문서 ID 또는 쪽 ID (<문서 ID>-p<쪽>)" if name != "keep" else "쪽 ID (<문서 ID>-p<쪽>)")
+        if name == "date":
+            d.add_argument("date", help="2025-03-26 · 25.03.26 · 250326 · 0326 (해는 받은 날을 넘지 않는 가장 가까운 해)")
+        d.add_argument("--reviewer", help="결정한 사람 (없으면 저장하지 않는다)")
+        d.add_argument("--note", default="", help="메모 (결정 기록에 남는다 — 로그에는 찍지 않는다)")
+
+    p = sub.add_parser("watch", parents=[common],
+                       help="접수 폴더를 보고 대기 중인 문서를 처리한다 (화면 없이). --once 면 한 바퀴만")
+    p.add_argument("--once", action="store_true", help="한 바퀴(접수 + 대기 중인 문서 처리) 돌고 끝낸다")
+    p.add_argument("--settle-seconds", type=float, help="수정 시각이 이만큼 지난 파일만 가져온다 (기본 [intake] settle_seconds = 5)")
+    p.add_argument("--give-up-seconds", type=float,
+                   help="이만큼 지나도 열리지 않는 파일은 손상 방침대로 등록한다 (기본 [intake] give_up_seconds = 120)")
+
     p = sub.add_parser("run", parents=[common], help="스캔 파일/폴더를 처리해 DB 에 적재")
     p.add_argument("paths", nargs="*", help="파일 또는 폴더. 없으면 archive_root 전체. 상대경로는 archive_root 기준으로도 찾는다")
     p.add_argument("--recognizer", help="기본 인식 백엔드 ([recognize] backend 대신). [recognize.by_kind] 에 적힌 종류는 그쪽 "
@@ -329,6 +350,11 @@ def cmd_info(a) -> int:
                         "equipment_aliases_sha": site.equipment_aliases_sha, "equipment_master": n_master}
         lines.append(f"사이트 팩: {site.name} — 템플릿 {len(tpls)}종, 페이지 라벨 {len(site.labels)}개, "
                      f"장비명 대응표 {len(site.equipment_aliases)}개 (해시 {site.equipment_aliases_sha}, 마스터 {n_master}대)")
+        from .intake.decisions import count_lines
+
+        dpath = s.decisions_path(site.root)
+        data["decisions"] = {"path": str(dpath), "lines": count_lines(dpath)}   # 결정 기록 (tasks/0007 4.3) — 값·이름이 없다
+        lines.append(f"결정 기록: {dpath} ({data['decisions']['lines']}줄)")
         for t in tpls:
             valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}"
                      + (" (같은 날 섞여 쓰이는 판)" if t["concurrent"] else "") if t["family"] else "")
@@ -383,7 +409,7 @@ def _describe_meta(s: Settings, site) -> dict:
 
 def cmd_run(a) -> int:
     from .pipeline import Pipeline
-    from .recognize import OracleRecognizer, build_recognizer, load_answers_json
+    from .recognize import OracleRecognizer, load_answers_json
     from .report import build_report, format_report, xcheck_by_date
 
     s = _settings(a, recognizer=a.recognizer, corrector=a.corrector)
@@ -401,36 +427,42 @@ def cmd_run(a) -> int:
     elif s.recognizer == "oracle":
         raise SystemExit("oracle 백엔드는 --answers 또는 --inspection-csv 가 필요합니다")
     else:
-        try:
-            recognizer = build_recognizer(s, site)
-        except (KeyError, ValueError, FileNotFoundError) as e:
-            raise SystemExit(f"인식 백엔드를 준비할 수 없습니다: {e}") from e
-    from .recognize.meta.model import MetaModelError, build_meta_readers
-
+        recognizer = None
+    recognizer, meta_readers = _backends(s, site, recognizer)
+    lock = _pipeline_lock(s)
     try:
-        meta_readers = build_meta_readers(s, site)
-    except MetaModelError as e:
-        raise SystemExit(f"메타 필드 모델을 준비할 수 없습니다: {e}") from e
-    if a.fresh and s.resolved_db_url.startswith("sqlite:///"):   # 인식기(모델)를 준비한 뒤에 지운다 — 모델이 없으면 DB 는 그대로
-        Path(s.resolved_db_url[len("sqlite:///"):]).unlink(missing_ok=True)
-    pipe = Pipeline(s, site=site, recognizer=recognizer, meta_readers=meta_readers)
-    files = pipe.expand(paths)
-    if not files:
-        raise SystemExit(f"처리할 파일이 없습니다: {[str(p) for p in paths]}")
-    t0 = time.monotonic()
-    for i, f in enumerate(files, 1):
-        r = pipe.process_file(f, template=a.template, skip_existing=a.skip_existing, strict=a.strict)
-        if not a.json:
-            el = time.monotonic() - t0
-            eta = el / i * (len(files) - i)
-            what = ("건너뜀" if r.get("skipped") else f"실패: {r['error']}" if r["status"] == "failed" else f"{len(r['pages'])}쪽"
-                    + (f" · 경고: {r['warning']}" if r.get("warning") else ""))
-            print(f"[{i}/{len(files)}] {f.name} · {what} · 지난 {_hms(el)} · 남은 약 {_hms(eta)}", file=sys.stderr)
-    summary = pipe.finalize()
+        if a.fresh and s.resolved_db_url.startswith("sqlite:///"):   # 인식기(모델)를 준비한 뒤에 지운다 — 모델이 없으면 DB 는 그대로
+            db = Path(s.resolved_db_url[len("sqlite:///"):])
+            for f in (db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError as e:                              # 윈도우: 다른 프로그램(review serve·serve)이 DB 를 열고 있다
+                    raise SystemExit(f"DB 를 지울 수 없습니다 — 다른 프로그램(serve, review serve)이 쓰고 있습니다: {e}") from None
+        pipe = Pipeline(s, site=site, recognizer=recognizer, meta_readers=meta_readers)
+        files = pipe.expand(paths)
+        if not files and not pipe.pending_documents():
+            raise SystemExit(f"처리할 파일이 없습니다: {[str(p) for p in paths]}")
+        t0 = time.monotonic()
+        for i, f in enumerate(files, 1):
+            r = pipe.process_file(f, template=a.template, skip_existing=a.skip_existing, strict=a.strict)
+            if not a.json:
+                el = time.monotonic() - t0
+                eta = el / i * (len(files) - i)
+                what = ("건너뜀" if r.get("skipped") else f"실패: {r['error']}" if r["status"] == "failed"
+                        else _RUN_STATUS.get(r["status"]) or (f"{len(r['pages'])}쪽" + (f" · 경고: {r['warning']}" if r.get("warning") else "")))
+                print(f"[{i}/{len(files)}] {f.name} · {what} · 지난 {_hms(el)} · 남은 약 {_hms(eta)}", file=sys.stderr)
+        waiting = pipe.process_pending(template=a.template, strict=a.strict)   # 준 경로를 다 돈 뒤 대기 중인 문서를 마저
+        summary = pipe.finalize()
+    finally:
+        lock.release()
     rep = build_report(pipe.con, pipe.site.variant_families())
     text = (f"이번 실행: 문서 {summary['documents']}건, 페이지 {summary['pages']}장, 건너뜀 {summary['skipped']}건, "
             f"실패 {len(summary['failed'])}건 (인식 백엔드: {recognizer.name})\n"
-            f"분류 여유가 낮은 페이지: {len(summary['low_margin'])}장, 오류 난 쪽: {len(summary['page_errors'])}장\n"
+            + (f"대기 중이던 문서 {waiting}건을 마저 처리했습니다\n" if waiting else "")
+            + (f"날짜를 정할 문서 {len(summary['needs_date'])}건 — minedocscan doc list --status needs_date → doc date\n"
+               if summary["needs_date"] else "")
+            + (f"원본에 닿지 않은 문서 {len(set(summary['unreachable']))}건 (다음에 다시 봅니다)\n" if summary["unreachable"] else "")
+            + f"분류 여유가 낮은 페이지: {len(summary['low_margin'])}장, 오류 난 쪽: {len(summary['page_errors'])}장\n"
             f"── DB 현황 ({s.resolved_db_url}) ──\n" + format_report(rep, xcheck_by_date(pipe.con)))
     if summary["failed"]:
         text += "\n실패한 문서:\n" + "\n".join(f"  {d['source_name']}: {d['error']}" for d in summary["failed"])
@@ -440,6 +472,135 @@ def cmd_run(a) -> int:
         text += "\n경고가 있는 문서:\n" + "\n".join(f"  {d['source_name']}: {d['warning']}" for d in summary["warnings"])
     _emit(a, {"run": summary, "report": rep}, text)
     return 1 if (summary["failed"] or summary["page_errors"]) else 0
+
+
+def cmd_doc(a) -> int:
+    """문서 목록과 결정 (tasks/0007 4.3). 결정은 파일에 한 줄 + doc_decision + 다시 처리 요청 — 처리는 watch·serve·run 이 한다."""
+    from .intake import decisions as decs
+    from .store.db import open_db
+    from .store.order import row_document_key
+
+    s = _settings(a)
+    site = _need_site(s)
+    con = open_db(s.resolved_db_url)
+    if a.doc_command == "list":                               # 읽기만 한다 (처리 중인 쪽의 트랜잭션을 기다리지 않게)
+        rows = [dict(r) for r in con.execute("SELECT * FROM doc_document")]
+        rows.sort(key=row_document_key)
+        if a.status:
+            rows = [r for r in rows if r["status"] == a.status]
+        out = [{"document_id": r["document_id"], "received_at": r["received_at"], "source_name": r["source_name"],
+                "n_pages": r["n_pages"], "work_date": r["work_date"], "date_source": r["date_source"], "status": r["status"],
+                "waiting": r["status"] == "received" or r["work_requested"] > r["work_done"]} for r in rows]
+        lines = [f"{'받은 시각':<24} {'문서 ID':<16} {'쪽':>3} {'날짜':<10} {'상태':<13} 파일명"]
+        for r in out:
+            lines.append(f"{r['received_at'] or '-':<24} {r['document_id']:<16} {str(r['n_pages'] or '-'):>3} "
+                         f"{r['work_date'] or '-':<10} {r['status']:<13} {r['source_name']}"
+                         + ("  (다시 처리 대기)" if r["waiting"] and r["status"] != "received" else ""))
+        lines.append(f"문서 {len(out)}건" + (f" (상태 {a.status})" if a.status else ""))
+        _emit(a, {"documents": out}, "\n".join(lines))
+        return 0
+    if not a.reviewer:
+        raise SystemExit("결정한 사람이 없습니다: --reviewer 를 주세요 (없으면 저장하지 않습니다)")
+    decs.import_into(con, s.decisions_path(site.root))        # 파일이 원본 — 다른 곳에서 붙은 줄이 있으면 먼저 비춘다
+    item = {"target": a.target, "kind": a.doc_command, "value": getattr(a, "date", ""), "note": a.note}
+    try:
+        r = decs.save(con, s.decisions_path(site.root), [item], a.reviewer)
+    except decs.DecisionError as e:
+        raise SystemExit(f"결정을 저장하지 않았습니다: {e}") from None
+    d = r["decisions"][0]
+    text = "\n".join([f"경고: {w}" for w in r["warnings"]]
+                     + [f"결정을 남겼습니다: {d.target} {d.kind}" + (f" {d.value}" if d.value else ""),
+                        "다시 처리 대기 — minedocscan watch --once (또는 serve, run) 가 처리합니다"])
+    _emit(a, {"decision": {"decision_id": d.decision_id, "target": d.target, "kind": d.kind, "value": d.value},
+              "warnings": r["warnings"], "documents": r["documents"]}, text)
+    return 0
+
+
+def cmd_watch(a) -> int:
+    """접수 폴더 감시 + 대기 중인 문서 처리 (tasks/0007 4.7). 요약에는 수와 문서 ID 만 — 파일명은 doc list·화면에서 본다."""
+    from .pipeline import Pipeline
+
+    s = _settings(a)
+    site = _need_site(s)
+    recognizer, meta_readers = _backends(s, site)
+    lock = _pipeline_lock(s)
+    try:
+        pipe = Pipeline(s, site=site, recognizer=recognizer, meta_readers=meta_readers)
+        while True:
+            r = watch_round(pipe, settle_seconds=a.settle_seconds, give_up_seconds=a.give_up_seconds)
+            if a.once:
+                break
+            if r["processed"] or r.get("received"):
+                print(format_round(r), file=sys.stderr)
+            time.sleep(_intake_option(s, "poll_seconds", 3.0))
+    except KeyboardInterrupt:
+        r = {"processed": 0}
+    finally:
+        lock.release()
+    _emit(a, {"watch": r}, format_round(r))
+    return 0
+
+
+def _backends(s: Settings, site, recognizer=None) -> tuple:
+    """run·watch(·serve)가 같이 쓰는 준비: 인식기와 메타 필드 모델. 준비할 수 없으면 한 줄로 멈춘다 (잠금을 잡기 전에)."""
+    from .recognize import build_recognizer
+    from .recognize.meta.model import MetaModelError, build_meta_readers
+
+    if recognizer is None:
+        try:
+            recognizer = build_recognizer(s, site)
+        except (KeyError, ValueError, FileNotFoundError) as e:
+            raise SystemExit(f"인식 백엔드를 준비할 수 없습니다: {e}") from e
+    try:
+        meta_readers = build_meta_readers(s, site)
+    except MetaModelError as e:
+        raise SystemExit(f"메타 필드 모델을 준비할 수 없습니다: {e}") from e
+    return recognizer, meta_readers
+
+
+def _pipeline_lock(s: Settings):
+    """파이프라인은 한 번에 하나 (tasks/0007 4.1) — 잡지 못하면 한 줄로 멈춘다."""
+    from .pipeline.lock import PipelineBusy, PipelineLock
+
+    lock = PipelineLock.for_settings(s)
+    try:
+        return lock.acquire()
+    except PipelineBusy as e:
+        raise SystemExit(str(e)) from None
+
+
+def watch_round(pipe, settle_seconds: float | None = None, give_up_seconds: float | None = None) -> dict:
+    """한 바퀴: (접수 폴더가 있으면) 접수 → 대기 중인 문서를 문서의 순서대로 처리. 돌려주는 값: 수와 문서 ID."""
+    before = {k: len(pipe.summary[k]) for k in ("needs_date", "failed", "unreachable")}
+    n = pipe.process_pending()
+    out = {"processed": n}
+    for k, v in before.items():
+        ids = [d["document_id"] if isinstance(d, dict) else d for d in pipe.summary[k][v:]]
+        if ids:
+            out[k] = sorted(set(ids))
+    return out
+
+
+def format_round(r: dict) -> str:
+    """한 바퀴의 요약 — 수와 문서 ID 만 (파일명·이름 없이)."""
+    parts = [f"처리한 문서 {r.get('processed', 0)}건"]
+    for k, label in (("received", "받은 파일"), ("needs_date", "날짜를 정할 문서"), ("failed", "실패한 문서"),
+                     ("unreachable", "원본에 닿지 않은 문서")):
+        if r.get(k):
+            v = r[k]
+            parts.append(f"{label} {len(v) if isinstance(v, list) else v}건" + (f" ({', '.join(v)})" if isinstance(v, list) else ""))
+    return ", ".join(parts)
+
+
+def _intake_option(s: Settings, key: str, default: float) -> float:
+    v = (s.extra.get("intake") or {}).get(key, default) if isinstance(s.extra.get("intake"), dict) else default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+_RUN_STATUS = {"needs_date": "날짜를 기다림 (doc date)", "discarded": "버린 문서", "unreachable": "원본에 닿지 않음"}
 
 
 def _hms(sec: float) -> str:
@@ -1035,6 +1196,7 @@ def _recognizer_eval_meta(a, s: Settings, site, model_dir: Path) -> int:
 
 COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "pages": cmd_pages, "eval": cmd_eval,
             "regress": cmd_regress, "template": cmd_template, "synth": cmd_synth, "review": cmd_review,
+            "doc": cmd_doc, "watch": cmd_watch,
             "recognizer": cmd_recognizer}
 
 

@@ -105,6 +105,27 @@ def load_pages(path: str | Path, dpi: int = 200, damaged: str = "fail",
         raise ValueError(f"지원하지 않는 형식입니다: {path}")
 
 
+def count_pages(path: str | Path, damaged: str = "fail", warnings: list[str] | None = None) -> int:
+    """파일을 한 번 열어 쪽 수를 센다 — 문서를 등록할 때 (tasks/0007 4.1). 열리지 않으면(쓰레기 바이트, 쪽이 없는 PDF, 손상 방침에
+    걸린 PDF, 디코딩되지 않는 그림) 예외. 손상 방침이 warn 이면 warnings 에 한 줄."""
+    path = Path(path)
+    ext = path.suffix.lower()
+    if ext == ".pdf":
+        with _open_pdf(path, damaged, warnings) as doc:
+            return doc.page_count
+    if ext in IMAGE_EXT:
+        imread_gray(path)
+        if ext in (".tif", ".tiff") and _tiff_frames(path) > 1:   # 둘째 쪽부터 말없이 빠지지 않게 (첫 쪽만 디코딩된다)
+            raise ValueError("여러 쪽 TIFF 는 읽지 않습니다 — 스캐너에서 PDF 로 저장하세요")
+        return 1
+    raise ValueError(f"지원하지 않는 형식입니다: {path}")
+
+
+def _tiff_frames(path: Path) -> int:
+    ok, frames = cv2.imdecodemulti(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+    return len(frames) if ok else 1
+
+
 def load_page(path: str | Path, page_no: int, dpi: int = 200, damaged: str = "fail") -> np.ndarray:
     """한 쪽만 렌더링한다 (1부터). 원본 해상도 크롭처럼 쪽 하나가 필요할 때 — 앞쪽을 전부 렌더링하지 않는다."""
     path = Path(path)

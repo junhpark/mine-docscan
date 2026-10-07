@@ -39,6 +39,7 @@ import hashlib
 import sqlite3
 from dataclasses import asdict, dataclass, field, replace
 
+from ..pagemeta import HUMAN_SOURCES  # 사람의 출처 목록은 한 곳 (tasks/0007 4.2)
 from .store import effective, field_id_of
 
 QUEUES = ("haul-numbers", "mismatch", "pending", "page-fields", "meta-check", "checks", "readings", "usage-check")
@@ -46,7 +47,6 @@ USAGE_CHECK_NOTE = "usage-check:"           # usage-check 대기열에서 저장
 BAD_RESULTS = ("gap", "overlap", "mismatch")
 METER_LABELS = {"start": "계기 시작", "end": "계기 종료", "total": "총"}
 DEFAULT_N = {"haul-numbers": 1500, "checks": 300}
-HUMAN_SOURCES = ("review", "label", "filename")
 INPUT_KINDS = ("handwritten_number", "handwritten_text")      # 이 화면이 입력받는 셀 종류
 
 _FIELD_SQL = (

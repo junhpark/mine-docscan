@@ -71,6 +71,10 @@ class Settings:
             raise ValueError("검수 파일 경로를 정할 수 없습니다: [paths] reviews 또는 MINEDOCSCAN_REVIEWS, 아니면 사이트 팩")
         return Path(root) / "reviews" / "reviews.jsonl"
 
+    def decisions_path(self, site_root: Path | None = None) -> Path:
+        """문서·쪽의 결정 기록 (tasks/0007 4.3): 검수 파일과 같은 폴더의 decisions.jsonl — 사이트 팩 안, 추가 전용."""
+        return self.reviews_path(site_root).with_name("decisions.jsonl")
+
 
 def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> Settings:
     path = Path(config_path or os.environ.get("MINEDOCSCAN_CONFIG", "minedocscan.toml"))

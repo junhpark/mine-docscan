@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS doc_page (
   status          TEXT NOT NULL,             -- unknown_form | blank | classified_only | align_failed | duplicate | loaded | discarded | error
   error           TEXT                       -- error 일 때 예외 종류와 메시지. 그 쪽의 반쯤 쓰인 행은 남기지 않는다(SAVEPOINT)
 );
+CREATE INDEX IF NOT EXISTS ix_doc_page_document ON doc_page(document_id);
 
 CREATE TABLE IF NOT EXISTS doc_field (
   field_id        TEXT PRIMARY KEY,          -- page_id:region:field_name:row
@@ -198,6 +199,7 @@ CREATE TABLE IF NOT EXISTS insp_daily (
   review_status   TEXT NOT NULL              -- auto | pending | reviewed
 );
 CREATE INDEX IF NOT EXISTS ix_insp_daily_date ON insp_daily(inspection_date);
+CREATE INDEX IF NOT EXISTS ix_insp_daily_page ON insp_daily(page_id);       -- 문서를 지우고 다시 만들 때 (tasks/0007 4.8)
 
 -- 운반 실적: 같은 (날짜, 차량, 광종, 편) 값이 차량별 일보와 편×차량 행렬 양쪽에서 들어온다
 CREATE TABLE IF NOT EXISTS prod_haul (
@@ -221,6 +223,7 @@ CREATE TABLE IF NOT EXISTS prod_haul (
   review_status   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_prod_haul_date ON prod_haul(work_date);
+CREATE INDEX IF NOT EXISTS ix_prod_haul_page ON prod_haul(page_id);
 
 -- 양식 간 교차검증: 같은 값이 두 문서에 적힌 경우의 일치 여부. 불일치는 검수 큐로 간다
 CREATE TABLE IF NOT EXISTS xcheck_haul (
@@ -322,3 +325,4 @@ CREATE TABLE IF NOT EXISTS xcheck_usage (
 );
 CREATE INDEX IF NOT EXISTS ix_xcheck_usage_ref ON xcheck_usage(equipment_ref);
 CREATE INDEX IF NOT EXISTS ix_xcheck_usage_result ON xcheck_usage(result);
+CREATE INDEX IF NOT EXISTS ix_xcheck_usage_page ON xcheck_usage(page_id);

@@ -99,6 +99,14 @@ def build_report(con: sqlite3.Connection, families: dict[str, str] | None = None
 def format_intake(it: dict) -> list[str]:
     """리포트의 접수 줄 (tasks/0007). 수만 — 파일명·이름은 찍지 않는다."""
     lines = []
+    if it.get("needs_date"):
+        lines.append(f"날짜를 정할 문서 {it['needs_date']} (doc list --status needs_date → doc date)")
+    if it.get("waiting"):
+        lines.append(f"다시 처리 대기 문서 {it['waiting']} (watch --once)")
+    if it.get("discarded"):
+        lines.append(f"버린 문서 {it['discarded']['documents']}, 버린 쪽 {it['discarded']['pages']}")
+    if it.get("date_source"):
+        lines.append("날짜의 출처별 문서: " + ", ".join(f"{k} {v}" for k, v in it["date_source"].items()))
     if it.get("rotated"):
         lines.append("돌아서 들어와 세운 쪽: " + ", ".join(f"{k}° {v}" for k, v in it["rotated"].items()) + " (pages --rotated)")
     if it.get("blank"):
@@ -107,8 +115,22 @@ def format_intake(it: dict) -> list[str]:
 
 
 def intake_summary(con: sqlite3.Connection) -> dict:
-    """접수의 수 (tasks/0007): rotated(방향별 쪽 수 — 0 이 아닌 것), blank(빈 쪽). 0 인 항목은 빠지고, 다 0 이면 빈 사전."""
+    """접수의 수 (tasks/0007): needs_date(날짜를 정할 문서), waiting(다시 처리 대기 문서), discarded(버린 문서·쪽),
+    date_source(날짜의 출처별 문서 수 — 파일명 말고 다른 출처가 있을 때만), rotated(방향별 쪽 수 — 0 이 아닌 것), blank(빈 쪽).
+    0 인 항목은 빠지고, 다 0 이면 빈 사전 — 날짜 있는 이름의 바로 선 묶음이면 키가 생기지 않는다."""
     out: dict = {}
+    one = lambda sql: con.execute(sql).fetchone()[0] or 0          # noqa: E731
+    for key, sql in (("needs_date", "SELECT COUNT(*) FROM doc_document WHERE status = 'needs_date'"),
+                     ("waiting", "SELECT COUNT(*) FROM doc_document WHERE status = 'received' OR work_requested > work_done")):
+        if one(sql):
+            out[key] = one(sql)
+    discarded = {"documents": one("SELECT COUNT(*) FROM doc_document WHERE status = 'discarded'"),
+                 "pages": one("SELECT COUNT(*) FROM doc_page WHERE status = 'discarded'")}
+    if any(discarded.values()):
+        out["discarded"] = discarded
+    sources = _pairs(con, "SELECT COALESCE(date_source, 'none'), COUNT(*) FROM doc_document GROUP BY 1 ORDER BY 1")
+    if set(sources) - {"filename"}:
+        out["date_source"] = sources
     rotated = {str(r[0]): r[1] for r in con.execute(
         "SELECT rotation, COUNT(*) FROM doc_page WHERE rotation IS NOT NULL AND rotation <> 0 GROUP BY 1 ORDER BY 1")}
     if rotated:

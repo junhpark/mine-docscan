@@ -172,8 +172,9 @@ def test_damaged_pdf_warn_policy(synth, tmp_path, capsys, monkeypatch):
 
     scans = tmp_path / "scans"
     scans.mkdir()
-    pdf = scans / "one_page.pdf"
-    with pymupdf.open(str(next(synth.scans.glob("*.pdf")))) as src, pymupdf.open() as one:   # 합성 문서의 첫 쪽만
+    first_scan = next(synth.scans.glob("*.pdf"))
+    pdf = scans / f"one_page_{first_scan.stem[-10:]}.pdf"             # 날짜가 있는 이름 — 없으면 needs_date (tasks/0007 4.2)
+    with pymupdf.open(str(first_scan)) as src, pymupdf.open() as one:   # 합성 문서의 첫 쪽만
         one.insert_pdf(src, from_page=0, to_page=0)
         one.save(str(pdf), no_new_id=True)
     pdf.write_bytes(pdf.read_bytes()[:-200])                         # 끝을 자른 PDF

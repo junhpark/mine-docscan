@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from minedocscan.config import Settings
@@ -433,3 +434,170 @@ def reload_usage(con, usage_run, pages: list[dict], mask_of) -> None:
     h.finalize(con, pipe.site, settings)
     for t in ("doc_field", "eq_usage_daily"):                       # 쪽마다 다시 쓴 행이 있다
         assert {r[0] for r in con.execute(f"SELECT DISTINCT page_id FROM {t} WHERE page_id IN ({q})", ids)} == set(ids), t
+
+
+# ── 접수·다시 처리 (tasks/0007) ────────────────────────────────────────────
+_IMAGING_MEMO: dict = {"pages": {}, "classified": {}, "aligned": {}, "feats": {}, "keys": {}}
+
+
+def fast_imaging(monkeypatch) -> dict:
+    """다시 처리 시험의 시간: 렌더링(runner.load_pages)·분류(FormClassifier.classify·_feats)·정합(runner.align_to_template)을 같은
+    입력이면 저장해 둔 결과로 돌려준다 (세션 전체에서 — 키는 내용의 해시: 파일의 바이트, 쪽 그림, 양식 기준 그림). 셋 다 결정적이다
+    (같은 입력 → 같은 결과). 지우고 다시 만들기·결정·검수·순서·마무리·칸·핸들러(시험이 보는 것)는 그대로 새로 한다.
+    렌더링한 쪽은 저장해 둔 그림 그대로(읽기 전용 — 파이프라인이 고쳐 쓰면 바로 실패한다) 넘기고 그 해시를 기억한다.
+    돌려주는 값: 이 시험에서 실제로 한 횟수 {"render", "classify", "align"} (저장한 결과를 쓴 것은 세지 않는다)."""
+    import hashlib
+    import weakref
+    from dataclasses import replace
+
+    import minedocscan.pipeline.runner as runner
+    from minedocscan.forms.classify import FormClassifier
+
+    calls = {"render": 0, "classify": 0, "align": 0}
+    memo = _IMAGING_MEMO
+    load, classify, align, feats = runner.load_pages, FormClassifier.classify, runner.align_to_template, FormClassifier._feats
+
+    def key_of(gray) -> tuple:
+        known = memo["keys"].get(id(gray))                       # (약한 참조, 키) — 그림이 살아 있을 때만 id 를 믿는다
+        if known is not None and known[0]() is gray:
+            return known[1]
+        key = hashlib.blake2b(np.ascontiguousarray(gray).data, digest_size=16).hexdigest(), gray.shape
+        if not gray.flags.writeable:                             # 저장해 둔 쪽·양식 기준 그림 — 바뀌지 않는다
+            memo["keys"][id(gray)] = (weakref.ref(gray), key)
+        return key
+
+    def load_pages(path, dpi=200, damaged="fail", warnings=None):
+        key = (hashlib.sha256(Path(path).read_bytes()).hexdigest(), dpi, damaged)
+        if key not in memo["pages"]:
+            calls["render"] += 1
+            pages = list(load(path, dpi, damaged, warnings))
+            for _n, g in pages:
+                g.setflags(write=False)
+            memo["pages"][key] = pages
+        yield from memo["pages"][key]
+
+    def memo_feats(self, gray):
+        key = (key_of(gray), self.scale)
+        if key not in memo["feats"]:
+            memo["feats"][key] = feats(self, gray)
+        return memo["feats"][key]
+
+    def refs_key(clf) -> str:
+        if not hasattr(clf, "_memo_refs"):
+            h = hashlib.blake2b(digest_size=16)
+            for name in sorted(clf.refs):
+                d = clf.refs[name][1]
+                h.update(name.encode() + b"\0" + (b"" if d is None else d.tobytes()))
+            clf._memo_refs = h.hexdigest()
+        return clf._memo_refs
+
+    def memo_classify(self, gray, min_inliers=60, candidates=None, groups=None):
+        key = (key_of(gray), min_inliers, tuple(candidates or ()), repr(groups), refs_key(self))
+        if key not in memo["classified"]:
+            calls["classify"] += 1
+            memo["classified"][key] = classify(self, gray, min_inliers, candidates, groups)
+        return memo["classified"][key]
+
+    def memo_align(gray, ref_gray, *a, **kw):
+        rest = repr((a, sorted((k, v) for k, v in kw.items() if k != "ref_features")))   # 특징은 기준 그림에서 나온다
+        if ref_gray.flags.writeable:
+            ref_gray.setflags(write=False)                       # 양식 기준 그림 — 바꾸지 않는다
+        key = (key_of(gray), key_of(ref_gray), hashlib.blake2b(rest.encode(), digest_size=16).hexdigest())
+        if key not in memo["aligned"]:
+            calls["align"] += 1
+            memo["aligned"][key] = align(gray, ref_gray, *a, **kw)
+        r = memo["aligned"][key]
+        return replace(r, warped=r.warped.copy(), homography=r.homography.copy())
+
+    monkeypatch.setattr(runner, "load_pages", load_pages)
+    monkeypatch.setattr(FormClassifier, "_feats", memo_feats)
+    monkeypatch.setattr(FormClassifier, "classify", memo_classify)
+    monkeypatch.setattr(runner, "align_to_template", memo_align)
+    return calls
+
+
+# 다시 처리 시험의 작은 묶음 (2–3쪽): 이름 → [(원본 묶음, 날짜 i, [쪽])]. 운반·점검표는 synth, 가동 일보는 usage_synth 의 쪽.
+# 2030-01-07 에 일보 문서 셋(a·b·c)과 점검표 두 쪽(a·c — c 의 점검표는 둘째 날의 것), T01 일보 두 쪽(a 와 c 의 첫째 날 T01·셋째 날 T01)
+BUNDLES = {
+    "a_2030-01-07": [("synth", 0, [1, 2])],          # 점검표 + T01
+    "b_2030-01-07": [("synth", 0, [3, 6])],          # T02 + 행렬
+    "c_2030-01-07": [("synth", 1, [1]), ("synth", 2, [2])],   # 점검표(둘째 날) + T01(셋째 날)
+    "d_2030-01-08": [("synth", 1, [2, 6])],          # T01 + 행렬
+    "u1_2030-01-07": [("usage", 0, [3, 5])],         # 운행일보 TRUCK(판 A) + DRILL
+    "u2_2030-01-08": [("usage", 1, [3, 1])],         # TRUCK + 로우더
+    "u3_2030-01-09": [("usage", 2, [3, 4])],         # TRUCK + DRILL(판 B)
+}
+
+
+# 일보 쪽의 라벨 (차량번호·작성자 — synth 의 그 쪽의 정답): 자리 배정이 돌게. 2030-01-07 의 T01 일보 두 쪽(a#2, c#2)이 한 자리를 다툰다
+BUNDLE_LABELS = {"a_2030-01-07#2": ("V-101", "ALPHA"), "b_2030-01-07#1": ("V-102", "BRAVO"), "c_2030-01-07#2": ("V-101", "ALPHA"),
+                 "d_2030-01-08#1": ("V-101", "ALPHA")}
+
+
+@pytest.fixture(scope="session")
+def bundles(synth, usage_synth, tmp_path_factory) -> dict:
+    """BUNDLES 를 만든 폴더와 사이트 팩 — usage_synth 의 사이트 팩을 복사하고(운반·점검표 양식도 synth 와 같은 파일이다 — 가동 일보
+    양식과 대응표가 더 있다) 일보 쪽의 라벨(BUNDLE_LABELS)을 넣었다.
+    돌려주는 값: {"scans": 폴더, "site": 사이트 팩 경로, "files": {이름: 경로}}. 이 폴더들에 쓰지 않는다 (시험은 복사해서)."""
+    import json
+    import shutil
+
+    import pymupdf
+
+    root = tmp_path_factory.mktemp("bundles")
+    site = root / "site"
+    shutil.copytree(usage_synth.site, site)
+    (site / "labels" / "pages.json").write_text(json.dumps(
+        {k: {"vehicle_no": v, "operator": o} for k, (v, o) in BUNDLE_LABELS.items()}, indent=1), encoding="utf-8")
+    src = {"synth": sorted(synth.scans.glob("*.pdf")), "usage": sorted(usage_synth.scans.glob("*.pdf"))}
+    files = {}
+    for name, parts in BUNDLES.items():
+        with pymupdf.open() as d:
+            for kind, day, pages in parts:
+                with pymupdf.open(str(src[kind][day])) as s:
+                    for p in pages:
+                        d.insert_pdf(s, from_page=p - 1, to_page=p - 1)
+            files[name] = root / "scans" / f"{name}.pdf"
+            files[name].parent.mkdir(parents=True, exist_ok=True)
+            d.save(str(files[name]), no_new_id=True)
+    return {"scans": root / "scans", "site": site, "files": files}
+
+
+@pytest.fixture(scope="session")
+def world_db(bundles, tmp_path_factory):
+    """BUNDLES 전부를 한 번 돌린 DB (세션에 한 번 — 시험마다 world 가 복사한다)."""
+    from test_reprocess import copy_bundles, settings_for
+
+    with pytest.MonkeyPatch.context() as mp:
+        fast_imaging(mp)
+        root = tmp_path_factory.mktemp("world")
+        scans = copy_bundles(bundles, root / "scans", BUNDLES)
+        st = settings_for(root, bundles["site"], scans)
+        pipe = Pipeline(st, site=SitePack(bundles["site"]))
+        pipe.run([scans])
+    statuses = [r[0] for r in pipe.con.execute("SELECT status FROM doc_page")]
+    assert statuses == ["loaded"] * sum(len(p) for parts in BUNDLES.values() for _k, _d, p in parts), statuses
+    return pipe.con
+
+
+@pytest.fixture
+def world(bundles, world_db, tmp_path, monkeypatch):
+    """world_db 의 복사본과 그 파일들 (이 시험의 tmp_path 에 — 원본 경로를 고쳐 둔다). 사이트 팩은 세션 것을 같이 쓴다 (쓰지 않는다 —
+    결정·검수 파일은 tmp_path)."""
+    import sqlite3
+
+    from test_reprocess import copy_bundles, doc_ids, settings_for
+
+    fast_imaging(monkeypatch)
+    scans = copy_bundles(bundles, tmp_path / "scans", BUNDLES)
+    site = SitePack(bundles["site"])
+    st = settings_for(tmp_path, bundles["site"], scans)
+    st.work_root.mkdir(parents=True)
+    with sqlite3.connect(st.work_root / "minedocscan.db") as dst:
+        world_db.backup(dst)
+        for (doc, rel) in dst.execute("SELECT document_id, source_rel FROM doc_document").fetchall():
+            dst.execute("UPDATE doc_document SET source_path = ? WHERE document_id = ?", (str(scans / rel), doc))
+    dst.close()
+    pipe = Pipeline(st, site=site)
+    return {"pipe": pipe, "site": site, "st": st, "scans": scans, "root": tmp_path, "ids": doc_ids(pipe.con),
+            "bundles": bundles}

@@ -10,7 +10,8 @@ PostgreSQL 에서도 그대로 통하도록 골랐으므로, 운영용 어댑터
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -45,6 +46,13 @@ PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "doc_page_sig": ("page_id",),
 }
 
+# 문서가 만든 것 — 쪽을 가리키는 테이블 (page_id 열), 자식부터 (PostgreSQL 의 외래 키 순서). 문서를 다시 처리할 때 이것을 지우고
+# 다시 만든다 (tasks/0007 4.8). 새 업무 테이블을 더하면 여기에도 더한다. doc_review·doc_decision 은 지우지 않는다 (사람이 정한 것).
+# 날짜로 만드는 것(xcheck_haul, eq_assignment_obs)은 쪽을 가리키지 않는다 — 그 날짜를 다시 계산해 지운다 (핸들러의 finalize).
+PAGE_TABLES: tuple[str, ...] = ("xcheck_usage", "prod_tally", "eq_usage_daily", "prod_haul", "insp_daily", "doc_page_sig",
+                                "doc_page_meta", "doc_field", "doc_page")
+BUSY_TIMEOUT_S = 30         # 다른 연결이 쓰는 동안 기다리는 시간 — 쓰는 단위가 쪽 하나(1–2초)라 넉넉하다 (4.8)
+
 
 class SchemaVersionError(RuntimeError):
     pass
@@ -57,10 +65,12 @@ def open_db(url: str) -> sqlite3.Connection:
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     # check_same_thread=False: 검수 서버(review/server.py)는 요청을 받는 스레드에서 이 연결을 쓴다.
-    # 동시에 여러 스레드가 쓰지는 않는다 (서버는 단일 스레드).
-    con = sqlite3.connect(path, check_same_thread=False)
+    # 연결 하나를 여러 스레드가 같이 쓰지는 않는다 (serve 는 스레드마다 연결 하나 — tasks/0007 4.9).
+    con = sqlite3.connect(path, check_same_thread=False, timeout=BUSY_TIMEOUT_S)
     con.row_factory = sqlite3.Row
     _check_version(con, path)
+    if path != ":memory:":                       # WAL: 읽는 연결(화면)이 쓰는 연결(작업)을 기다리지 않는다. 버전 검사 뒤에 (거절할 파일을 고치지 않게)
+        con.execute("PRAGMA journal_mode=WAL")
     con.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     upsert(con, "meta_schema", {"key": "schema_version", "value": str(SCHEMA_VERSION)})
     con.commit()
@@ -96,6 +106,36 @@ def _check_version(con: sqlite3.Connection, path: str) -> None:
             f"DB 스키마 버전이 다릅니다: 파일 {found or '1 (버전 기록 이전)'}, 코드 {SCHEMA_VERSION} — {path}\n"
             "`minedocscan run --fresh` 로 DB 를 다시 만드세요. 검수 기록은 사이트 팩의 reviews.jsonl 에 있으므로 "
             "다시 돌리면 그대로 붙습니다.")
+
+
+@contextmanager
+def write_txn(con: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """쓰는 트랜잭션 하나: BEGIN IMMEDIATE … COMMIT (예외면 ROLLBACK). 읽고 나서 쓰기로 올라가는 트랜잭션은 그 사이 다른 연결이
+    커밋하면 기다리지 않고 바로 실패한다 — 그래서 쓰는 단위는 처음부터 쓰기 잠금을 잡는다 (tasks/0007 4.8).
+    이미 열린 트랜잭션 안이면(부른 쪽의 단위) 새로 열지도 커밋하지도 않는다 — 그 단위가 커밋한다."""
+    if con.in_transaction:
+        yield con
+        return
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        yield con
+    except BaseException:
+        if con.in_transaction:
+            con.rollback()
+        raise
+    if con.in_transaction:
+        con.commit()
+
+
+def delete_pages(con: sqlite3.Connection, page_ids: list[str]) -> int:
+    """그 쪽들이 만든 행을 지운다 (PAGE_TABLES, 자식부터). 돌려주는 값: 지운 쪽 수."""
+    ids = sorted(set(page_ids))
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        marks = ",".join("?" * len(chunk))
+        for t in PAGE_TABLES:
+            con.execute(f"DELETE FROM {t} WHERE page_id IN ({marks})", chunk)
+    return len(ids)
 
 
 def upsert(con: sqlite3.Connection, table: str, rows: dict | Iterable[dict], insert_only: tuple[str, ...] = ()) -> int:

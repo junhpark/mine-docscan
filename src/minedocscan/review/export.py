@@ -26,6 +26,7 @@ import sqlite3
 from pathlib import Path
 
 from ..imaging.io import imwrite
+from ..pagemeta import HUMAN_SOURCES  # 사람의 출처 목록은 한 곳 (tasks/0007 4.2)
 from .crops import field_info, spec_crop
 from .store import effective_with_split
 
@@ -37,7 +38,6 @@ class ExportError(RuntimeError):
 _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 MAX_SCALE = 6.0
 META_PAD = 8                 # 메타 필드 크롭의 여유(템플릿 px, 고정) — tasks/0004 9절 기본값
-HUMAN_SOURCES = ("review", "label", "filename")
 
 
 def safe_name(field_id: str) -> str:
