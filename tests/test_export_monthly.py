@@ -274,6 +274,7 @@ def test_long_tables_and_day_summary(oracle_run, usage_run):
                                 x["missing_log"] + x["missing_matrix"], u, unres]
 
 
+@pytest.mark.slow                                  # 이틀치를 새로 돌린다 — 기본 시험 시간 (tasks/0008 6절)
 def test_month_boundary_gives_one_file_per_month(tmp_path):
     syn = generate(tmp_path / "data", days=2, seed=0, start="2030-01-31")
     pipe = Pipeline(Settings(site=syn.site, archive_root=syn.scans, work_root=tmp_path / "work", save_aligned=False))

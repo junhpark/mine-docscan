@@ -782,6 +782,7 @@ def test_checkmark_cell_of_a_generic_template_shows_the_mark(tmp_path):
 
 
 # ── 표시 이름 ───────────────────────────────────────────────────────────────
+@pytest.mark.slow                                  # 합성 묶음을 새로 만든다 — 기본 시험 시간 (tasks/0008 6절)
 def test_display_names_show_in_the_sheets_and_change_nothing_else(null_run, tmp_path):
     syn = generate(tmp_path / "data", days=1, seed=0, display_names=True)
     pipe = Pipeline(Settings(site=syn.site, archive_root=syn.scans, work_root=tmp_path / "work", save_aligned=False))
@@ -850,6 +851,7 @@ def test_template_check_rejects_a_display_column_and_bad_display(tmp_path, site)
     assert variant_key_diff(t, Template(tdir / "template.yaml")) == "양식의 display"
 
 
+@pytest.mark.slow                                  # 합성 묶음을 새로 만든다 — 기본 시험 시간 (tasks/0008 6절)
 def test_site_pack_loads_with_display(tmp_path):
     syn = generate(tmp_path / "d", days=1, seed=0, display_names=True, usage_logs=True, usage_variants=True)
     site = SitePack(syn.site)                                  # 동시 판의 display 가 같아 사이트 팩이 열린다

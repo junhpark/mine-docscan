@@ -20,6 +20,8 @@ from minedocscan.imaging.io import imread_gray, imwrite
 from minedocscan.pipeline import Pipeline
 from minedocscan.tools.synth import generate
 
+# 묶음 하나(가동 일보 + 판 B + 표시 이름)를 새로 돌린다 — 기본 시험 시간을 main 의 1.15배 안에 두려고 slow 로 (tasks/0008 6절)
+pytestmark = pytest.mark.slow
 
 @pytest.fixture(scope="module")
 def masked_world(tmp_path_factory):
