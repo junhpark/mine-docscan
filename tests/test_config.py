@@ -57,6 +57,10 @@ def test_bad_values_are_one_line_config_errors(tmp_path, monkeypatch):
         "[review]\nsource_dpi = 30\n": r"source_dpi",
         '[pipeline]\ndamaged_pdf = "ignore"\n': r"damaged_pdf",
         "[recognize]\nby_kind = 3\n": r"by_kind",
+        "[pipeline]\ndup_min_sim = 1.2\n": r"dup_min_sim",
+        "[intake]\npoll_seconds = 0\n": r"\[intake\] poll_seconds",
+        '[intake]\nsettle_seconds = "soon"\n': r"settle_seconds",
+        "intake = 3\n": r"\[intake\]",
         "pipeline = 3\n": r"\[pipeline\]",
         "[pipeline\ndpi = 200\n": r"설정 파일을 읽을 수 없습니다",
     }

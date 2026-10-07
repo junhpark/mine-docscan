@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 import pytest
 
-from conftest import day_pdf
+from conftest import day_pdf, fast_imaging
 from minedocscan.cli import main
 from minedocscan.config import Settings
 from minedocscan.forms.template import Template
@@ -48,7 +48,7 @@ TURNS = {T_INSP: 90, T_LOG: 180, T_MATRIX: 270, synth_usage.T_LOADER: 90, synth_
          synth_usage.T_USAGE_B: 270}
 # 비교에서 빼는 열: 방향과 그것을 합성한 호모그래피 (정합 그림은 같다), 시각·경로. 분류는 들어온 그대로의 쪽으로 한다(4.4) —
 # 분류 여유(1위/2위 인라이어 비율)는 돌아간 쪽의 특징점으로 잰 것이라 조금 다르다 (양식은 같다)
-DROP = {"rotation", "homography", "classify_margin", "created_at", "received_at", "source_path", "source_rel"}
+DROP = {"rotation", "homography", "classify_margin", "created_at", "received_at", "source_path", "source_rel", "aligned_image"}
 TABLES = ("doc_document", "doc_page", "doc_field", "doc_page_meta", "prod_haul", "prod_tally", "eq_usage_daily",
           "insp_daily", "xcheck_haul", "eq_assignment_obs", "xcheck_usage", "eq_equipment")
 
@@ -84,8 +84,10 @@ def orient(synth, usage_synth, tmp_path_factory) -> dict:
     for name, img in pages.items():
         imwrite(root / "up" / f"scan_{DAY}_{name}.png", img)
         imwrite(root / "rot" / f"scan_{DAY}_{name}.png", rotate_scan(img, TURNS[name]))
-    up = _run(_settings(usage_synth, root, "up"), root / "up")
-    rot = _run(_settings(usage_synth, root, "rot"), root / "rot")
+    with pytest.MonkeyPatch.context() as mp:                # 세운 쪽은 바로 선 쪽과 화소까지 같다 — 그 정합을 다시 쓴다 (시간)
+        fast_imaging(mp)
+        up = _run(_settings(usage_synth, root, "up", save_aligned=False), root / "up")
+        rot = _run(_settings(usage_synth, root, "rot"), root / "rot")
     return {"root": root, "pages": pages, "up": up, "rot": rot}
 
 

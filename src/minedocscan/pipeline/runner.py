@@ -176,8 +176,7 @@ class Pipeline:
             return {"document_id": document_id, "status": "failed", "error": out["error"]}
         old = self._doc(document_id)
         row = self._document_row(document_id, path, source_name, "received", None, source_rel=source_rel)
-        row.update(n_pages=n_pages, warning="; ".join(warnings) or None,
-                   received_at=received_at or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")[:-4] + "Z")
+        row.update(n_pages=n_pages, warning="; ".join(warnings) or None, received_at=received_at or _received_now(row["source_rel"]))
         if old is not None and old["status"] != "failed":
             row["status"] = old["status"]
         with write_txn(self.con):
@@ -193,20 +192,45 @@ class Pipeline:
         rows = self.con.execute(f"SELECT document_id, source_rel, source_path FROM doc_document WHERE {PENDING_SQL}").fetchall()
         return [r["document_id"] for r in sorted(rows, key=row_document_key)]
 
-    def process_pending(self, template: str | None = None, strict: bool = False, limit: int | None = None) -> int:
+    def process_pending(self, template: str | None = None, strict: bool = False, limit: int | None = None,
+                        catch: bool = False) -> int:
         """대기 중인 문서를 문서의 순서대로 처리한다 — 처리가 뒤 문서에 요청을 남기면 그것까지 (요청은 뒤로만 가므로 끝난다).
-        원본에 닿지 않는 문서는 이번에는 건너뛴다 (다음에 다시 본다). 돌려주는 값: 처리한 문서 수."""
+        원본에 닿지 않는 문서는 이번에는 건너뛴다 (다음에 다시 본다). catch=True(작업 스레드)면 처리 밖에서 난 예외(DB 가 잠겼다 …)도
+        그 문서를 failed 로 남기고 다음 문서로 간다 — 작업 스레드가 죽지 않는다 (tasks/0007 4.9). 돌려주는 값: 처리한 문서 수."""
         done, skip = 0, set()
         while limit is None or done < limit:
             todo = [d for d in self.pending_documents() if d not in skip]
             if not todo:
                 break
-            out = self.process_document(todo[0], template=template, strict=strict)
+            try:
+                out = self.process_document(todo[0], template=template, strict=strict)
+            except Exception as e:                        # noqa: BLE001 — catch 일 때만 (아니면 그대로 올린다)
+                if not catch:
+                    raise
+                self.fail_processing(todo[0], e)
+                skip.add(todo[0])
+                done += 1
+                continue
             if out["status"] == "unreachable":
                 skip.add(todo[0])
             else:
                 done += 1
         return done
+
+    def fail_processing(self, document_id: str, e: BaseException) -> None:
+        """처리하다 난 예외(문서를 읽는 것 밖 — DB 잠김 등): 열린 트랜잭션을 되돌리고 그 문서의 행을 지워 failed, work_done 을 적는다.
+        그것마저 안 되면(DB 가 계속 잠겨 있다) 그대로 둔다 — 대기 중인 채로 다음 바퀴에 다시 본다."""
+        if self.con.in_transaction:
+            self.con.rollback()
+        err = _error_text(e)
+        try:
+            with write_txn(self.con):
+                self._clear_document(document_id)
+                self.con.execute("UPDATE doc_document SET status = 'failed', error = ?, work_done = work_requested "
+                                 "WHERE document_id = ?", (err, document_id))
+        except sqlite3.Error:
+            return
+        self.summary["failed"].append({"document_id": document_id, "source_name": None, "error": err})
 
     def process_document(self, document_id: str, template: str | None = None, strict: bool = False) -> dict:
         """처리 (4.8): ① 원본을 찾는다 (닿지 않으면 건드리지 않고 다음에) ② 그 문서가 만든 것을 지운다 — 있던 날짜·장비를 바로 다시
@@ -398,7 +422,7 @@ class Pipeline:
         """읽지 못한 문서: 그 문서의 행을 지우고(있었다면 — 그 날짜·장비를 다시 계산) failed, work_done = work_requested."""
         err = _error_text(e)
         row = self._document_row(document_id, path, source_name, "failed", err, source_rel=source_rel)
-        row["received_at"] = received_at or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")[:-4] + "Z"
+        row["received_at"] = received_at or _received_now(row["source_rel"])
         with write_txn(self.con):
             self._clear_document(document_id)
             upsert(self.con, "doc_document", row, insert_only=("received_at",))
@@ -617,6 +641,13 @@ class Footprint:
 
     def __or__(self, other: Footprint) -> Footprint:
         return Footprint(self.dates | other.dates, self.refs | other.refs, self.pages | other.pages, self.groups | other.groups)
+
+
+def _received_now(source_rel: str | None) -> str:
+    """받은 시각: 접수한 문서(보관 폴더 intake/ 아래)는 폴더 이름의 시각 — DB 를 지우고 보관 폴더를 다시 돌려도 같다. 아니면 지금."""
+    from ..intake.inbox import received_from_rel
+
+    return received_from_rel(source_rel) or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")[:-4] + "Z"
 
 
 def _page_row(page_id: str, document_id: str, page_no: int, work_date: str | None) -> dict:

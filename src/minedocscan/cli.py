@@ -31,7 +31,7 @@ def _common() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--config", help="설정 파일 (기본: ./minedocscan.toml 또는 MINEDOCSCAN_CONFIG)")
     p.add_argument("--site", help="사이트 팩 폴더")
-    p.add_argument("--archive-root", help="스캔 원본 폴더 (읽기 전용으로 취급)")
+    p.add_argument("--archive-root", help="스캔 원본 폴더 (읽기 전용으로 취급 — 접수(watch·serve)만 그 아래 intake/ 에 쓴다)")
     p.add_argument("--work-root", help="작업 폴더 (DB·정합 이미지·리포트)")
     p.add_argument("--db-url", help="DB 주소 (기본: sqlite:///<work-root>/minedocscan.db)")
     p.add_argument("--json", action="store_true", help="결과를 JSON 으로 출력")
@@ -357,6 +357,10 @@ def cmd_info(a) -> int:
         dpath = s.decisions_path(site.root)
         data["decisions"] = {"path": str(dpath), "lines": count_lines(dpath)}   # 결정 기록 (tasks/0007 4.3) — 값·이름이 없다
         lines.append(f"결정 기록: {dpath} ({data['decisions']['lines']}줄)")
+        data["inbox"] = {"path": str(s.inbox) if s.inbox else None, "settle_seconds": s.settle_seconds,
+                         "give_up_seconds": s.give_up_seconds, "poll_seconds": s.poll_seconds}     # 접수 폴더 (4.7)
+        lines.append(f"접수 폴더: {s.inbox} (다 쓰인 뒤 {s.settle_seconds:g}초, 포기 {s.give_up_seconds:g}초, "
+                     f"{s.poll_seconds:g}초마다)" if s.inbox else "접수 폴더: 없음 ([paths] inbox 또는 MINEDOCSCAN_INBOX)")
         for t in tpls:
             valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}"
                      + (" (같은 날 섞여 쓰이는 판)" if t["concurrent"] else "") if t["family"] else "")
@@ -522,27 +526,62 @@ def cmd_doc(a) -> int:
 
 def cmd_watch(a) -> int:
     """접수 폴더 감시 + 대기 중인 문서 처리 (tasks/0007 4.7). 요약에는 수와 문서 ID 만 — 파일명은 doc list·화면에서 본다."""
+    import threading
+
+    from .intake.worker import Worker, format_round
     from .pipeline import Pipeline
 
     s = _settings(a)
     site = _need_site(s)
+    _check_inbox(s)
     recognizer, meta_readers = _backends(s, site)
     lock = _pipeline_lock(s)
+    r: dict = {"processed": 0}
     try:
         pipe = Pipeline(s, site=site, recognizer=recognizer, meta_readers=meta_readers)
-        while True:
-            r = watch_round(pipe, settle_seconds=a.settle_seconds, give_up_seconds=a.give_up_seconds)
-            if a.once:
-                break
-            if r["processed"] or r.get("received"):
-                print(format_round(r), file=sys.stderr)
-            time.sleep(_intake_option(s, "poll_seconds", 3.0))
-    except KeyboardInterrupt:
-        r = {"processed": 0}
+        worker = Worker(pipe, _open_inbox(s, pipe.con, continuous=not a.once, settle=a.settle_seconds,
+                                          give_up=a.give_up_seconds))
+        if a.once:
+            r = worker.run_once()
+        else:
+            print(f"감시를 시작합니다 (접수 폴더 {'있음' if worker.inbox else '없음 — 대기 중인 문서만'}, "
+                  f"{s.poll_seconds:g}초마다). 멈추려면 Ctrl+C", file=sys.stderr)
+
+            def show(out):
+                if out.get("processed") or out.get("received") or out.get("already") or out.get("moved_failed"):
+                    print(format_round(out), file=sys.stderr)
+
+            stop = threading.Event()
+            try:
+                worker.run_forever(stop, s.poll_seconds, on_round=show)
+            except KeyboardInterrupt:
+                stop.set()
+            r = worker.last or r
     finally:
         lock.release()
     _emit(a, {"watch": r}, format_round(r))
     return 0
+
+
+def _check_inbox(s: Settings) -> None:
+    """접수 폴더가 있으면 시작하기 전에 쓸 만한지 본다 (archive_root 가 있고, 접수 폴더가 보관·작업 폴더·사이트 팩과 겹치지 않는다)."""
+    if s.inbox is None:
+        return
+    from .intake.inbox import InboxError, check_paths
+
+    try:
+        check_paths(s.inbox, s.archive_root, {"work_root": s.work_root, "site": s.site})
+    except InboxError as e:
+        raise SystemExit(f"접수 폴더를 쓸 수 없습니다: {e}") from None
+
+
+def _open_inbox(s: Settings, con, continuous: bool, settle: float | None = None, give_up: float | None = None):
+    if s.inbox is None:
+        return None
+    from .intake.inbox import Inbox
+
+    s.inbox.mkdir(parents=True, exist_ok=True)
+    return Inbox(s, con, continuous=continuous, settle_seconds=settle, give_up_seconds=give_up)
 
 
 def _backends(s: Settings, site, recognizer=None) -> tuple:
@@ -571,37 +610,6 @@ def _pipeline_lock(s: Settings):
         return lock.acquire()
     except PipelineBusy as e:
         raise SystemExit(str(e)) from None
-
-
-def watch_round(pipe, settle_seconds: float | None = None, give_up_seconds: float | None = None) -> dict:
-    """한 바퀴: (접수 폴더가 있으면) 접수 → 대기 중인 문서를 문서의 순서대로 처리. 돌려주는 값: 수와 문서 ID."""
-    before = {k: len(pipe.summary[k]) for k in ("needs_date", "failed", "unreachable")}
-    n = pipe.process_pending()
-    out = {"processed": n}
-    for k, v in before.items():
-        ids = [d["document_id"] if isinstance(d, dict) else d for d in pipe.summary[k][v:]]
-        if ids:
-            out[k] = sorted(set(ids))
-    return out
-
-
-def format_round(r: dict) -> str:
-    """한 바퀴의 요약 — 수와 문서 ID 만 (파일명·이름 없이)."""
-    parts = [f"처리한 문서 {r.get('processed', 0)}건"]
-    for k, label in (("received", "받은 파일"), ("needs_date", "날짜를 정할 문서"), ("failed", "실패한 문서"),
-                     ("unreachable", "원본에 닿지 않은 문서")):
-        if r.get(k):
-            v = r[k]
-            parts.append(f"{label} {len(v) if isinstance(v, list) else v}건" + (f" ({', '.join(v)})" if isinstance(v, list) else ""))
-    return ", ".join(parts)
-
-
-def _intake_option(s: Settings, key: str, default: float) -> float:
-    v = (s.extra.get("intake") or {}).get(key, default) if isinstance(s.extra.get("intake"), dict) else default
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return default
 
 
 _RUN_STATUS = {"needs_date": "날짜를 기다림 (doc date)", "discarded": "버린 문서", "unreachable": "원본에 닿지 않음"}

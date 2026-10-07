@@ -123,18 +123,19 @@ def test_processing_order_does_not_matter(held):
     x, y = ids["x_2030-01-07"], ids["y_2030-01-07"]
     path = held["st"].decisions_path(held["site"].root)
 
-    def decide(items):
+    def decide(items, compare=True):
         decs.save(p.con, path, items, "jp", received=RECEIVED)
         p.process_pending()
         no_null_dates(p.con)
-        fresh = run(held, f"fresh{len(decs.load(path)[0])}")
-        assert_same(dump(p.con), dump(fresh.con), items)
+        if compare:                                                   # 처음부터 만든 DB 와 (나머지는 -m fuzz 의 흔들기가 본다)
+            fresh = run(held, f"fresh{len(decs.load(path)[0])}")
+            assert_same(dump(p.con), dump(fresh.con), items)
 
     decide([{"target": x, "kind": "date", "value": "2030-01-09"}])          # 앞 문서를 다른 날로 → 뒤쪽이 풀린다
     assert {r["status"] for r in pages_of(p.con, y).values()} == {"loaded"}
-    decide([{"target": x, "kind": "date", "value": "2030-01-07"}])          # 되돌리면 다시 붙잡힌다
+    decide([{"target": x, "kind": "date", "value": "2030-01-07"}], compare=False)   # 되돌리면 다시 붙잡힌다
     assert {r["status"] for r in pages_of(p.con, y).values()} == {"duplicate"}
-    decide([{"target": x, "kind": "discard"}])                             # 앞 문서를 버리면 풀린다
+    decide([{"target": x, "kind": "discard"}], compare=False)              # 앞 문서를 버리면 풀린다
     assert {r["status"] for r in pages_of(p.con, y).values()} == {"loaded"}
     decide([{"target": x, "kind": "restore"}])
     assert {r["status"] for r in pages_of(p.con, y).values()} == {"duplicate"}

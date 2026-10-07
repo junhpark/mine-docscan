@@ -3,7 +3,8 @@
 우선순위: 환경변수 > 설정 파일(TOML) > 기본값.
 
   MINEDOCSCAN_CONFIG        설정 파일 경로 (기본: ./minedocscan.toml)
-  MINEDOCSCAN_ARCHIVE_ROOT  스캔 원본 보관 폴더 (읽기 전용으로 취급)
+  MINEDOCSCAN_ARCHIVE_ROOT  스캔 원본 보관 폴더 (읽기 전용으로 취급 — 접수(watch·serve)가 그 아래 intake/ 에만 쓴다, tasks/0007 4.7)
+  MINEDOCSCAN_INBOX         접수 폴더 (스캐너 프로그램의 저장 폴더). 다 쓰인 파일을 보관 폴더의 intake/ 로 옮겨 처리한다
   MINEDOCSCAN_WORK_ROOT     작업 폴더 — 정합 이미지, DB, 리포트 (로컬 디스크 권장)
   MINEDOCSCAN_SITE          사이트 팩 폴더 (템플릿·마스터·라벨)
   MINEDOCSCAN_DB_URL        DB 주소 (기본: sqlite:///<work_root>/minedocscan.db)
@@ -52,6 +53,11 @@ class Settings:
     # 실제 3일치: 같은 날 다른 종이 최대 0.66(258쌍), 흔들어 다시 정합한 같은 종이 최소 0.91(83쪽) — 그 사이. 합성(표 밖 필드를 지운
     # 서명): 같은 날 다른 종이 최대 0.77, 다시 찍은 쪽 최소 0.998. 실제 다시 스캔을 본 뒤 다시 정한다 (8절)
     dup_min_sim: float = 0.80
+    # 접수 폴더 (tasks/0007 4.7): [paths] inbox, [intake] settle_seconds·give_up_seconds·poll_seconds
+    inbox: Path | None = None
+    settle_seconds: float = 5.0          # 수정 시각이 이만큼 앞이고 열리는 파일만 가져온다 (스캐너가 다 쓰기를 기다린다)
+    give_up_seconds: float = 120.0       # 이만큼 지나도 열리지 않으면 손상 방침대로 등록한다 (읽을 수조차 없으면 _failed 로)
+    poll_seconds: float = 3.0            # watch·serve 가 접수 폴더를 훑는 간격
     extra: dict = field(default_factory=dict)
 
     @property
@@ -91,6 +97,7 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
             raise ConfigError(f"설정 파일을 읽을 수 없습니다 ({path}): {e}") from e
     paths = _table(raw, "paths", path)
     pipe = _table(raw, "pipeline", path)
+    intake = _table(raw, "intake", path)
     rec = _table(raw, "recognize", path)
     by_kind = rec.get("by_kind", {}) or {}
     if not isinstance(by_kind, dict):
@@ -113,6 +120,10 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         damaged_pdf=str(pipe.get("damaged_pdf", "fail")),
         blank_max_ink=_number(pipe, "blank_max_ink", 0.02, float, "[pipeline] blank_max_ink", lo=0.0, hi=1.0),
         dup_min_sim=_number(pipe, "dup_min_sim", 0.80, float, "[pipeline] dup_min_sim", lo=0.0, hi=1.0),
+        inbox=_p(paths.get("inbox")),
+        settle_seconds=_number(intake, "settle_seconds", 5.0, float, "[intake] settle_seconds", lo=0.0),
+        give_up_seconds=_number(intake, "give_up_seconds", 120.0, float, "[intake] give_up_seconds", lo=0.0),
+        poll_seconds=_number(intake, "poll_seconds", 3.0, float, "[intake] poll_seconds", lo=0.1),
         extra=raw,
     )
     env = os.environ
@@ -126,12 +137,13 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         s.db_url = env["MINEDOCSCAN_DB_URL"]
     if env.get("MINEDOCSCAN_REVIEWS"):
         s.reviews = Path(env["MINEDOCSCAN_REVIEWS"])
-
+    if env.get("MINEDOCSCAN_INBOX"):
+        s.inbox = Path(env["MINEDOCSCAN_INBOX"])
     if env.get("MINEDOCSCAN_DAMAGED_PDF"):
         s.damaged_pdf = env["MINEDOCSCAN_DAMAGED_PDF"]
     for k, v in overrides.items():
         if v is not None:
-            setattr(s, k, Path(v) if k in ("archive_root", "work_root", "site", "reviews") else v)
+            setattr(s, k, Path(v) if k in ("archive_root", "work_root", "site", "reviews", "inbox") else v)
     if s.damaged_pdf not in DAMAGED_PDF:
         raise ConfigError(f"[pipeline] damaged_pdf (또는 MINEDOCSCAN_DAMAGED_PDF) 는 {' | '.join(DAMAGED_PDF)}: "
                           f"{s.damaged_pdf!r}")

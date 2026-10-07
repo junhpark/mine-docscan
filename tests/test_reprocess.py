@@ -187,8 +187,7 @@ def test_date_change_recomputes_old_date_and_new_date(world):
     assert_same(dump(con, tables=list(BUSINESS), where=old), dump(without.con, tables=list(BUSINESS), where=old), "옛 날짜")
     cont = {"xcheck_usage": "work_date IN ('2030-01-07', '2030-01-09')"}
     assert dump(con, tables=["xcheck_usage"], where=cont) == dump(without.con, tables=["xcheck_usage"], where=cont)
-    # 결정까지 같은 처음부터 = 지금
-    assert_same(dump(con), dump(fresh_of(world["st"], world["site"], world["scans"], root, "w_fresh").con), "처음부터")
+    # 결정까지 같은 처음부터 = 지금 — 불변식 흔들기(test_review_store)가 본다
 
 
 def test_discard_and_restore_document_and_page(world):
@@ -283,7 +282,6 @@ def test_request_during_processing_survives_and_review_keeps_status(world):
     pipe.process_pending()
     assert pipe.pending_documents() == []
     assert pipe.con.execute("SELECT status FROM doc_page WHERE page_id = ?", (f"{a}-p2",)).fetchone()[0] == "discarded"
-    assert_same(dump(pipe.con), dump(fresh_of(world["st"], world["site"], world["scans"], world["root"], "w_fresh").con))
     other.close()
 
 
@@ -474,7 +472,6 @@ def test_slot_collision_and_inspection_follow_page_order_not_insert_order(world)
     assert con.execute("SELECT remark FROM insp_daily WHERE inspection_id = ?", (eid[0],)).fetchone()[0] == eid[1]
     save(con, pipe.site, world["st"], Review(remark_of(f"{c}-p1"), "value", "이기는 쪽", "jp"))
     assert con.execute("SELECT remark FROM insp_daily WHERE inspection_id = ?", (eid[0],)).fetchone()[0] == "이기는 쪽"
-    assert_same(dump(con), dump(fresh_of(world["st"], world["site"], world["scans"], world["root"], "w_fresh").con))
     # c 를 버리면 a 의 점검표가 그 날짜의 점검 행이 된다
     decide(pipe, [{"target": c, "kind": "discard"}])
     pipe.process_pending()

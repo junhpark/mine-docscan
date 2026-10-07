@@ -2,10 +2,13 @@
 # (minedocscan.toml 은 커밋되지 않는다.)  우선순위: 명령줄 옵션 > 환경변수 > 이 파일 > 기본값
 
 [paths]
-archive_root = "D:/shared/mine-docscan"                      # 스캔 원본. 읽기 전용으로 취급
+archive_root = "D:/shared/mine-docscan"                      # 스캔 원본. 읽기 전용으로 취급 — 접수(watch·serve)만 그 아래 intake/ 에 쓴다
 site         = "D:/shared/mine-docscan/site-packs/my-site"   # 사이트 팩
 work_root    = "C:/minedocscan-work"                         # DB·정합 이미지. 로컬 디스크, 동기화 폴더 밖
 # reviews    = "D:/shared/mine-docscan/site-packs/my-site/reviews/reviews.jsonl"   # 검수 기록 (기본: <site>/reviews/reviews.jsonl)
+#                                                            # 결정 기록 decisions.jsonl 은 그 옆
+# inbox      = "C:/Scans"                                    # 접수 폴더 = 스캐너 프로그램의 저장 폴더 (MINEDOCSCAN_INBOX).
+#                                                            # archive_root·work_root·사이트 팩과 겹치면 안 된다
 
 [pipeline]
 dpi = 200                    # 템플릿 좌표계의 해상도. 템플릿을 만든 해상도와 같아야 한다
@@ -14,6 +17,13 @@ classify_min_margin = 1.5    # 양식 분류 1위/2위 비율이 이보다 낮�
 save_aligned = true          # 정합 이미지를 work_root/aligned 에 저장 (검수·디버깅용)
 damaged_pdf = "fail"         # 라이브러리가 복구해서 연 PDF(끝이 잘린 파일 등): fail = 문서 실패 | warn = 처리하고 경고를 남김
                              # 멀쩡한 스캔이 늘 "복구가 필요했습니다"로 실패하는 스캐너라면 warn (MINEDOCSCAN_DAMAGED_PDF)
+blank_max_ink = 0.02         # 양식을 못 찾은 쪽 중 어두운 화소가 이 비율 미만이면 빈 쪽 (양면 스캔의 뒷면)
+dup_min_sim = 0.80           # 같은 날·같은 계열의 앞 쪽과 손글씨 자리가 이만큼 비슷하면 다시 스캔한 쪽으로 붙잡는다
+
+[intake]                     # 접수 폴더 감시 (minedocscan watch · serve)
+settle_seconds = 5           # 수정 시각이 이만큼 지나고 열리는 파일만 가져온다 (스캐너가 다 쓰기를 기다린다)
+give_up_seconds = 120        # 이만큼 지나도 열리지 않으면 손상 방침대로 등록한다 (읽을 수조차 없으면 <inbox>/_failed 로)
+poll_seconds = 3             # 접수 폴더를 훑는 간격
 
 [recognize]
 backend = "null"             # 등록된 인식 백엔드 이름 (minedocscan info 로 확인) — 아래 by_kind 에 없는 칸 종류에 쓴다
