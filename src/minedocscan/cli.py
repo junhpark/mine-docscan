@@ -339,6 +339,11 @@ def cmd_info(a) -> int:
     }
     lines = [f"minedocscan {__version__}"] + [f"  {k}: {v}" for k, v in data["settings"].items()]
     lines.append("백엔드: " + ", ".join(f"{k}={v}" for k, v in data["backends"].items()))
+    data["export"] = {"excel_dir": str(s.excel_dir) if s.excel_dir else None, "sweep_minutes": s.export_sweep_minutes,
+                      "machine_values": s.machine_values}                       # 엑셀 (tasks/0008 4.7)
+    lines.append(f"엑셀 폴더: {s.excel_dir} (전체 훑기 {s.export_sweep_minutes:g}분마다"
+                 + (", 기계 값 열 있음" if s.machine_values else "") + ")" if s.excel_dir
+                 else "엑셀 폴더: 없음 ([export] excel_dir 또는 MINEDOCSCAN_EXCEL_DIR) — 자동 내보내기 꺼짐")
     site = _need_site(s) if s.site and Path(s.site).is_dir() else None
     data["recognizer"] = _describe_recognizer(s, site)
     data["meta_readers"] = _describe_meta(s, site)
@@ -502,6 +507,8 @@ def cmd_run(a) -> int:
         text += "\n오류 난 쪽:\n" + "\n".join(f"  {d['page_id']}: {d['error']}" for d in summary["page_errors"])
     if summary["warnings"]:
         text += "\n경고가 있는 문서:\n" + "\n".join(f"  {d['source_name']}: {d['warning']}" for d in summary["warnings"])
+    if s.excel_dir:                                       # run 은 내보내지 않는다 — 명령이다 (tasks/0008 4.7)
+        text += "\n엑셀 폴더가 설정되어 있지만 run 은 내보내지 않습니다 — minedocscan export excel"
     _emit(a, {"run": summary, "report": rep}, text)
     return 1 if (summary["failed"] or summary["page_errors"]) else 0
 
@@ -564,7 +571,7 @@ def cmd_watch(a) -> int:
     try:
         pipe = Pipeline(s, site=site, recognizer=recognizer, meta_readers=meta_readers)
         worker = Worker(pipe, _open_inbox(s, pipe.con, continuous=not a.once, settle=a.settle_seconds,
-                                          give_up=a.give_up_seconds))
+                                          give_up=a.give_up_seconds), after=_round_jobs(s, site))
         if a.once:
             r = worker.run_once()
         else:
@@ -572,7 +579,7 @@ def cmd_watch(a) -> int:
                   f"{s.poll_seconds:g}초마다). 멈추려면 Ctrl+C", file=sys.stderr)
 
             def show(out):
-                if out.get("processed") or out.get("received") or out.get("already") or out.get("moved_failed"):
+                if _worth_showing(out):
                     print(format_round(out), file=sys.stderr)
 
             stop = threading.Event()
@@ -613,10 +620,11 @@ def cmd_serve(a) -> int:
     try:
         if not a.no_watch:
             pipe = Pipeline(s, recognizer=recognizer, meta_readers=meta_readers)      # 작업 스레드의 사이트 팩·연결 (화면과 따로)
-            worker = Worker(pipe, _open_inbox(s, pipe.con, continuous=True))
+            jobs = _round_jobs(s, pipe.site)
+            worker = Worker(pipe, _open_inbox(s, pipe.con, continuous=True), after=jobs)
 
             def show(out):
-                if out.get("processed") or out.get("received") or out.get("already") or out.get("moved_failed"):
+                if _worth_showing(out):
                     print(format_round(out), file=sys.stderr)          # 수와 문서 ID 만
 
             thread = threading.Thread(target=worker.run_forever, args=(stop, s.poll_seconds, wake, show), daemon=True,
@@ -627,11 +635,14 @@ def cmd_serve(a) -> int:
         from .forms.sitepack import SitePack
 
         screen_site = SitePack(site.root)
-        ops = OpsApp(con, screen_site, s, a.reviewer, worker=worker, watching=not a.no_watch, wake=wake)
+        excel = worker.after.get("excel") if worker is not None else None
+        ops = OpsApp(con, screen_site, s, a.reviewer, worker=worker, watching=not a.no_watch, wake=wake, excel=excel)
         try:
             app = ReviewApp(con, screen_site, s, a.reviewer, "pending", ops=ops)
         except ValueError as e:
             raise SystemExit(str(e)) from None
+        if excel is not None:
+            app.on_touched = excel.mark                                 # 검수 저장 → 작업 스레드의 다음 바퀴 (깨우지 않는다)
         if thread is not None:
             thread.start()
         try:
@@ -646,6 +657,23 @@ def cmd_serve(a) -> int:
         if lock is not None:
             lock.release()
     return 0
+
+
+def _round_jobs(s: Settings, site) -> dict:
+    """watch·serve 의 바퀴 끝의 일 (tasks/0008 4.7·4.8): 엑셀 내보내기 (꺼져 있으면 아무것도 하지 않는다 — 상태만 화면에).
+    켤 수 없으면(저장소·접수 폴더 안) 시작할 때 한 줄로 알린다."""
+    from .export.auto import AutoExport
+
+    excel = AutoExport(s, site)
+    if excel.notice:
+        print(excel.notice, file=sys.stderr)
+    return {"excel": excel}
+
+
+def _worth_showing(out: dict) -> bool:
+    x = out.get("excel") or {}
+    return bool(out.get("processed") or out.get("received") or out.get("already") or out.get("moved_failed")
+                or x.get("written") or x.get("deleted") or x.get("failed") or x.get("missing_dir") or out.get("excel_error"))
 
 
 def _check_inbox(s: Settings) -> None:

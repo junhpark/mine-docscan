@@ -16,6 +16,7 @@
   GET  /api/home · /api/doc?id=            할 일·최근 문서·작업 상태 · 문서 하나
   POST /api/decision {items: [{target, kind, value, note}], confirm}   결정 — 전부 검사한 뒤에 쓴다
   GET  /page.png?page_id=… 또는 ?doc=…&page=N (&w=폭 &rot=더 돌릴 각)   쪽 그림 (원본에서, 방향을 알면 세워서)
+  GET  /export/day.xlsx?date=YYYY-MM-DD · /export/month.xlsx?month=YYYY-MM   엑셀 내려받기 (tasks/0008 4.7 — 그때 만든다)
 
 127.0.0.1 에만 바인딩한다 — 화면에 실제 이름과 차량번호가 보인다. 단일 스레드(SQLite 연결 하나 — serve 의 작업 스레드는 자기 연결).
 서버 로그에는 요청 경로와 상태 코드만 찍는다. 입력값과 이미지 내용은 찍지 않는다.
@@ -54,6 +55,9 @@ class ApiError(Exception):
         self.status = status
 
 
+XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 class ReviewApp:
     """HTTP 와 무관한 처리부. 테스트에서는 서버 없이 바로 부를 수 있다."""
 
@@ -66,6 +70,17 @@ class ReviewApp:
         self.con, self.site, self.settings, self.reviewer = con, site, settings, reviewer
         self.queue, self.queue_opts = queue, dict(queue_opts or {})
         self.ops = ops                     # 운영 화면 (review/ops.OpsApp) — serve 일 때만. 검수 화면에 "홈으로"가 생긴다
+        self.on_touched = None             # 검수 저장이 건드린 것(touched.Touched)을 받는 곳 — serve 의 자동 내보내기 (tasks/0008 4.7)
+
+    def _save(self, review):
+        """검수 한 건을 저장하고 건드린 것을 넘긴다 (작업 스레드를 깨우지 않는다 — 다음 바퀴에 묶어서)."""
+        from ..touched import Touched
+
+        t = Touched()
+        out = save(self.con, self.site, self.settings, review, touched=t)
+        if self.on_touched is not None:
+            self.on_touched(t)
+        return out
 
     def queue_json(self, params: dict) -> dict:
         opts = dict(self.queue_opts)
@@ -114,7 +129,7 @@ class ReviewApp:
     def post_review(self, body: dict) -> dict:
         review = self._checked_review(body)
         try:
-            out = save(self.con, self.site, self.settings, review)
+            out = self._save(review)
         except FormatError as e:
             raise ApiError(400, str(e)) from e
         return {"ok": True, **out, "field_id": review.field_id, "verdict": review.verdict, "value": review.value,
@@ -139,7 +154,7 @@ class ReviewApp:
         saved = []
         for r in (replace(r, reviewed_at=at, review_id="") for r in reviews):     # review_id 는 저장 시각에서 다시 만든다
             try:
-                out = save(self.con, self.site, self.settings, r)
+                out = self._save(r)
             except FormatError as e:                                   # 위에서 검사했으므로 오지 않는다 — 와도 500 이 아니라 400
                 raise ApiError(400, str(e)) from e
             saved.append({"field_id": r.field_id, "verdict": r.verdict, "value": r.value, "review_id": out["review_id"],
@@ -183,7 +198,7 @@ class ReviewApp:
         if row is None:
             raise ApiError(404 if field_info(self.con, fid) is None else 400, f"점검표 장비 행의 체크 칸이 아닙니다: {fid}")
         reviews = check_reviews(self.con, row, ANSWERS[answer], self.reviewer, note=str(body.get("note", "") or ""))
-        outs = [save(self.con, self.site, self.settings, rv) for rv in reviews]
+        outs = [self._save(rv) for rv in reviews]
         return {"ok": True, "item_id": row.item_id, "answer": ANSWERS[answer], "review_ids": [o["review_id"] for o in outs],
                 "applied": all(o["applied"] for o in outs), "reviewed_at": reviews[0].reviewed_at}
 
@@ -253,6 +268,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(200, ops.doc_json(params))
             elif ops is not None and u.path == "/page.png":
                 self._send(200, ops.page_png(params), "image/png")
+            elif ops is not None and u.path in ("/export/day.xlsx", "/export/month.xlsx"):
+                data, name = ops.export_xlsx("day" if u.path == "/export/day.xlsx" else "month", params)
+                self._send(200, data, XLSX_TYPE, {"Content-Disposition": f'attachment; filename="{name}"'})
             elif u.path == "/api/queue":
                 self._json(200, self.app.queue_json(params))
             elif u.path == "/api/stats":

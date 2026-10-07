@@ -26,8 +26,8 @@ def text(v):
     return ILLEGAL_CHARACTERS_RE.sub("", v) if isinstance(v, str) else v
 
 
-def write_book(book: dict, path: Path, made_at: str, version: str) -> None:
-    """책 하나를 path 에 쓴다 (원자적으로 바꾸는 것은 부른 쪽 — export/writer.py)."""
+def write_book(book: dict, path, made_at: str, version: str) -> None:
+    """책 하나를 path(경로 또는 바이트를 받는 파일 객체 — 내려받기)에 쓴다 (원자적으로 바꾸는 것은 부른 쪽 — export/writer.py)."""
     wb = Workbook()
     wb.remove(wb.active)
     for sheet in book["sheets"]:
@@ -65,7 +65,7 @@ def write_book(book: dict, path: Path, made_at: str, version: str) -> None:
             ws.freeze_panes = f"A{sheet['freeze'] + 1}"
         if sheet.get("filter") and sheet["rows"]:
             ws.auto_filter.ref = f"A1:{get_column_letter(max(len(r) for r in sheet['rows']))}{len(sheet['rows'])}"
-    wb.save(str(path))
+    wb.save(path if hasattr(path, "write") else str(path))
 
 
 def read_values(path: Path) -> dict[str, list[list]]:

@@ -1,4 +1,5 @@
-"""작업 한 바퀴 (tasks/0007 4.7·4.9): 접수 폴더를 훑어 접수(intake/inbox.py) → 대기 중인 문서를 문서의 순서대로 처리(4.8).
+"""작업 한 바퀴 (tasks/0007 4.7·4.9): 접수 폴더를 훑어 접수(intake/inbox.py) → 대기 중인 문서를 문서의 순서대로 처리(4.8)
+→ 바퀴 끝의 일 (엑셀 내보내기·통합 DB 싣기 — tasks/0008 4.7·4.8: after 의 순서대로, 처리가 건드린 것을 넘긴다).
 
 `watch --once` 는 한 바퀴, `watch` 와 `serve` 의 작업 스레드는 바퀴를 되풀이한다 (run_forever — 멈춤 신호와 깨우기 신호로 기다린다,
 시험은 잠들지 않는다). 처리 밖에서 난 예외도 그 문서를 failed 로 남기고 다음으로 간다 — 작업은 죽지 않는다.
@@ -9,12 +10,17 @@ from __future__ import annotations
 
 import threading
 
+from ..touched import Touched
+
 KEYS = ("needs_date", "failed", "unreachable", "duplicates")
 
 
 class Worker:
-    def __init__(self, pipe, inbox=None):
+    def __init__(self, pipe, inbox=None, after: dict | None = None):
+        """after: {이름: 바퀴 끝의 일} — after_round(연결, Touched) → 결과(as_dict 가 있는 것) | None. 예외는 그 일만 건너뛴다
+        (이름_error 에 예외의 종류) — 접수·처리는 계속된다."""
         self.pipe, self.inbox = pipe, inbox
+        self.after = dict(after or {})
         self.status: dict = {"state": "idle"}
         self.rounds = 0
         self.last: dict | None = None
@@ -60,6 +66,17 @@ class Worker:
         n_dup = len(s["duplicates"]) - before["duplicates"]
         if n_dup:
             out["duplicates"] = n_dup
+        touched, self.pipe.touched = self.pipe.touched, Touched()
+        for name, job in self.after.items():
+            try:
+                r = job.after_round(self.pipe.con, touched)
+            except Exception as e:                             # noqa: BLE001 — 바퀴 끝의 일이 실패해도 작업은 죽지 않는다
+                if self.pipe.con.in_transaction:
+                    self.pipe.con.rollback()
+                out[f"{name}_error"] = type(e).__name__
+                continue
+            if r is not None:
+                out[name] = r.as_dict()
         self.rounds += 1
         self.last = out
         return out
@@ -98,4 +115,13 @@ def format_round(r: dict) -> str:
     for k, label in (("needs_date", "날짜를 정할 문서"), ("failed", "실패한 문서"), ("unreachable", "원본에 닿지 않은 문서")):
         if r.get(k):
             parts.append(f"{label} {len(r[k])}건 ({', '.join(r[k])})")
+    x = r.get("excel")
+    if x:
+        if x["missing_dir"]:
+            parts.append("엑셀: 폴더가 없습니다 (만들지 않습니다 — 다음 바퀴에 다시)")
+        elif x["written"] or x["deleted"] or x["failed"]:
+            parts.append(f"엑셀: 쓴 파일 {x['written']}, 지운 파일 {x['deleted']}"
+                         + (f", 쓰지 못함 {x['failed']} (다음 바퀴에 다시)" if x["failed"] else ""))
+    if r.get("excel_error"):
+        parts.append(f"엑셀: 내보내지 못함 ({r['excel_error']})")
     return ", ".join(parts)

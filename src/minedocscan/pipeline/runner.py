@@ -62,6 +62,7 @@ from ..review.store import import_into
 from ..store.db import delete_pages, open_db, upsert, write_txn
 from ..store.order import document_id as document_id_of
 from ..store.order import row_document_key
+from ..touched import Touched
 from ..validate.usage import equipment_ref
 
 PENDING_SQL = "status = 'received' OR work_requested > work_done"     # 다시 처리 대기 (4.1)
@@ -97,6 +98,8 @@ class Pipeline:
                                      else {"path": None, "imported": 0, "skipped": 0})
         self.on_page = None             # 쪽 하나를 커밋한 뒤 부르는 훅 (document_id, page_no) — 시험과 화면의 작업 상태
         self.on_document = None         # 문서 하나의 처리를 시작할 때 (document_id) — 화면의 작업 상태
+        # 처리가 건드린 것 (날짜·문서·장비 — tasks/0008 4.7): 작업 스레드가 바퀴의 끝에 가져가 엑셀·통합 DB 에 다시 볼 범위로 쓴다
+        self.touched = Touched()
 
     # ── 입력 ───────────────────────────────────────────────────────────────
     @staticmethod
@@ -224,6 +227,7 @@ class Pipeline:
         if self.con.in_transaction:
             self.con.rollback()
         err = _error_text(e)
+        self.touched.documents.add(document_id)
         try:
             with write_txn(self.con):
                 before = self._clear_document(document_id)
@@ -248,6 +252,7 @@ class Pipeline:
             return {"document_id": document_id, "status": "unreachable", "pages": []}
         if self.on_document:
             self.on_document(document_id)
+        self.touched.documents.add(document_id)
         snapshot = copy.deepcopy(self.summary)            # 문서가 실패하면 그 문서의 집계도 되돌린다
         with write_txn(self.con):                         # ② 요청 번호는 결정을 읽기 전에 (4.1)
             req = self._doc(document_id)["work_requested"]
@@ -290,8 +295,11 @@ class Pipeline:
         self._finish_document(document_id, req, before, status=None, date=(doc_date, date_source), n_pages=len(pages),
                               warning=warning)
         with write_txn(self.con):                         # 같은 경로의 옛 failed 기록(깨졌던 바이트의 해시)은 이 성공이 대체한다
+            old = [r[0] for r in self.con.execute("SELECT document_id FROM doc_document WHERE source_path = ? AND "
+                                                  "status = 'failed' AND document_id <> ?", (row["source_path"], document_id))]
             self.con.execute("DELETE FROM doc_document WHERE source_path = ? AND status = 'failed' AND document_id <> ?",
                              (row["source_path"], document_id))
+        self.touched.removed.update(old)                  # 싣기가 대상에서도 지운다 (tasks/0008 4.7)
         self.summary["documents"] += 1
         if warning:                                       # 경고만으로는 종료 코드가 1 이 되지 않는다
             self.summary["warnings"].append({"document_id": document_id, "source_name": source_name, "warning": warning})
@@ -626,7 +634,13 @@ class Pipeline:
     # ── 마무리 ─────────────────────────────────────────────────────────────
     def finalize(self, dates: set[str] | None = None, equipment: set[str] | None = None, commit: bool = True) -> dict:
         """등록된 핸들러 전부의 마무리 (교차검증·연속성·점검 행). dates·equipment 가 None 이면 전부 — 모든 문서를 처리한 뒤.
-        이번 프로세스에서 쪽을 적재하지 않은 핸들러도 부른다 (버리기만 한 처리에서도 그 날짜가 다시 계산되게 — 4.8)."""
+        이번 프로세스에서 쪽을 적재하지 않은 핸들러도 부른다 (버리기만 한 처리에서도 그 날짜가 다시 계산되게 — 4.8).
+        다시 계산한 범위를 touched 에 남긴다 (범위 없이 부르면 전부 — tasks/0008 4.7)."""
+        if dates is None and equipment is None:
+            self.touched.everything = True
+        else:
+            self.touched.dates.update(d for d in (dates or ()) if d)
+            self.touched.refs.update(r for r in (equipment or ()) if r)
         for name in REGISTRY:
             extra = self._handler(name).finalize(self.con, self.site, self.settings, dates=dates, equipment=equipment)
             if extra and any(extra.values()):

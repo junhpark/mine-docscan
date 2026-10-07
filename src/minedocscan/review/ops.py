@@ -7,6 +7,8 @@
                        날짜는 한 번 되묻는다 (confirm 없이 오면 저장하지 않고 경고를 돌려준다). 저장하면 작업 스레드를 깨운다
   page_png(params)     쪽 그림 (page_id 또는 doc+page, w 로 폭) — 원본에서 그때그때 렌더링하고 방향을 알면 세운다. 몇 장만 캐시하고
                        디스크에 쓰지 않는다
+  export_xlsx(kind, params)  엑셀 내려받기 (tasks/0008 4.7): 그 날짜(달)의 모델로 그때 만든다 — 폴더 설정이 없어도 된다, 디스크에 쓰지
+                       않는다, 읽기는 한 트랜잭션. 달력에 없는 날짜 400, 쪽이 없는 날짜 404
 
 운영 대기열(pending 은 양식별 · mismatch · readings · usage-check · meta-check · page-fields)의 남은 수는 build_queue(이름) 의
 total − done (pending 은 total). 홈을 읽을 때마다 대기열을 통째로 만들지 않는다: DB 가 바뀔 때(쪽 처리·검수 저장·결정 저장 —
@@ -34,9 +36,10 @@ PNG_CACHE = 24                           # 쪽 그림 몇 장 (문서 화면의 
 
 class OpsApp:
     def __init__(self, con: sqlite3.Connection, site, settings, reviewer: str, worker=None, watching: bool = True,
-                 wake=None):
+                 wake=None, excel=None):
         self.con, self.site, self.settings, self.reviewer = con, site, settings, reviewer
         self.worker, self.watching, self.wake = worker, watching, wake
+        self.excel = excel                       # 자동 내보내기 (export/auto.AutoExport) — 작업 스레드가 쓴다. 화면은 상태만 읽는다
         self._counts: tuple | None = None
         self._png: OrderedDict = OrderedDict()
 
@@ -85,7 +88,14 @@ class OpsApp:
                          "failed_documents": sum(d["status"] == "failed" for d in docs),
                          "waiting": sum(d["waiting"] for d in docs), "queues": self.remaining()},
                 "recent": [_doc_brief(d) for d in recent],
+                "export": self.export_status(),
                 "templates": {t.name: t.title for t in self.site.templates.values()}}
+
+    def export_status(self) -> dict:
+        """엑셀 자동 내보내기의 상태 (수만): 켜짐·꺼짐(이유), 마지막으로 쓴 시각·파일 수, 쓰지 못한 파일 수, 폴더가 없다."""
+        if self.excel is None:
+            return {"enabled": False, "reason": "no_watch" if not self.watching else "off"}
+        return dict(self.excel.status)
 
     # ── 문서 화면 ───────────────────────────────────────────────────────────
     def doc_json(self, params: dict) -> dict:
@@ -191,6 +201,42 @@ class OpsApp:
         while len(self._png) > PNG_CACHE:
             self._png.popitem(last=False)
         return png
+
+
+    # ── 엑셀 내려받기 ───────────────────────────────────────────────────────
+    def export_xlsx(self, kind: str, params: dict) -> tuple[bytes, str]:
+        """(xlsx 바이트, 파일 이름). kind: day(date=YYYY-MM-DD) | month(month=YYYY-MM). 같은 모델로 그때 만든다 (폴더·기록 파일과 무관)."""
+        import io
+
+        from .. import __version__
+        from ..export.daily import daily_book
+        from ..export.model import MODEL_VERSION, is_iso_day
+        from ..export.monthly import monthly_book
+        from ..export.writer import MONTH_RE, now_iso
+        from ..export.xlsx import write_book
+        from ..store.db import read_txn
+
+        if kind == "day":
+            key = str(params.get("date") or "")
+            if not is_iso_day(key):
+                raise ApiError(400, "date 는 달력에 있는 YYYY-MM-DD 여야 합니다")
+            with read_txn(self.con):
+                if not self.con.execute("SELECT 1 FROM doc_page WHERE work_date = ? LIMIT 1", (key,)).fetchone():
+                    raise ApiError(404, "그 날짜의 쪽이 없습니다")
+                book = daily_book(self.con, self.site, key, self.settings.machine_values)
+        else:
+            key = str(params.get("month") or "")
+            if not MONTH_RE.match(key):
+                raise ApiError(400, "month 는 YYYY-MM 이어야 합니다")
+            with read_txn(self.con):
+                days = [r[0] for r in self.con.execute("SELECT DISTINCT work_date FROM doc_page WHERE work_date LIKE ? "
+                                                       "ORDER BY work_date", (f"{key}-%",)) if is_iso_day(r[0])]
+                if not days:
+                    raise ApiError(404, "그 달의 쪽이 없습니다")
+                book = monthly_book(self.con, self.site, key, days, self.settings.machine_values)
+        buf = io.BytesIO()
+        write_book(book, buf, now_iso(), f"minedocscan {__version__} · 모델 {MODEL_VERSION}")
+        return buf.getvalue(), f"{key}.xlsx"
 
 
 def _doc_brief(d: dict) -> dict:

@@ -52,6 +52,7 @@
   .muted { color:var(--muted); font-size:13px; }
   .status-failed, .status-needs_date { color: var(--bad); }
   .status-needs_review { color: var(--warn); }
+  a.xl { font-size:12px; margin-left:4px; }
   kbd { font: 12px ui-monospace, monospace; border:1px solid var(--line); border-bottom-width:2px; border-radius:3px; padding:0 5px; background:#fafafa; }
 </style>
 </head>
@@ -96,6 +97,19 @@
     return '작업: 쉬는 중' + err;
   }
   function docLink(d) { return '<a href="/doc?id=' + encodeURIComponent(d.document_id) + '">' + esc(d.source_name) + '</a>'; }
+  // 엑셀 내려받기 (tasks/0008 4.7): 그 날짜·달의 파일을 그때 만들어 준다 — 날짜가 있는 문서에만
+  function xlsxLinks(day) {
+    if (!day) return '';
+    return ' <a class="xl" href="/export/day.xlsx?date=' + encodeURIComponent(day) + '" title="그 날짜의 엑셀">엑셀</a>'
+      + ' <a class="xl" href="/export/month.xlsx?month=' + encodeURIComponent(day.slice(0, 7)) + '" title="그 달의 엑셀">월</a>';
+  }
+  function exportText(x) {
+    if (!x || !x.enabled) return '엑셀: ' + ({refused: '꺼짐 (저장소·접수 폴더 안이라 쓰지 않습니다)', no_watch: '꺼짐 (--no-watch)'}[x && x.reason] || '꺼짐 (excel_dir 없음)');
+    let t = '엑셀: ' + (x.last_at ? '마지막 ' + esc(x.last_at) + ' · ' + x.written + '개 씀' + (x.deleted ? ', ' + x.deleted + '개 지움' : '') : '쓴 적 없음');
+    if (x.failed) t += ' · <span class="status-failed">쓰지 못함 ' + x.failed + '개 (다음 바퀴에 다시)</span>';
+    if (x.missing_dir) t += ' · <span class="status-failed">폴더가 없습니다</span>';
+    return t;
+  }
   function statusCell(d) {
     return '<span class="status-' + esc(d.status) + '">' + esc(STATUS[d.status] || d.status) + '</span>'
       + (d.waiting && d.status !== 'received' ? '<span class="wait">다시 처리 대기</span>' : '');
@@ -126,7 +140,7 @@
     try { h = await getJSON('/api/home'); } catch (e) { msg(e.message); return; }
     templates = h.templates || {};
     $('site').textContent = (h.site || '') + ' · 검수자 ' + (h.reviewer || '');
-    $('worker').innerHTML = workerText(h);
+    $('worker').innerHTML = workerText(h) + ' · ' + exportText(h.export);
     const t = h.todo;
     const q = t.queues || {};
     let out = '<h2>할 일</h2><div class="box todo">';
@@ -160,7 +174,7 @@
     out += '<h2>최근 문서</h2><div class="box"><table><tr><th>받은 시각</th><th>파일명</th><th>쪽</th><th>날짜</th><th>상태</th></tr>';
     for (const d of h.recent) {
       out += '<tr><td>' + esc(d.received_at) + '</td><td>' + docLink(d) + '</td><td class="n">' + esc(d.n_pages)
-        + '</td><td>' + esc(d.work_date || '') + '</td><td>' + statusCell(d) + '</td></tr>';
+        + '</td><td>' + esc(d.work_date || '') + xlsxLinks(d.work_date) + '</td><td>' + statusCell(d) + '</td></tr>';
     }
     out += '</table></div>';
     $('view').innerHTML = out;
@@ -175,7 +189,7 @@
     document.title = 'minedocscan 문서 ' + d.document_id;
     let out = '<h2>' + esc(d.source_name) + ' <span class="muted">' + esc(d.document_id) + '</span></h2>';
     out += '<div class="box">받은 시각 ' + esc(d.received_at) + ' · 쪽 ' + esc(d.n_pages) + ' · 날짜 <b>' + esc(d.work_date || '없음') + '</b>'
-      + (d.date_source ? ' <span class="muted">(' + esc(d.date_source) + ')</span>' : '') + ' · ' + statusCell(d)
+      + (d.date_source ? ' <span class="muted">(' + esc(d.date_source) + ')</span>' : '') + xlsxLinks(d.work_date) + ' · ' + statusCell(d)
       + (d.error ? '<div class="muted">' + esc(d.error) + '</div>' : '') + '</div>';
     out += '<div class="box">문서의 날짜 <input class="date" id="docdate" inputmode="numeric" placeholder="예: 250326" autocomplete="off"> '
       + '<button class="main" id="savedate">날짜 저장</button> <span class="muted">종이의 날짜를 읽어 넣고 <kbd>Enter</kbd> — 25.03.26 · 250326 · 0326 도 됩니다</span> '
