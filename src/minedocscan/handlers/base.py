@@ -198,8 +198,11 @@ class FormHandler:
                                       review_status=status))
         return rows
 
-    def finalize(self, con: sqlite3.Connection, site: SitePack, settings: Settings) -> dict:
-        """모든 문서를 처리한 뒤 한 번 호출된다 (양식 간 교차검증 등)."""
+    def finalize(self, con: sqlite3.Connection, site: SitePack, settings: Settings, dates: set[str] | None = None,
+                 equipment: set[str] | None = None) -> dict:
+        """날짜로(·장비로) 다시 계산하는 것 — 양식 간 교차검증, 계기의 연속성, 같은 날의 점검 행 (tasks/0007 4.8).
+        dates·equipment 가 None 이면 전부 (모든 문서를 처리한 뒤). 아니면 그 날짜·장비만 — 문서 하나를 다시 처리한 직후 그 문서가
+        있던·있는 날짜와 장비. 파이프라인은 등록된 핸들러 전부에 대해 부른다 (이번에 쪽을 적재한 핸들러만이 아니다). 커밋하지 않는다."""
         return {}
 
     def machine_final(self, row: dict) -> str | None:

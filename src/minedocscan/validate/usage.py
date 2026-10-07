@@ -134,8 +134,10 @@ def _records(con, where: str = "", args: tuple = ()) -> list[dict]:
 
 
 def _order(r: dict) -> tuple:
+    """같은 장비의 기록 순서: 날짜, 시작 값(없는 것은 뒤), 문서 이름, 쪽 번호, 쪽 ID — 끝까지 같으면 쪽 ID 가 가른다
+    (스캐너는 같은 파일명을 다시 쓴다 — tasks/0007 4.8. 정렬이 행이 들어간 순서에 기대지 않게)."""
     s = r["meter_start"]
-    return (r["work_date"] or "", s is None, s if s is not None else 0.0, r["source_name"], r["page_no"])
+    return (r["work_date"] or "", s is None, s if s is not None else 0.0, r["source_name"], r["page_no"], r["page_id"])
 
 
 def continuity_rows(records: list[dict]) -> list[dict]:

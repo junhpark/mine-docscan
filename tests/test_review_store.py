@@ -1,5 +1,6 @@
 """검수 기록: 추가 전용 파일 ↔ doc_review ↔ doc_field. 이미지 없이 도는 부분과 합성 하루치로 도는 부분."""
 import json
+import shutil
 import sqlite3
 
 import pytest
@@ -137,8 +138,11 @@ TABLES = ("doc_field", "prod_haul", "insp_daily", "xcheck_haul", "eq_assignment_
           "eq_usage_daily", "prod_tally", "xcheck_usage")
 
 
+SKIP_COLUMNS = ("created_at", "received_at", "work_requested", "work_done")   # 실행·등록 시각과 요청 번호 (tasks/0007 4.8)
+
+
 def _dump(con, table):
-    cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})") if r[1] != "created_at"]   # 실행 시각만 뺀다
+    cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})") if r[1] not in SKIP_COLUMNS]
     return sorted(tuple(r) for r in con.execute(f"SELECT {', '.join(cols)} FROM {table}"))
 
 
@@ -253,3 +257,81 @@ def test_save_for_unknown_field_only_records(day1):
     out = save(con, site, settings, Review("0000000000000000-p1:haul:trips_day:0", "value", "3", "jp"))
     assert out["applied"] is False
     assert con.execute("SELECT COUNT(*) FROM doc_review").fetchone()[0] == n + 1
+
+
+# ── 다시 처리의 불변식 (tasks/0007 4.8) ────────────────────────────────────
+@pytest.mark.slow
+def test_reprocess_invariant_with_decisions_and_reviews(world):
+    """종류마다 한 번씩 (여섯 번). 더 긴 흔들기는 아래 (둘 다 -m slow — CI 의 slow 작업, 기본 시험 시간을 1.25배 안에)."""
+    reprocess_fuzz(world, steps=6, seed=70072)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_reprocess_invariant_long(world, seed):
+    reprocess_fuzz(world, steps=40, seed=seed)
+
+
+def reprocess_fuzz(world, steps: int, seed: int) -> None:
+    """결정(날짜 바꾸기 — 다른 문서가 있는 날짜로도, 버리기, 되살리기 — 문서·쪽)과 검수(칸·차량번호·작성자)를 섞어 steps 번 넣고
+    그때마다 대기 중인 문서를 처리한(watch 한 바퀴) DB 가 같은 파일·검수·결정으로 처음부터 만든 DB 와 같다. 묶음(conftest.BUNDLES)은
+    2030-01-07 에 일보 문서 셋·점검표 두 쪽·T01 일보 두 쪽, 가동 일보 사흘. 없는 칸(버린 쪽)의 검수도 넣는다 — 되살리면 붙는다."""
+    import random
+
+    from minedocscan.intake import decisions as decs
+    from minedocscan.review.store import field_format, field_id_of
+    from minedocscan.tools.synth import SLOTS, T_LOG
+    from test_reprocess import BUSINESS, RECEIVED, assert_same, dump, fresh_of, no_null_dates
+
+    pipe, st, site = world["pipe"], world["st"], world["site"]
+    con = pipe.con
+    docs = {r["document_id"]: r["n_pages"] for r in con.execute("SELECT document_id, n_pages FROM doc_document")}
+    fields = {r["field_id"]: dict(r) for r in con.execute(
+        "SELECT f.field_id, f.kind, f.region, f.field_name, p.template_name FROM doc_field f JOIN doc_page p "
+        "ON f.page_id = p.page_id WHERE f.kind LIKE 'handwritten%' AND f.region <> 'fields' ORDER BY f.field_id")}
+    logs = [r[0] for r in con.execute("SELECT page_id FROM doc_page WHERE template_name = ? ORDER BY page_id", (T_LOG,))]
+    days = ["2030-01-07", "2030-01-08", "2030-01-09", "2030-01-10"]
+    samples = {None: ["3", "oil leak"], "integer": ["2", "11"], "decimal": ["1.5"], "time": ["08:00"],
+               "time_range": ["08:00~17:00"], "reading": ["1234.5", "1240.0", "08:00"]}
+    rng = random.Random(seed)
+    discarded: set[str] = set()
+    done = []
+    kinds = {"review": 4, "meta": 1, "doc_date": 2, "page_date": 2, "doc_discard": 2, "page_discard": 2}
+    weighted = [k for k, n in kinds.items() for _ in range(n)]
+    plan = (rng.sample(list(kinds), len(kinds)) + rng.choices(weighted, k=max(0, steps - len(kinds))))[:steps]
+    for step, kind in enumerate(plan):
+        now = f"2030-01-10T{step // 60:02d}:{step % 60:02d}:00Z"
+        doc = rng.choice(sorted(docs))
+        page = f"{doc}-p{rng.randint(1, docs[doc])}"
+        if kind == "review":                                     # 칸 하나 — 지금 DB 에 없는 칸(버린 쪽)일 수도 있다
+            f = fields[rng.choice(sorted(fields))]
+            verdict = rng.choice(["value", "value", "empty", "illegible"])
+            fmt = field_format(site, f["template_name"], f["region"], f["field_name"])
+            value = rng.choice(samples.get(fmt, samples[None])) if verdict == "value" else ""
+            save(con, site, st, Review(f["field_id"], verdict, value, "jp", reviewed_at=now))
+            done.append((kind, f["field_id"], verdict, value))
+        elif kind == "meta":
+            pg = rng.choice(logs)
+            _slot, vehicle, operator = rng.choice(SLOTS)
+            name, value = rng.choice([("vehicle_no", vehicle), ("operator", operator)])
+            save(con, site, st, Review(field_id_of(pg, name), "value", value, "jp", reviewed_at=now))
+            done.append((kind, pg, name, value))
+        else:
+            target = doc if kind.startswith("doc") else page
+            if kind.endswith("date"):
+                item = {"target": target, "kind": "date", "value": rng.choice(days)}
+            else:
+                item = {"target": target, "kind": "restore" if target in discarded else "discard"}
+                discarded ^= {target}
+            decs.save(con, st.decisions_path(site.root), [item], "jp", received=RECEIVED, now=now)
+            done.append((kind, item["target"], item["kind"], item.get("value", "")))
+        pipe.process_pending()
+        assert pipe.pending_documents() == []
+        no_null_dates(con)
+        fresh = fresh_of(st, site, world["scans"], world["root"], f"fresh{step}")
+        assert_same(dump(con), dump(fresh.con), (seed, step, done[-3:]))
+        fresh.con.close()
+        shutil.rmtree(world["root"] / f"fresh{step}")
+    assert {k for k, *_ in done} == set(kinds) or steps < len(kinds)
+    assert con.execute("SELECT COUNT(*) FROM xcheck_haul").fetchone()[0] > 0
+    assert sum(con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in BUSINESS) > 0

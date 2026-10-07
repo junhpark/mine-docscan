@@ -104,9 +104,21 @@ class UsageHandler(FormHandler):
                 "tally_filled": sum(t["has_value"] for t in tally), "notes": n_notes,
                 "meter_pending": int(usage["reading_kind"] == "pending")}
 
-    def finalize(self, con, site, settings) -> dict:
-        """모든 쪽을 적재한 뒤: 검산 전부 (쪽 안 + 계기의 연속성)."""
-        return {"xcheck_usage": check_usage(con, site)}
+    def finalize(self, con, site, settings, dates=None, equipment=None) -> dict:
+        """dates·equipment 가 None 이면 모든 쪽을 적재한 뒤의 검산 전부 (쪽 안 + 계기의 연속성). 아니면 계기의 연속성만 — 그 날짜에
+        기록이 있는 장비와 equipment(지운 기록의 장비, equipment_ref)의 것. 쪽 안의 검산은 적재할 때 쪽마다 적었고 쪽과 같이 지워진다."""
+        if dates is None and equipment is None:
+            return {"xcheck_usage": check_usage(con, site)}
+        refs, pages = set(equipment or ()), set()
+        for d in sorted(set(dates or ())):
+            for r in con.execute("SELECT * FROM eq_usage_daily WHERE work_date = ?", (d,)).fetchall():
+                ref = equipment_ref(r)
+                if ref is None:
+                    pages.add(r["page_id"])
+                else:
+                    refs.add(ref)
+        recompute_continuity(con, refs, pages)
+        return {}
 
     def machine_final(self, row: dict) -> str | None:
         """기계만으로 정했을 때의 value_final (load 와 같은 규칙): 필드·글자 칸은 기계 값 그대로, 정수 칸은 정수로, 소수·시각 칸은 NULL."""

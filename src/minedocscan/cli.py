@@ -31,7 +31,7 @@ def _common() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--config", help="설정 파일 (기본: ./minedocscan.toml 또는 MINEDOCSCAN_CONFIG)")
     p.add_argument("--site", help="사이트 팩 폴더")
-    p.add_argument("--archive-root", help="스캔 원본 폴더 (읽기 전용으로 취급)")
+    p.add_argument("--archive-root", help="스캔 원본 폴더 (읽기 전용으로 취급 — 접수(watch·serve)만 그 아래 intake/ 에 쓴다)")
     p.add_argument("--work-root", help="작업 폴더 (DB·정합 이미지·리포트)")
     p.add_argument("--db-url", help="DB 주소 (기본: sqlite:///<work-root>/minedocscan.db)")
     p.add_argument("--json", action="store_true", help="결과를 JSON 으로 출력")
@@ -45,6 +45,34 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="command", required=True)
 
     sub.add_parser("info", parents=[common], help="설정·사이트 팩·백엔드 확인")
+
+    p = sub.add_parser("doc", parents=[common],
+                       help="문서·쪽: 목록과 결정(날짜·버리기·되살리기·다른 종이) — 결정을 남기기만 한다. 처리는 watch·serve·run")
+    dsub = p.add_subparsers(dest="doc_command", required=True)
+    d = dsub.add_parser("list", parents=[common], help="문서 목록: 받은 시각, 쪽 수, 날짜, 상태, 다시 처리 대기")
+    d.add_argument("--status", help="received | needs_date | processed | needs_review | failed | discarded")
+    for name, what in (("date", "날짜를 정한다"), ("discard", "버린다 (걸린 스캔, 다시 스캔한 쪽)"), ("restore", "버린 것을 되살린다"),
+                       ("keep", "다시 스캔한 것이 아니다 — 다른 종이다 (쪽만)")):
+        d = dsub.add_parser(name, parents=[common], help=what)
+        d.add_argument("target", help="문서 ID 또는 쪽 ID (<문서 ID>-p<쪽>)" if name != "keep" else "쪽 ID (<문서 ID>-p<쪽>)")
+        if name == "date":
+            d.add_argument("date", help="2025-03-26 · 25.03.26 · 250326 · 0326 (해는 받은 날을 넘지 않는 가장 가까운 해)")
+        d.add_argument("--reviewer", help="결정한 사람 (없으면 저장하지 않는다)")
+        d.add_argument("--note", default="", help="메모 (결정 기록에 남는다 — 로그에는 찍지 않는다)")
+
+    p = sub.add_parser("watch", parents=[common],
+                       help="접수 폴더를 보고 대기 중인 문서를 처리한다 (화면 없이). --once 면 한 바퀴만")
+    p.add_argument("--once", action="store_true", help="한 바퀴(접수 + 대기 중인 문서 처리) 돌고 끝낸다")
+    p.add_argument("--settle-seconds", type=float, help="수정 시각이 이만큼 지난 파일만 가져온다 (기본 [intake] settle_seconds = 5)")
+    p.add_argument("--give-up-seconds", type=float,
+                   help="이만큼 지나도 열리지 않는 파일은 손상 방침대로 등록한다 (기본 [intake] give_up_seconds = 120)")
+
+    p = sub.add_parser("serve", parents=[common],
+                       help="운영 화면 (127.0.0.1) + 접수 폴더 감시: 홈, 문서 화면, 날짜·버리기·다시 스캔 결정, 대기열로 가는 길")
+    p.add_argument("--reviewer", help="검수·결정을 남기는 사람 (짧은 영문). 없으면 띄우지 않는다")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--no-watch", action="store_true",
+                   help="감시·처리를 하지 않는다 (화면만 — 결정은 남고 처리는 watch 가 한다)")
 
     p = sub.add_parser("run", parents=[common], help="스캔 파일/폴더를 처리해 DB 에 적재")
     p.add_argument("paths", nargs="*", help="파일 또는 폴더. 없으면 archive_root 전체. 상대경로는 archive_root 기준으로도 찾는다")
@@ -64,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--by-month", action="store_true", help="양식 × 월: 쪽 수, 적재, 정합 실패, 괘선 오차, 분류 여유")
 
     p = sub.add_parser("pages", parents=[common], help="쪽 목록")
-    p.add_argument("--status", help="unknown_form | classified_only | align_failed | loaded | error")
+    p.add_argument("--status", help="unknown_form | blank | classified_only | align_failed | duplicate | loaded | discarded | error")
     p.add_argument("--template", help="이 양식만")
     p.add_argument("--low-margin", action="store_true", help="분류 여유가 classify_min_margin 아래인 쪽만")
     p.add_argument("--thumbs", nargs="?", const="", metavar="DIR",
@@ -75,6 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--variants", action="store_true",
                    help="같은 날 섞여 쓰이는 판(concurrent)마다 정합한 쪽 중 두 판의 괘선 오차 차이가 1 px 미만인 쪽 "
                         "(판마다의 오차를 같이 낸다. 두 판 모두 정합에 실패한 쪽도 상태 align_failed 로 나온다)")
+    p.add_argument("--rotated", action="store_true", help="돌아서 들어와 세운 쪽만 (방향이 0 이 아닌 쪽 — tasks/0007 4.4)")
 
     p = sub.add_parser("eval", parents=[common], help="정답과 비교")
     g = p.add_mutually_exclusive_group(required=True)
@@ -106,6 +135,9 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--page", type=int, default=1)
     t.add_argument("--handler", default="generic")
     t.add_argument("--overwrite", action="store_true")
+    t.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=0,
+                   help="돌아간 스캔이면 시계 방향으로 이만큼 돌려 세운 그림을 기준 이미지로 (tasks/0007 4.4). 없으면 들어온 방향 그대로 "
+                        "— '바로 선 것'은 기준 이미지의 방향이다")
     t = tsub.add_parser("preview", parents=[common],
                         help="칸·필드의 테두리와 이름·종류·형식·역할·행 번호를 기준 이미지(또는 정합한 스캔) 위에 그린 PNG")
     t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
@@ -161,6 +193,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--usage-variants", action="store_true",
                    help="--usage-logs/--usage-only 와 함께: 운행일보에 같은 날 섞여 쓰이는 판 B(표만 아래로 옮긴 판)를 더한다 — "
                         "두 판에 family·concurrent: true (tasks/0006)")
+    p.add_argument("--rotate-pages", action="store_true",
+                   help="스캔한 쪽마다 0·90·180·270° 중 하나로 돌려서 담는다 (B5 가로를 세로로 넣은 스캐너 — tasks/0007)")
+    p.add_argument("--blank-backs", action="store_true",
+                   help="쪽마다 빈 뒷면(흰 종이·티·가장자리 그림자·옅게 비친 앞면)을 붙인다 (양면 스캔 — tasks/0007)")
+    p.add_argument("--intake", action="store_true",
+                   help="합성 접수 폴더 OUT/inbox (돌아간 쪽, 날짜 없는 이름, 양면, 다시 스캔, 같은 바이트, 잘린 PDF)와 견줄 묶음 "
+                        "OUT/baseline — 넷째 날까지 (tasks/0007). 넣을 결정은 truth.json 의 intake.decisions")
+    p.add_argument("--rescans", action="store_true",
+                   help="첫날의 쪽 몇 장을 다른 흔들기로 다시 찍은 파일을 더한다 (JPEG 재압축·90° 돌린 것 포함 — 다시 스캔한 쪽, tasks/0007)")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
@@ -321,6 +362,15 @@ def cmd_info(a) -> int:
                         "equipment_aliases_sha": site.equipment_aliases_sha, "equipment_master": n_master}
         lines.append(f"사이트 팩: {site.name} — 템플릿 {len(tpls)}종, 페이지 라벨 {len(site.labels)}개, "
                      f"장비명 대응표 {len(site.equipment_aliases)}개 (해시 {site.equipment_aliases_sha}, 마스터 {n_master}대)")
+        from .intake.decisions import count_lines
+
+        dpath = s.decisions_path(site.root)
+        data["decisions"] = {"path": str(dpath), "lines": count_lines(dpath)}   # 결정 기록 (tasks/0007 4.3) — 값·이름이 없다
+        lines.append(f"결정 기록: {dpath} ({data['decisions']['lines']}줄)")
+        data["inbox"] = {"path": str(s.inbox) if s.inbox else None, "settle_seconds": s.settle_seconds,
+                         "give_up_seconds": s.give_up_seconds, "poll_seconds": s.poll_seconds}     # 접수 폴더 (4.7)
+        lines.append(f"접수 폴더: {s.inbox} (다 쓰인 뒤 {s.settle_seconds:g}초, 포기 {s.give_up_seconds:g}초, "
+                     f"{s.poll_seconds:g}초마다)" if s.inbox else "접수 폴더: 없음 ([paths] inbox 또는 MINEDOCSCAN_INBOX)")
         for t in tpls:
             valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}"
                      + (" (같은 날 섞여 쓰이는 판)" if t["concurrent"] else "") if t["family"] else "")
@@ -375,7 +425,7 @@ def _describe_meta(s: Settings, site) -> dict:
 
 def cmd_run(a) -> int:
     from .pipeline import Pipeline
-    from .recognize import OracleRecognizer, build_recognizer, load_answers_json
+    from .recognize import OracleRecognizer, load_answers_json
     from .report import build_report, format_report, xcheck_by_date
 
     s = _settings(a, recognizer=a.recognizer, corrector=a.corrector)
@@ -393,36 +443,44 @@ def cmd_run(a) -> int:
     elif s.recognizer == "oracle":
         raise SystemExit("oracle 백엔드는 --answers 또는 --inspection-csv 가 필요합니다")
     else:
-        try:
-            recognizer = build_recognizer(s, site)
-        except (KeyError, ValueError, FileNotFoundError) as e:
-            raise SystemExit(f"인식 백엔드를 준비할 수 없습니다: {e}") from e
-    from .recognize.meta.model import MetaModelError, build_meta_readers
-
+        recognizer = None
+    recognizer, meta_readers = _backends(s, site, recognizer)
+    lock = _pipeline_lock(s)
     try:
-        meta_readers = build_meta_readers(s, site)
-    except MetaModelError as e:
-        raise SystemExit(f"메타 필드 모델을 준비할 수 없습니다: {e}") from e
-    if a.fresh and s.resolved_db_url.startswith("sqlite:///"):   # 인식기(모델)를 준비한 뒤에 지운다 — 모델이 없으면 DB 는 그대로
-        Path(s.resolved_db_url[len("sqlite:///"):]).unlink(missing_ok=True)
-    pipe = Pipeline(s, site=site, recognizer=recognizer, meta_readers=meta_readers)
-    files = pipe.expand(paths)
-    if not files:
-        raise SystemExit(f"처리할 파일이 없습니다: {[str(p) for p in paths]}")
-    t0 = time.monotonic()
-    for i, f in enumerate(files, 1):
-        r = pipe.process_file(f, template=a.template, skip_existing=a.skip_existing, strict=a.strict)
-        if not a.json:
-            el = time.monotonic() - t0
-            eta = el / i * (len(files) - i)
-            what = ("건너뜀" if r.get("skipped") else f"실패: {r['error']}" if r["status"] == "failed" else f"{len(r['pages'])}쪽"
-                    + (f" · 경고: {r['warning']}" if r.get("warning") else ""))
-            print(f"[{i}/{len(files)}] {f.name} · {what} · 지난 {_hms(el)} · 남은 약 {_hms(eta)}", file=sys.stderr)
-    summary = pipe.finalize()
+        if a.fresh and s.resolved_db_url.startswith("sqlite:///"):   # 인식기(모델)를 준비한 뒤에 지운다 — 모델이 없으면 DB 는 그대로
+            db = Path(s.resolved_db_url[len("sqlite:///"):])
+            for f in (db, db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError as e:                              # 윈도우: 다른 프로그램(review serve·serve)이 DB 를 열고 있다
+                    raise SystemExit(f"DB 를 지울 수 없습니다 — 다른 프로그램(serve, review serve)이 쓰고 있습니다: {e}") from None
+        pipe = Pipeline(s, site=site, recognizer=recognizer, meta_readers=meta_readers)
+        files = pipe.expand(paths)
+        if not files and not pipe.pending_documents():
+            raise SystemExit(f"처리할 파일이 없습니다: {[str(p) for p in paths]}")
+        t0 = time.monotonic()
+        for i, f in enumerate(files, 1):
+            r = pipe.process_file(f, template=a.template, skip_existing=a.skip_existing, strict=a.strict)
+            if not a.json:
+                el = time.monotonic() - t0
+                eta = el / i * (len(files) - i)
+                what = ("건너뜀" if r.get("skipped") else f"실패: {r['error']}" if r["status"] == "failed"
+                        else _RUN_STATUS.get(r["status"]) or (f"{len(r['pages'])}쪽" + (f" · 경고: {r['warning']}" if r.get("warning") else "")))
+                print(f"[{i}/{len(files)}] {f.name} · {what} · 지난 {_hms(el)} · 남은 약 {_hms(eta)}", file=sys.stderr)
+        waiting = pipe.process_pending(template=a.template, strict=a.strict)   # 준 경로를 다 돈 뒤 대기 중인 문서를 마저
+        summary = pipe.finalize()
+    finally:
+        lock.release()
     rep = build_report(pipe.con, pipe.site.variant_families())
     text = (f"이번 실행: 문서 {summary['documents']}건, 페이지 {summary['pages']}장, 건너뜀 {summary['skipped']}건, "
             f"실패 {len(summary['failed'])}건 (인식 백엔드: {recognizer.name})\n"
-            f"분류 여유가 낮은 페이지: {len(summary['low_margin'])}장, 오류 난 쪽: {len(summary['page_errors'])}장\n"
+            + (f"대기 중이던 문서 {waiting}건을 마저 처리했습니다\n" if waiting else "")
+            + (f"날짜를 정할 문서 {len(summary['needs_date'])}건 — minedocscan doc list --status needs_date → doc date\n"
+               if summary["needs_date"] else "")
+            + (f"원본에 닿지 않은 문서 {len(set(summary['unreachable']))}건 (다음에 다시 봅니다)\n" if summary["unreachable"] else "")
+            + (f"다시 스캔 의심 쪽 {len(summary['duplicates'])}장 — 적재하지 않고 붙잡았습니다 (pages --status duplicate → doc discard/keep)\n"
+               if summary["duplicates"] else "")
+            + f"분류 여유가 낮은 페이지: {len(summary['low_margin'])}장, 오류 난 쪽: {len(summary['page_errors'])}장\n"
             f"── DB 현황 ({s.resolved_db_url}) ──\n" + format_report(rep, xcheck_by_date(pipe.con)))
     if summary["failed"]:
         text += "\n실패한 문서:\n" + "\n".join(f"  {d['source_name']}: {d['error']}" for d in summary["failed"])
@@ -432,6 +490,200 @@ def cmd_run(a) -> int:
         text += "\n경고가 있는 문서:\n" + "\n".join(f"  {d['source_name']}: {d['warning']}" for d in summary["warnings"])
     _emit(a, {"run": summary, "report": rep}, text)
     return 1 if (summary["failed"] or summary["page_errors"]) else 0
+
+
+def cmd_doc(a) -> int:
+    """문서 목록과 결정 (tasks/0007 4.3). 결정은 파일에 한 줄 + doc_decision + 다시 처리 요청 — 처리는 watch·serve·run 이 한다."""
+    from .intake import decisions as decs
+    from .store.db import open_db
+    from .store.order import row_document_key
+
+    s = _settings(a)
+    site = _need_site(s)
+    con = open_db(s.resolved_db_url)
+    if a.doc_command == "list":                               # 읽기만 한다 (처리 중인 쪽의 트랜잭션을 기다리지 않게)
+        rows = [dict(r) for r in con.execute("SELECT * FROM doc_document")]
+        rows.sort(key=row_document_key)
+        if a.status:
+            rows = [r for r in rows if r["status"] == a.status]
+        out = [{"document_id": r["document_id"], "received_at": r["received_at"], "source_name": r["source_name"],
+                "n_pages": r["n_pages"], "work_date": r["work_date"], "date_source": r["date_source"], "status": r["status"],
+                "waiting": r["status"] == "received" or r["work_requested"] > r["work_done"]} for r in rows]
+        lines = [f"{'받은 시각':<24} {'문서 ID':<16} {'쪽':>3} {'날짜':<10} {'상태':<13} 파일명"]
+        for r in out:
+            lines.append(f"{r['received_at'] or '-':<24} {r['document_id']:<16} {str(r['n_pages'] or '-'):>3} "
+                         f"{r['work_date'] or '-':<10} {r['status']:<13} {r['source_name']}"
+                         + ("  (다시 처리 대기)" if r["waiting"] and r["status"] != "received" else ""))
+        lines.append(f"문서 {len(out)}건" + (f" (상태 {a.status})" if a.status else ""))
+        _emit(a, {"documents": out}, "\n".join(lines))
+        return 0
+    if not a.reviewer:
+        raise SystemExit("결정한 사람이 없습니다: --reviewer 를 주세요 (없으면 저장하지 않습니다)")
+    decs.import_into(con, s.decisions_path(site.root))        # 파일이 원본 — 다른 곳에서 붙은 줄이 있으면 먼저 비춘다
+    item = {"target": a.target, "kind": a.doc_command, "value": getattr(a, "date", ""), "note": a.note}
+    try:
+        r = decs.save(con, s.decisions_path(site.root), [item], a.reviewer)
+    except decs.DecisionError as e:
+        raise SystemExit(f"결정을 저장하지 않았습니다: {e}") from None
+    d = r["decisions"][0]
+    text = "\n".join([f"경고: {w}" for w in r["warnings"]]
+                     + [f"결정을 남겼습니다: {d.target} {d.kind}" + (f" {d.value}" if d.value else ""),
+                        "다시 처리 대기 — minedocscan watch --once (또는 serve, run) 가 처리합니다"])
+    _emit(a, {"decision": {"decision_id": d.decision_id, "target": d.target, "kind": d.kind, "value": d.value},
+              "warnings": r["warnings"], "documents": r["documents"]}, text)
+    return 0
+
+
+def cmd_watch(a) -> int:
+    """접수 폴더 감시 + 대기 중인 문서 처리 (tasks/0007 4.7). 요약에는 수와 문서 ID 만 — 파일명은 doc list·화면에서 본다."""
+    import threading
+
+    from .intake.worker import Worker, format_round
+    from .pipeline import Pipeline
+
+    s = _settings(a)
+    site = _need_site(s)
+    _check_inbox(s)
+    recognizer, meta_readers = _backends(s, site)
+    lock = _pipeline_lock(s)
+    r: dict = {"processed": 0}
+    try:
+        pipe = Pipeline(s, site=site, recognizer=recognizer, meta_readers=meta_readers)
+        worker = Worker(pipe, _open_inbox(s, pipe.con, continuous=not a.once, settle=a.settle_seconds,
+                                          give_up=a.give_up_seconds))
+        if a.once:
+            r = worker.run_once()
+        else:
+            print(f"감시를 시작합니다 (접수 폴더 {'있음' if worker.inbox else '없음 — 대기 중인 문서만'}, "
+                  f"{s.poll_seconds:g}초마다). 멈추려면 Ctrl+C", file=sys.stderr)
+
+            def show(out):
+                if out.get("processed") or out.get("received") or out.get("already") or out.get("moved_failed"):
+                    print(format_round(out), file=sys.stderr)
+
+            stop = threading.Event()
+            try:
+                worker.run_forever(stop, s.poll_seconds, on_round=show)
+            except KeyboardInterrupt:
+                stop.set()
+            r = worker.last or r
+    finally:
+        lock.release()
+    _emit(a, {"watch": r}, format_round(r))
+    return 0
+
+
+def cmd_serve(a) -> int:
+    """운영 화면 (tasks/0007 4.9): 한 프로세스에 스레드 둘 — 작업 스레드가 접수·처리 바퀴를 돌고(자기 DB 연결), 화면 스레드는
+    단일 스레드 HTTP 서버(자기 연결)다. 화면의 쓰기는 검수 저장과 결정 저장뿐. --no-watch 면 작업 스레드가 없다 (잠금도 잡지 않는다)."""
+    import threading
+
+    from .intake import decisions as decs
+    from .intake.worker import Worker, format_round
+    from .pipeline import Pipeline
+    from .review.ops import OpsApp
+    from .review.server import ReviewApp, serve
+    from .review.store import import_into
+    from .store.db import open_db
+
+    if not a.reviewer:
+        raise SystemExit("검수자를 지정하세요: --reviewer <짧은 영문 식별자>. 검수·결정 기록마다 남습니다.")
+    s = _settings(a)
+    site = _need_site(s)
+    lock = worker = thread = None
+    stop, wake = threading.Event(), threading.Event()
+    if not a.no_watch:
+        _check_inbox(s)
+        recognizer, meta_readers = _backends(s, site)
+        lock = _pipeline_lock(s)
+    try:
+        if not a.no_watch:
+            pipe = Pipeline(s, recognizer=recognizer, meta_readers=meta_readers)      # 작업 스레드의 사이트 팩·연결 (화면과 따로)
+            worker = Worker(pipe, _open_inbox(s, pipe.con, continuous=True))
+
+            def show(out):
+                if out.get("processed") or out.get("received") or out.get("already") or out.get("moved_failed"):
+                    print(format_round(out), file=sys.stderr)          # 수와 문서 ID 만
+
+            thread = threading.Thread(target=worker.run_forever, args=(stop, s.poll_seconds, wake, show), daemon=True,
+                                      name="minedocscan-worker")
+        con = open_db(s.resolved_db_url)                                # 화면 스레드의 연결
+        import_into(con, s.reviews_path(site.root))
+        decs.import_into(con, s.decisions_path(site.root))              # --no-watch 여도 결정 파일을 비춘다
+        from .forms.sitepack import SitePack
+
+        screen_site = SitePack(site.root)
+        ops = OpsApp(con, screen_site, s, a.reviewer, worker=worker, watching=not a.no_watch, wake=wake)
+        try:
+            app = ReviewApp(con, screen_site, s, a.reviewer, "pending", ops=ops)
+        except ValueError as e:
+            raise SystemExit(str(e)) from None
+        if thread is not None:
+            thread.start()
+        try:
+            serve(app, port=a.port)
+        except OSError as e:
+            raise SystemExit(str(e)) from e
+    finally:
+        stop.set()
+        wake.set()
+        if thread is not None:
+            thread.join(timeout=60)
+        if lock is not None:
+            lock.release()
+    return 0
+
+
+def _check_inbox(s: Settings) -> None:
+    """접수 폴더가 있으면 시작하기 전에 쓸 만한지 본다 (archive_root 가 있고, 접수 폴더가 보관·작업 폴더·사이트 팩과 겹치지 않는다)."""
+    if s.inbox is None:
+        return
+    from .intake.inbox import InboxError, check_paths
+
+    try:
+        check_paths(s.inbox, s.archive_root, {"work_root": s.work_root, "site": s.site})
+    except InboxError as e:
+        raise SystemExit(f"접수 폴더를 쓸 수 없습니다: {e}") from None
+
+
+def _open_inbox(s: Settings, con, continuous: bool, settle: float | None = None, give_up: float | None = None):
+    if s.inbox is None:
+        return None
+    from .intake.inbox import Inbox
+
+    s.inbox.mkdir(parents=True, exist_ok=True)
+    return Inbox(s, con, continuous=continuous, settle_seconds=settle, give_up_seconds=give_up)
+
+
+def _backends(s: Settings, site, recognizer=None) -> tuple:
+    """run·watch(·serve)가 같이 쓰는 준비: 인식기와 메타 필드 모델. 준비할 수 없으면 한 줄로 멈춘다 (잠금을 잡기 전에)."""
+    from .recognize import build_recognizer
+    from .recognize.meta.model import MetaModelError, build_meta_readers
+
+    if recognizer is None:
+        try:
+            recognizer = build_recognizer(s, site)
+        except (KeyError, ValueError, FileNotFoundError) as e:
+            raise SystemExit(f"인식 백엔드를 준비할 수 없습니다: {e}") from e
+    try:
+        meta_readers = build_meta_readers(s, site)
+    except MetaModelError as e:
+        raise SystemExit(f"메타 필드 모델을 준비할 수 없습니다: {e}") from e
+    return recognizer, meta_readers
+
+
+def _pipeline_lock(s: Settings):
+    """파이프라인은 한 번에 하나 (tasks/0007 4.1) — 잡지 못하면 한 줄로 멈춘다."""
+    from .pipeline.lock import PipelineBusy, PipelineLock
+
+    lock = PipelineLock.for_settings(s)
+    try:
+        return lock.acquire()
+    except PipelineBusy as e:
+        raise SystemExit(str(e)) from None
+
+
+_RUN_STATUS = {"needs_date": "날짜를 기다림 (doc date)", "discarded": "버린 문서", "unreachable": "원본에 닿지 않음"}
 
 
 def _hms(sec: float) -> str:
@@ -510,7 +762,8 @@ def cmd_pages(a) -> int:
               "검수 화면: minedocscan review serve --queue meta-check")
         return 0
     rows = list_pages(con, status=a.status, template=a.template,
-                      low_margin=s.classify_min_margin if a.low_margin else None, variants=a.variants)
+                      low_margin=s.classify_min_margin if a.low_margin else None, variants=a.variants,
+                      rotated=a.rotated)
     written = []
     if a.thumbs is not None:
         from .tools.thumbs import write_thumbs
@@ -642,7 +895,7 @@ def cmd_template(a) -> int:
         al = r["aligned"]
         _emit(a, r, f"그렸습니다: {r['out']} — 테두리 {r['boxes']}개 (칸 + 필드)"
               + ("" if al is None else f"\n정합: {'통과' if al['ok'] else '실패'}, 인라이어 {al['inliers']}, "
-                 f"괘선 오차 {al['grid_err']} px")
+                 f"괘선 오차 {al['grid_err']} px" + (f", 쪽을 시계 방향으로 {al['rotation']}° 세워서" if al.get("rotation") else ""))
               + "\n저장소에 넣지 마세요 — 실제 양식의 이름·차량번호가 보입니다.")
         return 0
     if a.template_command == "variant":
@@ -683,7 +936,7 @@ def cmd_template(a) -> int:
         raise SystemExit("사이트 팩이 지정되지 않았습니다: --site 또는 MINEDOCSCAN_SITE")
     roi = _roi(a.roi) if a.roi else None
     path = init_template(a.image, a.name, Path(s.site) / "templates", roi=roi, header_rows=a.header_rows,
-                         page=a.page, dpi=s.dpi, handler=a.handler, overwrite=a.overwrite)
+                         page=a.page, dpi=s.dpi, handler=a.handler, overwrite=a.overwrite, rotate=a.rotate)
     _emit(a, {"template": str(path)}, f"템플릿 뼈대를 만들었습니다: {path}\n열 이름·kind·행 키를 채우세요 (docs/SITE_PACK.md).")
     return 0
 
@@ -707,12 +960,18 @@ def cmd_synth(a) -> int:
         raise SystemExit("--print-layers 는 --usage-logs 또는 --usage-only 와 같이 씁니다")
     if a.usage_variants and not (a.usage_logs or a.usage_only):
         raise SystemExit("--usage-variants 는 --usage-logs 또는 --usage-only 와 같이 씁니다")
-    r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
+    days = max(a.days, 4) if a.intake else a.days
+    r = generate(a.out, days=days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
                  usage_logs=a.usage_logs, usage_only=a.usage_only, print_layers=a.print_layers,
-                 usage_variants=a.usage_variants)
+                 usage_variants=a.usage_variants, rotate_pages=a.rotate_pages, blank_backs=a.blank_backs,
+                 rescans=a.rescans, intake=a.intake)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")
+    if a.intake:
+        text += (f"\n접수 폴더   {r.root / 'inbox'} (견줄 묶음 {r.root / 'baseline'})\n"
+                 f"실행 예: MINEDOCSCAN_INBOX={r.root / 'inbox'} minedocscan watch --once --settle-seconds 0 --give-up-seconds 0 "
+                 f"--site {r.site} --archive-root {r.root / 'archive'} --work-root {r.root / 'work'}  → doc list → doc date …")
     _emit(a, {"root": str(r.root), "site": str(r.site), "scans": str(r.scans), "truth": str(r.truth_path),
               "answers": str(r.answers_path), "expected": r.truth["expected"]}, text)
     return 0
@@ -1026,6 +1285,7 @@ def _recognizer_eval_meta(a, s: Settings, site, model_dir: Path) -> int:
 
 COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "pages": cmd_pages, "eval": cmd_eval,
             "regress": cmd_regress, "template": cmd_template, "synth": cmd_synth, "review": cmd_review,
+            "doc": cmd_doc, "watch": cmd_watch, "serve": cmd_serve,
             "recognizer": cmd_recognizer}
 
 

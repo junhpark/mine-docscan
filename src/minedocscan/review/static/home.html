@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>minedocscan 운영</title>
+<!-- 운영 화면 (tasks/0007 4.9): 홈과 문서 화면을 이 한 장이 그린다. 외부 글꼴·스크립트·CDN 을 쓰지 않는다 — 현장은 외부 네트워크가 없다. -->
+<style>
+  :root { --fg:#1b1b1b; --muted:#6b6b6b; --line:#d9d9d9; --accent:#1f5fbf; --bad:#b4232c; --ok:#1d7a3a; --warn:#9a6700; --bg:#f6f6f4; }
+  * { box-sizing: border-box; }
+  body { margin:0; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; color:var(--fg); background:var(--bg); }
+  header { display:flex; flex-wrap:wrap; gap:8px 20px; align-items:baseline; padding:10px 16px; background:#fff; border-bottom:1px solid var(--line); position:sticky; top:0; z-index:2; }
+  header .t { font-weight:600; }
+  header .st { color:var(--muted); font-size:13px; }
+  main { max-width: 1400px; margin: 0 auto; padding: 14px 16px 60px; }
+  h2 { font-size:16px; margin: 18px 0 8px; }
+  .box { background:#fff; border:1px solid var(--line); border-radius:6px; padding:10px 14px; margin-bottom:12px; }
+  .todo { display:flex; flex-wrap:wrap; gap:10px; }
+  .todo a, .todo span { display:inline-block; padding:6px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; text-decoration:none; color:var(--fg); }
+  .todo a b, .todo span b { font-variant-numeric: tabular-nums; }
+  .todo .hot { border-color: var(--warn); }
+  table { border-collapse: collapse; width:100%; font-size:14px; }
+  th, td { text-align:left; padding:4px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; }
+  td.n { font-variant-numeric: tabular-nums; }
+  .wait { color:var(--warn); font-size:12px; margin-left:6px; }
+  .pages { display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:12px; }
+  .page { background:#fff; border:1px solid var(--line); border-radius:6px; padding:8px; }
+  .page img { width:100%; height:auto; border:1px solid var(--line); background:#fff; transition: transform .15s; }
+  .page .meta { font-size:13px; color:var(--muted); margin:6px 0; }
+  .page.duplicate { border-color: var(--warn); }
+  .page.discarded img { opacity:.35; }
+  .pair { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+  .pair img { width:100%; border:1px solid var(--line); }
+  button { font: inherit; padding:4px 10px; border:1px solid var(--line); background:#fff; border-radius:4px; cursor:pointer; }
+  button.main { border-color: var(--accent); }
+  input.date { font-size:22px; width: 12ch; padding:3px 8px; border:2px solid var(--line); border-radius:6px; }
+  input.date:focus { outline:none; border-color:var(--accent); }
+  .msg { min-height:1.4em; color:var(--bad); }
+  .msg.ok { color: var(--ok); }
+  .muted { color:var(--muted); font-size:13px; }
+  .status-failed, .status-needs_date { color: var(--bad); }
+  .status-needs_review { color: var(--warn); }
+  kbd { font: 12px ui-monospace, monospace; border:1px solid var(--line); border-bottom-width:2px; border-radius:3px; padding:0 5px; background:#fafafa; }
+</style>
+</head>
+<body>
+<header>
+  <a href="/" class="t">minedocscan 운영</a>
+  <span id="site" class="st"></span>
+  <span id="worker" class="st"></span>
+</header>
+<main>
+  <div class="msg" id="msg"></div>
+  <div id="view"></div>
+</main>
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const qs = new URLSearchParams(location.search);
+  const STATUS = { received: '받음', needs_date: '날짜를 정할 문서', processed: '처리함', needs_review: '검수 대기', failed: '실패',
+                   discarded: '버림' };
+  const PAGE = { loaded: '적재', duplicate: '다시 스캔 의심', discarded: '버림', blank: '빈 쪽', unknown_form: '양식 없음',
+                 align_failed: '정합 실패', classified_only: '분류만', error: '오류' };
+  let templates = {};
+  let timer = null;
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+  function msg(t, ok) { const m = $('msg'); m.textContent = t || ''; m.className = 'msg' + (ok ? ' ok' : ''); }
+  function workerText(h) {
+    if (!h.watching) return '작업: 꺼짐 (--no-watch — 처리는 watch 가 합니다)';
+    const w = h.worker || {};
+    const err = h.worker_error ? ' · 지난 바퀴 오류 ' + h.worker_error : '';
+    if (w.state === 'processing') return '작업: 처리 중 — 문서 ' + esc(w.document_id) + ' ' + (w.page_no || 0) + '/' + (w.n_pages || '?') + '쪽' + err;
+    return '작업: 쉬는 중' + err;
+  }
+  function docLink(d) { return '<a href="/doc?id=' + encodeURIComponent(d.document_id) + '">' + esc(d.source_name) + '</a>'; }
+  function statusCell(d) {
+    return '<span class="status-' + esc(d.status) + '">' + esc(STATUS[d.status] || d.status) + '</span>'
+      + (d.waiting && d.status !== 'received' ? '<span class="wait">다시 처리 대기</span>' : '');
+  }
+
+  async function getJSON(url) {
+    const r = await fetch(url);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || ('요청 실패 ' + r.status));
+    return j;
+  }
+  async function post(items, confirmed) {
+    const r = await fetch('/api/decision', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                             body: JSON.stringify({ items: items, confirm: !!confirmed }) });
+    const j = await r.json();
+    if (!r.ok) { msg(j.error || '저장하지 못했습니다'); return null; }
+    if (j.confirm) {                       // 받은 날보다 뒤이거나 한참 앞의 날짜 — 한 번 되묻는다
+      if (!window.confirm(j.confirm.join('\n') + '\n\n그래도 저장할까요?')) { msg('저장하지 않았습니다'); return null; }
+      return post(items, true);
+    }
+    msg('결정을 남겼습니다 — 다시 처리 대기' + (j.watching ? '' : ' (처리는 watch 가 합니다)'), true);
+    return j;
+  }
+
+  // ── 홈 ───────────────────────────────────────────────────────────────
+  async function home() {
+    let h;
+    try { h = await getJSON('/api/home'); } catch (e) { msg(e.message); return; }
+    templates = h.templates || {};
+    $('site').textContent = (h.site || '') + ' · 검수자 ' + (h.reviewer || '');
+    $('worker').innerHTML = workerText(h);
+    const t = h.todo;
+    const q = t.queues || {};
+    let out = '<h2>할 일</h2><div class="box todo">';
+    out += '<span class="' + (t.needs_date.length ? 'hot' : '') + '">날짜를 정할 문서 <b>' + t.needs_date.length + '</b></span>';
+    out += '<span class="' + (t.duplicates.length ? 'hot' : '') + '">다시 스캔 의심 쪽 <b>' + t.duplicates.length + '</b></span>';
+    out += '<span>양식 없는 쪽 <b>' + t.unknown_form + '</b></span><span>정합 실패 쪽 <b>' + t.align_failed + '</b></span>';
+    if (t.page_errors) out += '<span class="hot">오류 난 쪽 <b>' + t.page_errors + '</b></span>';
+    if (t.failed_documents) out += '<span class="hot">실패한 문서 <b>' + t.failed_documents + '</b></span>';
+    if (t.waiting) out += '<span>다시 처리 대기 <b>' + t.waiting + '</b></span>';
+    out += '</div><h2>대기열</h2><div class="box todo">';
+    for (const [tpl, n] of Object.entries(q.pending || {})) {
+      out += '<a href="/?name=pending&template=' + encodeURIComponent(tpl) + '">검수 대기 · ' + esc(templates[tpl] || tpl) + ' <b>' + n + '</b></a>';
+    }
+    for (const name of ['mismatch', 'readings', 'usage-check', 'meta-check', 'page-fields']) {
+      if (q[name] !== undefined) out += '<a href="/?name=' + name + '">' + name + ' <b>' + q[name] + '</b></a>';
+    }
+    out += '</div>';
+    if (t.needs_date.length) {
+      out += '<h2>날짜를 정할 문서</h2><div class="box"><table><tr><th>받은 시각</th><th>파일명</th><th>쪽</th></tr>';
+      for (const d of t.needs_date) out += '<tr><td>' + esc(d.received_at) + '</td><td>' + docLink(d) + '</td><td class="n">' + esc(d.n_pages) + '</td></tr>';
+      out += '</table></div>';
+    }
+    if (t.duplicates.length) {
+      out += '<h2>다시 스캔 의심 쪽</h2><div class="box"><table><tr><th>날짜</th><th>쪽</th><th>먼저 들어온 쪽</th><th>유사도</th></tr>';
+      for (const d of t.duplicates) {
+        out += '<tr><td>' + esc(d.work_date) + '</td><td><a href="/doc?id=' + encodeURIComponent(d.document_id) + '#p' + d.page_no + '">'
+          + esc(d.page_id) + '</a></td><td>' + esc(d.duplicate_of) + '</td><td class="n">' + (d.duplicate_sim || 0).toFixed(3) + '</td></tr>';
+      }
+      out += '</table></div>';
+    }
+    out += '<h2>최근 문서</h2><div class="box"><table><tr><th>받은 시각</th><th>파일명</th><th>쪽</th><th>날짜</th><th>상태</th></tr>';
+    for (const d of h.recent) {
+      out += '<tr><td>' + esc(d.received_at) + '</td><td>' + docLink(d) + '</td><td class="n">' + esc(d.n_pages)
+        + '</td><td>' + esc(d.work_date || '') + '</td><td>' + statusCell(d) + '</td></tr>';
+    }
+    out += '</table></div>';
+    $('view').innerHTML = out;
+  }
+
+  // ── 문서 화면 ─────────────────────────────────────────────────────────
+  async function doc(id) {
+    let j;
+    try { j = await getJSON('/api/doc?id=' + encodeURIComponent(id)); } catch (e) { msg(e.message); return; }
+    templates = j.templates || {};
+    const d = j.document;
+    document.title = 'minedocscan 문서 ' + d.document_id;
+    let out = '<h2>' + esc(d.source_name) + ' <span class="muted">' + esc(d.document_id) + '</span></h2>';
+    out += '<div class="box">받은 시각 ' + esc(d.received_at) + ' · 쪽 ' + esc(d.n_pages) + ' · 날짜 <b>' + esc(d.work_date || '없음') + '</b>'
+      + (d.date_source ? ' <span class="muted">(' + esc(d.date_source) + ')</span>' : '') + ' · ' + statusCell(d)
+      + (d.error ? '<div class="muted">' + esc(d.error) + '</div>' : '') + '</div>';
+    out += '<div class="box">문서의 날짜 <input class="date" id="docdate" inputmode="numeric" placeholder="예: 250326" autocomplete="off"> '
+      + '<button class="main" id="savedate">날짜 저장</button> <span class="muted">종이의 날짜를 읽어 넣고 <kbd>Enter</kbd> — 25.03.26 · 250326 · 0326 도 됩니다</span> '
+      + (j.decision.discarded ? '<button id="docrestore">문서 되살리기</button>' : '<button id="docdiscard">문서 버리기</button>')
+      + (j.watching ? '' : '<div class="muted">처리는 watch 가 합니다 (--no-watch)</div>') + '</div>';
+    out += '<div class="pages">';
+    for (const p of j.pages) {
+      const src = p.status ? '/page.png?page_id=' + encodeURIComponent(p.page_id) + '&w=520'
+                           : '/page.png?doc=' + encodeURIComponent(d.document_id) + '&page=' + p.page_no + '&w=520';
+      const cls = 'page' + (p.status === 'duplicate' ? ' duplicate' : '') + (p.decision.discarded ? ' discarded' : '');
+      out += '<div class="' + cls + '" id="p' + p.page_no + '">';
+      if (p.status === 'duplicate' && p.earlier) {
+        out += '<div class="muted">다시 스캔 의심 — 먼저 들어온 쪽(왼쪽)과 유사도 ' + (p.duplicate_sim || 0).toFixed(3) + '</div><div class="pair">'
+          + '<img alt="먼저 들어온 쪽" src="/page.png?page_id=' + encodeURIComponent(p.earlier.page_id) + '&w=520">'
+          + '<img alt="이 쪽" src="' + src + '"></div>'
+          + '<div><button data-dup="later" data-p="' + esc(p.page_id) + '" data-e="' + esc(p.earlier.page_id) + '">같은 종이 — 이 쪽을 버린다</button> '
+          + '<button data-dup="earlier" data-p="' + esc(p.page_id) + '" data-e="' + esc(p.earlier.page_id) + '">같은 종이 — 먼저 쪽을 버리고 이 쪽을 쓴다</button> '
+          + '<button data-dup="keep" data-p="' + esc(p.page_id) + '" data-e="' + esc(p.earlier.page_id) + '">다른 종이 — 둘 다 쓴다</button></div>';
+      } else {
+        out += '<img alt="' + p.page_no + '쪽" src="' + src + '" data-rot="0">';
+      }
+      out += '<div class="meta">' + p.page_no + '쪽 · ' + esc(templates[p.template_name] || p.template_name || '—') + ' · '
+        + esc(PAGE[p.status] || p.status || '처리 전') + (p.work_date ? ' · ' + esc(p.work_date) : '')
+        + (p.decision.date ? ' <span class="muted">(쪽의 날짜 ' + esc(p.decision.date) + ')</span>' : '') + '</div>';
+      out += '<div>' + (p.decision.discarded ? '<button data-act="restore" data-p="' + esc(p.page_id) + '">되살리기</button>'
+                                             : '<button data-act="discard" data-p="' + esc(p.page_id) + '">이 쪽 버리기</button>')
+        + ' <button data-act="date" data-p="' + esc(p.page_id) + '">이 쪽은 다른 날짜</button>'
+        + (p.status ? '' : ' <button data-act="turn">돌려 보기</button>') + '</div></div>';
+    }
+    out += '</div>';
+    $('view').innerHTML = out;
+    const reload = () => doc(id);
+    const dateBox = $('docdate');
+    const saveDate = async () => {
+      const v = dateBox.value.trim();
+      if (!v) { msg('날짜를 넣으세요'); return; }
+      if (await post([{ target: d.document_id, kind: 'date', value: v }])) reload();
+    };
+    $('savedate').onclick = saveDate;
+    dateBox.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') saveDate(); });
+    if ($('docdiscard')) $('docdiscard').onclick = async () => { if (await post([{ target: d.document_id, kind: 'discard' }])) reload(); };
+    if ($('docrestore')) $('docrestore').onclick = async () => { if (await post([{ target: d.document_id, kind: 'restore' }])) reload(); };
+    for (const b of document.querySelectorAll('button[data-act]')) {
+      b.onclick = async () => {
+        const act = b.dataset.act, target = b.dataset.p;
+        if (act === 'turn') {                        // 방향을 아직 모르는 쪽 (날짜를 기다리는 문서) — 화면에서만 돌린다
+          const img = b.closest('.page').querySelector('img');
+          const r = (Number(img.dataset.rot) + 90) % 360;
+          img.dataset.rot = r; img.style.transform = 'rotate(' + r + 'deg)';
+          return;
+        }
+        let items;
+        if (act === 'date') {
+          const v = window.prompt('이 쪽의 날짜 (종이에 적힌 날짜)');
+          if (!v) return;
+          items = [{ target: target, kind: 'date', value: v.trim() }];
+        } else {
+          items = [{ target: target, kind: act }];
+        }
+        if (await post(items)) reload();
+      };
+    }
+    for (const b of document.querySelectorAll('button[data-dup]')) {
+      b.onclick = async () => {
+        const later = b.dataset.p, earlier = b.dataset.e;
+        const items = b.dataset.dup === 'later' ? [{ target: later, kind: 'discard' }]
+          : (b.dataset.dup === 'earlier' ? [{ target: earlier, kind: 'discard' }]
+             : [{ target: later, kind: 'keep' }, { target: earlier, kind: 'keep' }]);
+        if (await post(items)) reload();
+      };
+    }
+    dateBox.focus();
+  }
+
+  if (location.pathname === '/doc') {
+    doc(qs.get('id') || '');
+  } else {
+    home();
+    timer = setInterval(home, 5000);                  // 5초마다 다시 읽는다
+  }
+  void timer;
+})();
+</script>
+</body>
+</html>

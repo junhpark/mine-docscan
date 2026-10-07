@@ -10,7 +10,8 @@ PostgreSQL 에서도 그대로 통하도록 골랐으므로, 운영용 어댑터
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -21,7 +22,9 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 # 5: 쪽 메타의 출처(doc_page_meta) — docs/tasks/0004-page-fields-and-checks.md
 # 6: 값의 형식(doc_field.format), 장비 가동 일보(eq_usage_daily, prod_tally, xcheck_usage) — docs/tasks/0005-usage-logs.md
 # 7: 인쇄 층·동시 판(doc_page.print_sha, doc_page.variant_errs) — docs/tasks/0006-print-layer-and-variants.md
-SCHEMA_VERSION = 7
+# 8: 접수(doc_document.received_at·date_source·work_requested·work_done, doc_page.rotation·duplicate_of·duplicate_sim,
+#    insp_daily.page_id, doc_decision, doc_page_sig) — docs/tasks/0007-intake.md
+SCHEMA_VERSION = 8
 
 # 테이블별 기본 키 (upsert 의 충돌 대상)
 PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
@@ -39,7 +42,16 @@ PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "eq_usage_daily": ("page_id",),
     "prod_tally": ("tally_id",),
     "xcheck_usage": ("page_id", "check_kind", "item"),
+    "doc_decision": ("decision_id",),
+    "doc_page_sig": ("page_id",),
 }
+
+# 문서가 만든 것 — 쪽을 가리키는 테이블 (page_id 열), 자식부터 (PostgreSQL 의 외래 키 순서). 문서를 다시 처리할 때 이것을 지우고
+# 다시 만든다 (tasks/0007 4.8). 새 업무 테이블을 더하면 여기에도 더한다. doc_review·doc_decision 은 지우지 않는다 (사람이 정한 것).
+# 날짜로 만드는 것(xcheck_haul, eq_assignment_obs)은 쪽을 가리키지 않는다 — 그 날짜를 다시 계산해 지운다 (핸들러의 finalize).
+PAGE_TABLES: tuple[str, ...] = ("xcheck_usage", "prod_tally", "eq_usage_daily", "prod_haul", "insp_daily", "doc_page_sig",
+                                "doc_page_meta", "doc_field", "doc_page")
+BUSY_TIMEOUT_S = 30         # 다른 연결이 쓰는 동안 기다리는 시간 — 쓰는 단위가 쪽 하나(1–2초)라 넉넉하다 (4.8)
 
 
 class SchemaVersionError(RuntimeError):
@@ -53,10 +65,12 @@ def open_db(url: str) -> sqlite3.Connection:
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     # check_same_thread=False: 검수 서버(review/server.py)는 요청을 받는 스레드에서 이 연결을 쓴다.
-    # 동시에 여러 스레드가 쓰지는 않는다 (서버는 단일 스레드).
-    con = sqlite3.connect(path, check_same_thread=False)
+    # 연결 하나를 여러 스레드가 같이 쓰지는 않는다 (serve 는 스레드마다 연결 하나 — tasks/0007 4.9).
+    con = sqlite3.connect(path, check_same_thread=False, timeout=BUSY_TIMEOUT_S)
     con.row_factory = sqlite3.Row
     _check_version(con, path)
+    if path != ":memory:":                       # WAL: 읽는 연결(화면)이 쓰는 연결(작업)을 기다리지 않는다. 버전 검사 뒤에 (거절할 파일을 고치지 않게)
+        con.execute("PRAGMA journal_mode=WAL")
     con.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     upsert(con, "meta_schema", {"key": "schema_version", "value": str(SCHEMA_VERSION)})
     con.commit()
@@ -94,8 +108,39 @@ def _check_version(con: sqlite3.Connection, path: str) -> None:
             "다시 돌리면 그대로 붙습니다.")
 
 
-def upsert(con: sqlite3.Connection, table: str, rows: dict | Iterable[dict]) -> int:
-    """기본 키가 같으면 덮어쓴다. 같은 문서를 다시 돌려도 행이 늘지 않는다(멱등)."""
+@contextmanager
+def write_txn(con: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """쓰는 트랜잭션 하나: BEGIN IMMEDIATE … COMMIT (예외면 ROLLBACK). 읽고 나서 쓰기로 올라가는 트랜잭션은 그 사이 다른 연결이
+    커밋하면 기다리지 않고 바로 실패한다 — 그래서 쓰는 단위는 처음부터 쓰기 잠금을 잡는다 (tasks/0007 4.8).
+    이미 열린 트랜잭션 안이면(부른 쪽의 단위) 새로 열지도 커밋하지도 않는다 — 그 단위가 커밋한다."""
+    if con.in_transaction:
+        yield con
+        return
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        yield con
+    except BaseException:
+        if con.in_transaction:
+            con.rollback()
+        raise
+    if con.in_transaction:
+        con.commit()
+
+
+def delete_pages(con: sqlite3.Connection, page_ids: list[str]) -> int:
+    """그 쪽들이 만든 행을 지운다 (PAGE_TABLES, 자식부터). 돌려주는 값: 지운 쪽 수."""
+    ids = sorted(set(page_ids))
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        marks = ",".join("?" * len(chunk))
+        for t in PAGE_TABLES:
+            con.execute(f"DELETE FROM {t} WHERE page_id IN ({marks})", chunk)
+    return len(ids)
+
+
+def upsert(con: sqlite3.Connection, table: str, rows: dict | Iterable[dict], insert_only: tuple[str, ...] = ()) -> int:
+    """기본 키가 같으면 덮어쓴다. 같은 문서를 다시 돌려도 행이 늘지 않는다(멱등).
+    insert_only: 새 행일 때만 쓰고 있는 행에서는 덮어쓰지 않는 열 (doc_document.received_at — 다시 처리해도 받은 시각은 그대로)."""
     if isinstance(rows, dict):
         rows = [rows]
     rows = list(rows)
@@ -103,7 +148,7 @@ def upsert(con: sqlite3.Connection, table: str, rows: dict | Iterable[dict]) -> 
         return 0
     cols = list(rows[0].keys())
     keys = PRIMARY_KEYS[table]
-    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c not in keys)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c not in keys and c not in insert_only)
     sql = (f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))}) "
            f"ON CONFLICT ({', '.join(keys)}) DO " + (f"UPDATE SET {updates}" if updates else "NOTHING"))
     con.executemany(sql, [tuple(r[c] for c in cols) for r in rows])

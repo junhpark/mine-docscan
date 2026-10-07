@@ -10,6 +10,10 @@ handler_options:
 
 insp_daily 행은 검수를 적용한 **최종** 필드 행(유 체크, 무 체크, 점검내역)에서 만든다 (daily_values).
 행의 상태: 구성 필드 중 하나라도 pending 이면 pending, 아니고 하나라도 reviewed 면 reviewed, 아니면 auto.
+
+같은 날의 두 쪽이 같은 장비를 적으면 **쪽의 순서(store/order.py)가 뒤인 쪽이 이긴다** — 지금의 `run` 이 넣는 순서와 같다
+(tasks/0007 4.8). 행에 그 쪽(page_id)을 남기고, 쪽을 지우거나 더한 뒤에는 그 날짜의 점검 행을 남은 쪽들의 최종 필드 행에서 다시
+만든다 (finalize). 검수는 이기는 쪽(행의 page_id)의 칸을 검수했을 때만 행을 고친다.
 """
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ from ..forms.equipment import equipment_id, is_equipment_row, layout
 from ..forms.template import row_key as _row_key
 from ..imaging.marks import decide_mark_pairs
 from ..store.db import upsert
+from ..store.order import page_key
 from .base import FormHandler, PageContext, apply_reviews, field_id, field_row
 
 
@@ -65,8 +70,10 @@ class InspectionHandler(FormHandler):
                 n_auto += vals["review_status"] == "auto"
                 n_pending += vals["review_status"] == "pending"
                 daily.append({"inspection_id": f"{ctx.work_date}:{eid}", "inspection_date": ctx.work_date,
-                              "equipment_id": eid, **vals, "entry_source": "scan"})
-            upsert(ctx.con, "insp_daily", daily)
+                              "equipment_id": eid, **vals, "entry_source": "scan", "page_id": ctx.page_id})
+            # 쪽마다 커밋하므로 순서가 앞인 쪽을 적재할 때 뒤인 쪽(다른 문서)의 행을 덮어쓰면 그 사이에 끊겼을 때 틀린 행이 남는다
+            later = _later_pages(ctx.con, ctx.work_date, ctx.page_id)
+            upsert(ctx.con, "insp_daily", [d for d in daily if d["inspection_id"] not in later])
         return {"fields": len(rows), "rows_auto": n_auto, "rows_pending": n_pending,
                 "marks_undecided": sum(1 for m in marks.values() if m.choice is None),
                 "marks_status": _count(m.status for m in marks.values())}
@@ -103,11 +110,72 @@ class InspectionHandler(FormHandler):
             return
         eid = equipment_id(_row_key(trow))
         d = con.execute("SELECT * FROM insp_daily WHERE inspection_id = ?", (f"{f['work_date']}:{eid}",)).fetchone()
-        if d is None:
-            return
+        if d is None or (d["page_id"] is not None and d["page_id"] != f["page_id"]):
+            return                                           # 그 날짜:장비의 행은 다른 쪽(순서가 뒤인 쪽)의 것이다
         by = {r["field_name"]: dict(r) for r in con.execute(
             "SELECT * FROM doc_field WHERE page_id = ? AND region = ? AND row_no = ?", (f["page_id"], region, f["row_no"]))}
         upsert(con, "insp_daily", {**dict(d), **daily_values(*(by.get(c) for c in cols))})
+
+
+    def finalize(self, con, site, settings, dates=None, equipment=None) -> dict:
+        """그 날짜들의 점검 행을 남은 쪽들의 최종 필드 행에서 다시 만든다 (None 이면 점검 행·점검표 쪽이 있는 날짜 전부).
+        쪽의 순서가 뒤인 쪽이 이긴다 — 문서를 어느 순서로 다시 처리했든 같다 (tasks/0007 4.8)."""
+        if dates is None:
+            dates = {r[0] for r in con.execute("SELECT DISTINCT inspection_date FROM insp_daily WHERE entry_source = 'scan'")}
+            dates |= {r[0] for r in con.execute("SELECT DISTINCT work_date FROM doc_page WHERE status = 'loaded' AND "
+                                                "work_date IS NOT NULL")}
+        for d in sorted(x for x in dates if x):
+            rebuild_daily(con, site, d)
+        return {}
+
+
+def _page_order(con, page_id: str) -> tuple | None:
+    r = con.execute("SELECT p.page_no, d.document_id, d.source_rel, d.source_path FROM doc_page p JOIN doc_document d "
+                    "ON p.document_id = d.document_id WHERE p.page_id = ?", (page_id,)).fetchone()
+    return None if r is None else page_key(r["source_rel"], r["source_path"], r["document_id"], r["page_no"])
+
+
+def _later_pages(con, work_date: str, page_id: str) -> set[str]:
+    """그 날짜의 점검 행 중 이 쪽보다 쪽의 순서가 뒤인 쪽이 만든 것 (inspection_id) — 이 쪽이 덮어쓰지 않는다."""
+    mine = _page_order(con, page_id)
+    if mine is None:
+        return set()
+    out = set()
+    for r in con.execute("SELECT inspection_id, page_id FROM insp_daily WHERE inspection_date = ? AND entry_source = 'scan' "
+                         "AND page_id IS NOT NULL AND page_id <> ?", (work_date, page_id)):
+        other = _page_order(con, r["page_id"])
+        if other is not None and other > mine:
+            out.add(r["inspection_id"])
+    return out
+
+
+def rebuild_daily(con, site, work_date: str) -> int:
+    """그 날짜의 점검 행(entry_source scan)을 그날 적재된 점검표 쪽들의 최종 필드 행에서 다시 만든다 — 쪽의 순서대로 덮어써
+    순서가 뒤인 쪽이 이긴다. load 와 같은 규칙: 장비 행이고 유·무 두 칸이 다 있는 행만 (imaging/marks.decide_mark_pairs 가 그런 행을
+    다 판정한다). 돌려주는 값: 쓴 행 수."""
+    con.execute("DELETE FROM insp_daily WHERE inspection_date = ? AND entry_source = 'scan'", (work_date,))
+    pages = con.execute(
+        "SELECT p.page_id, p.page_no, p.template_name, d.document_id, d.source_rel, d.source_path FROM doc_page p "
+        "JOIN doc_document d ON p.document_id = d.document_id WHERE p.work_date = ? AND p.status = 'loaded'",
+        (work_date,)).fetchall()
+    n = 0
+    for pg in sorted(pages, key=lambda r: page_key(r["source_rel"], r["source_path"], r["document_id"], r["page_no"])):
+        tpl = site.templates.get(pg["template_name"])
+        if tpl is None or tpl.handler != InspectionHandler.name:
+            continue
+        region, yes_col, no_col, text_col = layout(tpl)
+        by = {(r["row_no"], r["field_name"]): dict(r) for r in con.execute(
+            "SELECT * FROM doc_field WHERE page_id = ? AND region = ?", (pg["page_id"], region))}
+        daily = []
+        for r in tpl.region(region)["rows"]:
+            if not is_equipment_row(r) or (r["row"], yes_col) not in by or (r["row"], no_col) not in by:
+                continue
+            eid = equipment_id(str(r.get("key", "")))
+            daily.append({"inspection_id": f"{work_date}:{eid}", "inspection_date": work_date, "equipment_id": eid,
+                          **daily_values(by.get((r["row"], yes_col)), by.get((r["row"], no_col)), by.get((r["row"], text_col))),
+                          "entry_source": "scan", "page_id": pg["page_id"]})
+        n += upsert(con, "insp_daily", daily)
+    return n
 
 
 def daily_values(yes: dict | None, no: dict | None, rem: dict | None) -> dict:

@@ -10,7 +10,14 @@
   POST /api/check   {field_id, answer: yes|no|none|unknown}     ✓ 행의 답 → 두 칸의 검수 두 건 (review/checks.py)
   GET  /api/stats                          진행 현황
 
-127.0.0.1 에만 바인딩한다 — 화면에 실제 이름과 차량번호가 보인다. 단일 스레드(SQLite 연결 하나).
+운영 화면 (minedocscan serve — tasks/0007 4.9, review/ops.py) 이면 더:
+  GET  /                                   홈 (질의 없이). /?name=<대기열> 은 위의 검수 화면 그대로 ("홈으로" 링크가 생긴다)
+  GET  /doc?id=<document_id>               문서 화면 (static/home.html 한 장이 홈과 문서 화면을 다 그린다)
+  GET  /api/home · /api/doc?id=            할 일·최근 문서·작업 상태 · 문서 하나
+  POST /api/decision {items: [{target, kind, value, note}], confirm}   결정 — 전부 검사한 뒤에 쓴다
+  GET  /page.png?page_id=… 또는 ?doc=…&page=N (&w=폭)                쪽 그림 (원본에서, 방향을 알면 세워서)
+
+127.0.0.1 에만 바인딩한다 — 화면에 실제 이름과 차량번호가 보인다. 단일 스레드(SQLite 연결 하나 — serve 의 작업 스레드는 자기 연결).
 서버 로그에는 요청 경로와 상태 코드만 찍는다. 입력값과 이미지 내용은 찍지 않는다.
 POST 는 같은 브라우저에 열린 다른 페이지가 보낼 수 없게 Host·Origin(로컬 주소만)과 Content-Type(JSON)을 확인한다.
 """
@@ -51,13 +58,14 @@ class ReviewApp:
     """HTTP 와 무관한 처리부. 테스트에서는 서버 없이 바로 부를 수 있다."""
 
     def __init__(self, con: sqlite3.Connection, site, settings, reviewer: str, queue: str = "haul-numbers",
-                 queue_opts: dict | None = None):
+                 queue_opts: dict | None = None, ops=None):
         if not reviewer or not re.fullmatch(r"[A-Za-z0-9_.-]{1,32}", reviewer):
             raise ValueError("검수자 이름은 짧은 영문·숫자 식별자여야 합니다 (--reviewer)")
         if queue not in QUEUES:
             raise ValueError(f"알 수 없는 대기열 '{queue}' (가능: {QUEUES})")
         self.con, self.site, self.settings, self.reviewer = con, site, settings, reviewer
         self.queue, self.queue_opts = queue, dict(queue_opts or {})
+        self.ops = ops                     # 운영 화면 (review/ops.OpsApp) — serve 일 때만. 검수 화면에 "홈으로"가 생긴다
 
     def queue_json(self, params: dict) -> dict:
         opts = dict(self.queue_opts)
@@ -75,7 +83,8 @@ class ReviewApp:
         q.update(reviewer=self.reviewer, site=self.site.name, show_machine=(name == "pending"),
                  templates={t.name: t.title for t in self.site.templates.values()},
                  formats={f: {"chars": INPUT_CHARS[f], "hint": HINTS[f]} for f in FORMATS},
-                 dotted_clock=dotted_clock_rule())       # 점으로 쓴 시각의 규칙 — ask_dotted 칸에서 화면이 묻는다 (tasks/0006 4.8)
+                 dotted_clock=dotted_clock_rule(),       # 점으로 쓴 시각의 규칙 — ask_dotted 칸에서 화면이 묻는다 (tasks/0006 4.8)
+                 home=self.ops is not None)              # 운영 화면에서 왔다 — "홈으로" (tasks/0007 4.9)
         return q
 
     def crop_png(self, params: dict) -> tuple[bytes, str]:
@@ -186,6 +195,10 @@ def index_html() -> bytes:
     return (STATIC / "index.html").read_bytes()
 
 
+def home_html() -> bytes:
+    return (STATIC / "home.html").read_bytes()
+
+
 class _Handler(BaseHTTPRequestHandler):
     app: ReviewApp
     server_version = "minedocscan-review"
@@ -227,8 +240,19 @@ class _Handler(BaseHTTPRequestHandler):
         params = {k: v[0] for k, v in parse_qs(u.query).items()}
         try:
             self._check_local(need_json=False)
-            if u.path == "/":
+            ops = self.app.ops
+            if u.path == "/" and ops is not None and not params.get("name"):
+                self._send(200, home_html(), "text/html; charset=utf-8")
+            elif u.path == "/":
                 self._send(200, index_html(), "text/html; charset=utf-8")
+            elif ops is not None and u.path == "/doc":
+                self._send(200, home_html(), "text/html; charset=utf-8")
+            elif ops is not None and u.path == "/api/home":
+                self._json(200, ops.home_json())
+            elif ops is not None and u.path == "/api/doc":
+                self._json(200, ops.doc_json(params))
+            elif ops is not None and u.path == "/page.png":
+                self._send(200, ops.page_png(params), "image/png")
             elif u.path == "/api/queue":
                 self._json(200, self.app.queue_json(params))
             elif u.path == "/api/stats":
@@ -250,7 +274,10 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         try:
-            if u.path not in ("/api/review", "/api/reviews", "/api/check"):
+            posts = {"/api/review": self.app.post_review, "/api/reviews": self.app.post_reviews, "/api/check": self.app.post_check}
+            if self.app.ops is not None:
+                posts["/api/decision"] = self.app.ops.post_decision
+            if u.path not in posts:
                 raise ApiError(404, "없는 경로")
             self._check_local(need_json=True)
             try:
@@ -258,8 +285,7 @@ class _Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
             except (ValueError, UnicodeDecodeError) as e:
                 raise ApiError(400, "본문이 JSON 이 아닙니다") from e
-            post = {"/api/review": self.app.post_review, "/api/reviews": self.app.post_reviews, "/api/check": self.app.post_check}
-            self._json(200, post[u.path](body))
+            self._json(200, posts[u.path](body))
         except (BrokenPipeError, ConnectionResetError):
             return
         except ApiError as e:
@@ -279,8 +305,8 @@ def make_server(app: ReviewApp, host: str = "127.0.0.1", port: int = 8765) -> HT
 
 def serve(app: ReviewApp, host: str = "127.0.0.1", port: int = 8765) -> None:
     httpd = make_server(app, host, port)
-    print(f"검수 화면: http://{host}:{httpd.server_address[1]}/  (대기열 {app.queue}, 검수자 {app.reviewer}) — "
-          f"Ctrl+C 로 끝냅니다", file=sys.stderr)
+    what = "운영 화면" if app.ops is not None else f"검수 화면 (대기열 {app.queue})"
+    print(f"{what}: http://{host}:{httpd.server_address[1]}/  (검수자 {app.reviewer}) — Ctrl+C 로 끝냅니다", file=sys.stderr)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

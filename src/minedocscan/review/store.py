@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ..forms.formats import normalize, try_normalize
-from ..store.db import upsert
+from ..store.db import upsert, write_txn
 
 VERDICTS = ("value", "empty", "illegible")
 
@@ -152,8 +152,8 @@ def load(path: str | Path) -> tuple[list[tuple[int, Review]], int]:
 def import_into(con: sqlite3.Connection, path: str | Path) -> dict:
     """파일 → doc_review. 같은 review_id 는 덮어쓰므로 몇 번을 읽어도 행 수가 같다(멱등)."""
     reviews, skipped = load(path)
-    upsert(con, "doc_review", [r.db_row(seq) for seq, r in reviews])
-    con.commit()
+    with write_txn(con):
+        upsert(con, "doc_review", [r.db_row(seq) for seq, r in reviews])
     return {"path": str(path), "imported": len(reviews), "skipped": skipped}
 
 
@@ -261,7 +261,17 @@ def save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
     """검수 한 건을 저장한다: 파일 추가 → doc_review → doc_field → 핸들러의 on_review(업무 테이블·그 날짜의 교차검증)
     → 문서 상태. 파이프라인을 다시 돌리지 않아도 DB 가, 같은 파일로 처음부터 돌린 것과 같아진다 (불변식, 테스트로 고정).
     값은 그 칸의 형식으로 정규화해서 남긴다. 형식에 맞지 않으면 FormatError 이고 파일에 아무것도 쓰지 않는다.
+    읽는 것부터 쓰는 트랜잭션(BEGIN IMMEDIATE) 안에서 한다 — 작업 스레드가 같은 문서를 다시 처리하는 중이어도 그 사이에 끼지 않게
+    (tasks/0007 4.8). 문서 상태는 processed 와 needs_review 사이에서만 바뀐다 (received·needs_date·discarded·failed 는 그대로).
     """
+    with write_txn(con):
+        out = _save(con, site, settings, review)
+    if con.in_transaction:                                       # 부른 쪽이 열어 둔 트랜잭션도 지금처럼 커밋한다
+        con.commit()
+    return out
+
+
+def _save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
     from ..handlers import get_handler
     from ..pipeline.runner import update_document_status
 
@@ -294,7 +304,6 @@ def save(con: sqlite3.Connection, site, settings, review: Review) -> dict:
         handler.on_review(con, site, settings, review.field_id)
         update_document_status(con, row["document_id"])
         applied = True
-    con.commit()
     return {"review_id": review.review_id, "seq": seq, "path": str(path), "applied": applied}
 
 

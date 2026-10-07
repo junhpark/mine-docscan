@@ -30,7 +30,7 @@ import numpy as np
 from ..config import Settings
 from ..forms.template import Template, TemplateError
 from ..imaging import printlayer
-from ..imaging.align import MIN_INLIERS, align_to_template, warp_to_template
+from ..imaging.align import MIN_INLIERS, align_to_template, align_upright, warp_to_template
 from ..imaging.io import imread_gray, imwrite, load_page, resolve_source
 from ..review.export import inside_git_tree
 from ..store.db import SchemaVersionError, open_db_readonly
@@ -186,7 +186,8 @@ def page_image(r, tpl: Template, settings: Settings, ref_shape: tuple[int, ...])
         return None, "unreadable"
     if r["status"] == "loaded":
         return rewarp(gray, r["homography"], ref_shape), "rewarped"
-    ar = align_to_template(gray, tpl.reference, [], ref_features=tpl.features)   # 표가 없다 — 괘선 오차 없이 인라이어만
+    # 표가 없다 — 괘선 오차 없이 인라이어만. 돌아간 쪽은 세워서 다시 정합한다 (tasks/0007 4.4 — 파이프라인과 같은 함수)
+    ar, _rotation, _up = align_upright(gray, lambda g: align_to_template(g, tpl.reference, [], ref_features=tpl.features))
     if ar.n_inliers < MIN_INLIERS:
         return None, "few_inliers"
     return ar.warped, "aligned_now"

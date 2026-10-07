@@ -104,10 +104,12 @@ def hard_day(tmp_path_factory):
     return {"synth": synth, "root": root, "settings": settings, "pipe": pipe}
 
 
-def test_page_error_is_isolated_and_unknown_form_is_listed(hard_day, capsys):
+def test_page_error_is_isolated_and_blank_page_is_listed(hard_day, capsys):
+    """끼워 넣은 흰 종이는 양식을 못 찾고 어두운 화소가 없으므로 blank (tasks/0007 4.5 — 예전 기대는 unknown_form).
+    문서가 needs_review 인 것은 쪽 오류 때문이다 (blank 는 문서를 needs_review 로 만들지 않는다)."""
     con, settings, synth = hard_day["pipe"].con, hard_day["settings"], hard_day["synth"]
     pages = {r["page_no"]: r for r in list_pages(con)}
-    assert pages[1]["status"] == "unknown_form" and pages[3]["status"] == "error"
+    assert pages[1]["status"] == "blank" and pages[3]["status"] == "error"
     assert "RuntimeError" in pages[3]["error"] and "시험용" in pages[3]["error"]
     assert con.execute("SELECT COUNT(*) FROM doc_field WHERE page_id=?", (pages[3]["page_id"],)).fetchone()[0] == 0
     assert all(r["status"] == "loaded" for n, r in pages.items() if n not in (1, 3))
@@ -115,10 +117,12 @@ def test_page_error_is_isolated_and_unknown_form_is_listed(hard_day, capsys):
     assert con.execute("SELECT status FROM doc_document").fetchone()[0] == "needs_review"
     assert hard_day["pipe"].summary["page_errors"] and hard_day["pipe"].summary["pages"] == len(pages)
 
-    unknown = list_pages(con, status="unknown_form")
-    assert [r["page_no"] for r in unknown] == [1]
-    written = write_thumbs(settings, unknown)
-    assert len(written) == 1 and written[0].parent.name == "unknown_form" and written[0].exists()
+    assert list_pages(con, status="unknown_form") == []
+    blank = list_pages(con, status="blank")
+    assert [r["page_no"] for r in blank] == [1]
+    written = write_thumbs(settings, blank)
+    assert len(written) == 1 and written[0].parent.name == "blank" and written[0].exists()
+    assert written[0].name.endswith(f"-{blank[0]['document_id']}.png")         # 파일명이 겹쳐도 문서 ID 로 갈린다 (4.7)
     assert written[0].is_relative_to(settings.work_root)
     # 명령줄
     common = ["--site", str(synth.site), "--work-root", str(settings.work_root)]
@@ -126,8 +130,8 @@ def test_page_error_is_isolated_and_unknown_form_is_listed(hard_day, capsys):
     assert main(["pages", "--status", "error", "--json"] + common) == 0
     out = json.loads(capsys.readouterr().out)
     assert [r["page_no"] for r in out["pages"]] == [3]
-    assert main(["pages", "--status", "unknown_form", "--thumbs", str(hard_day["root"] / "th")] + common) == 0
-    assert "쪽 1개" in capsys.readouterr().out and (hard_day["root"] / "th" / "unknown_form").exists()
+    assert main(["pages", "--status", "blank", "--thumbs", str(hard_day["root"] / "th")] + common) == 0
+    assert "쪽 1개" in capsys.readouterr().out and (hard_day["root"] / "th" / "blank").exists()
     assert main(["report", "--by-month", "--json"] + common) == 0
     rows = json.loads(capsys.readouterr().out)["by_month"]
     assert sum(r["pages"] for r in rows) == len(pages) and sum(r["error"] for r in rows) == 1
@@ -168,8 +172,9 @@ def test_damaged_pdf_warn_policy(synth, tmp_path, capsys, monkeypatch):
 
     scans = tmp_path / "scans"
     scans.mkdir()
-    pdf = scans / "one_page.pdf"
-    with pymupdf.open(str(next(synth.scans.glob("*.pdf")))) as src, pymupdf.open() as one:   # 합성 문서의 첫 쪽만
+    first_scan = next(synth.scans.glob("*.pdf"))
+    pdf = scans / f"one_page_{first_scan.stem[-10:]}.pdf"             # 날짜가 있는 이름 — 없으면 needs_date (tasks/0007 4.2)
+    with pymupdf.open(str(first_scan)) as src, pymupdf.open() as one:   # 합성 문서의 첫 쪽만
         one.insert_pdf(src, from_page=0, to_page=0)
         one.save(str(pdf), no_new_id=True)
     pdf.write_bytes(pdf.read_bytes()[:-200])                         # 끝을 자른 PDF

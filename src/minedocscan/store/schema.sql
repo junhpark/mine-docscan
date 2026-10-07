@@ -22,12 +22,17 @@ CREATE TABLE IF NOT EXISTS doc_document (
   source_path     TEXT NOT NULL,
   source_rel      TEXT,                      -- archive_root 기준 상대경로 (다른 컴퓨터에서도 원본을 찾기 위해). 밖이면 NULL
   source_name     TEXT NOT NULL,             -- 확장자를 뺀 파일명 (라벨·날짜 규칙의 키)
-  work_date       TEXT,                      -- 파일명 규칙이나 라벨에서 얻은 문서 날짜
+  work_date       TEXT,                      -- 문서의 날짜: 문서의 결정 > 문서 라벨(ISO 날짜만) > 파일명 규칙 (tasks/0007 4.2). NULL 이면 needs_date
+  date_source     TEXT,                      -- 그 날짜의 출처: decision | label | filename | NULL(날짜 없음)
   n_pages         INTEGER,
-  status          TEXT NOT NULL,             -- received | processed | needs_review | failed (문서를 읽지 못함)
+  status          TEXT NOT NULL,             -- received(등록, 처리 전·처리 중) | needs_date(날짜를 기다린다) | processed | needs_review
+                                             -- | failed(문서를 읽지 못함) | discarded(사람이 버렸다) — tasks/0007 4.1
   error           TEXT,                      -- failed 일 때 예외 종류와 메시지. 셀 값은 적지 않는다
   warning         TEXT,                      -- 처리는 했지만 알아야 할 것 (예: damaged_pdf = warn 으로 복구해서 연 PDF)
-  created_at      TEXT NOT NULL
+  created_at      TEXT NOT NULL,
+  received_at     TEXT,                      -- 등록한 시각 (UTC). 다시 처리해도 바뀌지 않는다 — upsert 가 덮어쓰지 않는다 (insert_only)
+  work_requested  INTEGER NOT NULL DEFAULT 0,   -- 다시 처리해 달라는 요청 번호 (요청마다 +1). upsert 로 쓰지 않는다 — 전용 UPDATE 로만
+  work_done       INTEGER NOT NULL DEFAULT 0    -- 처리를 시작할 때 읽은 요청 번호 (끝날 때 적는다). 대기 = received 이거나 requested > done
 );
 
 CREATE TABLE IF NOT EXISTS doc_page (
@@ -44,10 +49,14 @@ CREATE TABLE IF NOT EXISTS doc_page (
   render_dpi      INTEGER,                   -- 그 호모그래피를 구할 때 쪽을 렌더링한 해상도 (이미지 파일이면 원본 그대로)
   print_sha       TEXT,                      -- 값 유무를 잰 인쇄 층의 해시 (Template.print_sha — 화소의 해시). 쓰지 않았으면 NULL (tasks/0006 4.3)
   variant_errs    TEXT,                      -- 동시 판마다의 괘선 오차 JSON {판 이름: 오차 | null}. 판이 하나면 NULL (tasks/0006 4.6)
+  rotation        INTEGER,                   -- 0 | 90 | 180 | 270: 시계 방향으로 그만큼 돌리면 바로 선다. 정합하지 않은 쪽은 NULL (tasks/0007 4.4)
+  duplicate_of    TEXT,                      -- duplicate 일 때 먼저 들어온 그 쪽 (외래 키 없음 — 가리키는 쪽이 먼저 지워질 수 있다, 4.6)
+  duplicate_sim   REAL,                      -- 그 쪽과의 손글씨 자리 유사도
   work_date       TEXT,
-  status          TEXT NOT NULL,             -- unknown_form | classified_only | align_failed | loaded | error
+  status          TEXT NOT NULL,             -- unknown_form | blank | classified_only | align_failed | duplicate | loaded | discarded | error
   error           TEXT                       -- error 일 때 예외 종류와 메시지. 그 쪽의 반쯤 쓰인 행은 남기지 않는다(SAVEPOINT)
 );
+CREATE INDEX IF NOT EXISTS ix_doc_page_document ON doc_page(document_id);
 
 CREATE TABLE IF NOT EXISTS doc_field (
   field_id        TEXT PRIMARY KEY,          -- page_id:region:field_name:row
@@ -122,6 +131,34 @@ CREATE TABLE IF NOT EXISTS doc_review (
 CREATE INDEX IF NOT EXISTS ix_doc_review_field ON doc_review(field_id);
 CREATE INDEX IF NOT EXISTS ix_doc_review_page ON doc_review(page_id);
 
+-- 문서·쪽에 대해 사람이 정한 것 (tasks/0007 4.3). 원본은 검수 파일 옆의 추가 전용 파일(decisions.jsonl)이고 이 테이블은 그 사본이다.
+-- 유효한 결정 = 대상·묶음(date / discard·restore / keep)마다 파일에서 가장 뒤의 것. 결정은 업무 테이블을 직접 고치지 않는다 —
+-- 그 문서의 다시 처리(work_requested)로 적용한다. 대상에 외래 키를 걸지 않는다: 파일을 읽어 들일 때 그 문서가 아직 없을 수 있다.
+CREATE TABLE IF NOT EXISTS doc_decision (
+  decision_id     TEXT PRIMARY KEY,
+  seq             INTEGER NOT NULL,          -- 파일에서의 줄 번호 (뒤의 것이 이긴다)
+  target          TEXT NOT NULL,             -- document_id 또는 page_id(document_id-pN)
+  document_id     TEXT NOT NULL,             -- 대상의 문서 (쪽이면 그 문서)
+  page_no         INTEGER,                   -- 쪽이면 쪽 번호, 문서면 NULL
+  kind            TEXT NOT NULL,             -- date | discard | restore | keep
+  value           TEXT,                      -- date 의 ISO 날짜
+  decided_by      TEXT NOT NULL,
+  decided_at      TEXT NOT NULL,             -- ISO 8601 UTC
+  note            TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_doc_decision_doc ON doc_decision(document_id);
+
+-- 다시 스캔한 쪽을 알아보는 서명 (tasks/0007 4.6): 적재된 쪽만. 정합 그림에서 인쇄를 지운 손글씨를 16 px 칸마다 센 것.
+-- 쪽마다 2만 자 안팎이라 doc_page 에 넣지 않는다.
+CREATE TABLE IF NOT EXISTS doc_page_sig (
+  page_id         TEXT PRIMARY KEY,
+  document_id     TEXT NOT NULL,
+  family          TEXT NOT NULL,             -- 템플릿의 family, 없으면 템플릿 이름 — 같은 계열 안에서만 비교한다
+  work_date       TEXT NOT NULL,             -- 같은 날 안에서만 비교한다
+  sig             TEXT NOT NULL              -- "높이x너비:" + 칸마다의 잉크 화소 수(uint8)의 base64 (imaging/signature.encode)
+);
+CREATE INDEX IF NOT EXISTS ix_doc_page_sig_day ON doc_page_sig(work_date, family);
+
 -- ── 마스터 ─────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS eq_equipment (
   equipment_id    TEXT PRIMARY KEY,          -- UUID (ISO 23725 EquipmentId). 같은 키는 항상 같은 UUID
@@ -157,10 +194,12 @@ CREATE TABLE IF NOT EXISTS insp_daily (
   abnormal        INTEGER,                   -- 1=유, 0=무, NULL=판정 불가
   remark          TEXT,
   entry_source    TEXT NOT NULL,             -- scan | manual
+  page_id         TEXT,                      -- 이 행을 만든 쪽 (scan). 같은 날 두 쪽이 같은 장비를 적으면 쪽의 순서가 뒤인 쪽 (tasks/0007 4.8)
   source_field_id TEXT REFERENCES doc_field(field_id),
   review_status   TEXT NOT NULL              -- auto | pending | reviewed
 );
 CREATE INDEX IF NOT EXISTS ix_insp_daily_date ON insp_daily(inspection_date);
+CREATE INDEX IF NOT EXISTS ix_insp_daily_page ON insp_daily(page_id);       -- 문서를 지우고 다시 만들 때 (tasks/0007 4.8)
 
 -- 운반 실적: 같은 (날짜, 차량, 광종, 편) 값이 차량별 일보와 편×차량 행렬 양쪽에서 들어온다
 CREATE TABLE IF NOT EXISTS prod_haul (
@@ -184,6 +223,7 @@ CREATE TABLE IF NOT EXISTS prod_haul (
   review_status   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_prod_haul_date ON prod_haul(work_date);
+CREATE INDEX IF NOT EXISTS ix_prod_haul_page ON prod_haul(page_id);
 
 -- 양식 간 교차검증: 같은 값이 두 문서에 적힌 경우의 일치 여부. 불일치는 검수 큐로 간다
 CREATE TABLE IF NOT EXISTS xcheck_haul (
@@ -285,3 +325,4 @@ CREATE TABLE IF NOT EXISTS xcheck_usage (
 );
 CREATE INDEX IF NOT EXISTS ix_xcheck_usage_ref ON xcheck_usage(equipment_ref);
 CREATE INDEX IF NOT EXISTS ix_xcheck_usage_result ON xcheck_usage(result);
+CREATE INDEX IF NOT EXISTS ix_xcheck_usage_page ON xcheck_usage(page_id);

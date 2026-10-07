@@ -105,8 +105,10 @@ class HaulHandler(FormHandler):
             **haul_values(frow), "source_field_id": fid,
         }
 
-    def finalize(self, con, site, settings) -> dict:
-        return {"xcheck_haul": crosscheck_haul(con, exclude_materials=self._exclude(site))}
+    def finalize(self, con, site, settings, dates=None, equipment=None) -> dict:
+        """그 날짜들의 교차검증·배차 관측 (None 이면 전부). 행이 남지 않은 날짜의 것은 지워진다."""
+        counts = crosscheck_haul(con, exclude_materials=self._exclude(site), dates=None if dates is None else sorted(dates))
+        return {"xcheck_haul": counts} if dates is None else {}
 
     def machine_final(self, row: dict) -> str | None:
         if row["region"] == "fields":                        # 표 밖 자유 필드: 기계 값 그대로 (운반 횟수가 아니다)

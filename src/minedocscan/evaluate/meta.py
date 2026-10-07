@@ -16,10 +16,9 @@ from __future__ import annotations
 import sqlite3
 from collections import Counter
 
-from ..validate.crosscheck import assign_slots
+from ..pagemeta import HUMAN_SOURCES as HUMAN  # 사람의 출처 목록은 한 곳 (tasks/0007 4.2)
+from ..validate.crosscheck import assign_slots, haul_rows
 from .stats import rate_with_ci
-
-HUMAN = ("review", "label", "filename")
 
 
 def evaluate_meta(con: sqlite3.Connection, split: str = "all", site=None) -> dict:
@@ -86,7 +85,7 @@ def slot_agreement(con: sqlite3.Connection, split: str = "all", site=None) -> di
     for (date,) in con.execute("SELECT DISTINCT work_date FROM prod_haul WHERE work_date IS NOT NULL ORDER BY 1").fetchall():
         if split != "all" and site.split_of(date) != split:
             continue
-        rows = con.execute("SELECT * FROM prod_haul WHERE work_date = ?", (date,)).fetchall()
+        rows = haul_rows(con, date)                         # 교차검증과 같은 순서 (tasks/0007 4.8)
         slots: dict = {}
         for r in rows:
             if r["source_role"] == "matrix":

@@ -1,10 +1,11 @@
 """쪽 메타 — 날짜·차량번호·작성자 … 의 값이 어디서 왔는가 (tasks/0004 4.3, 4.4, 원칙 3).
 
 우선순위: 검수값 > 페이지 라벨 > 문서 라벨 > 파일명 규칙 > 기계가 읽은 값(자동 적재 기준을 넘은 것만).
+날짜는 결정 기록이 맨 앞이다: 쪽의 결정 > 문서의 결정 > 라벨(쪽 > 문서) > 파일명 규칙 (tasks/0007 4.2 — page_date 하나가 정한다).
 
   · 위에 값이 없으면 기계 값이 그 자리를 채운다. 기준을 못 넘었거나 목록에 없는 값이면 비어 있고 page-fields 대기열에 나온다.
   · 위에 값이 있으면 기계 값은 **대조에만** 쓴다(check_result). 다르면 다르다고 표시할 뿐 고치지 않는다 (ADR 0006).
-  · 날짜는 언제나 파일명·라벨에서 온다. 날짜의 부분(date.month, date.day)의 값은 그 날짜에서 나오고, 기계가 읽은 월·일은
+  · 날짜는 언제나 결정·라벨·파일명에서 온다. 날짜의 부분(date.month, date.day)의 값은 그 날짜에서 나오고, 기계가 읽은 월·일은
     대조만 된다 — 읽은 부분이 **전부** 기준을 넘었는데 쪽의 날짜와 다르면 mismatch. 날짜를 읽은 값으로 정하지 않는다.
 
 결과는 doc_page_meta 에 쪽 × 키마다 한 행으로 남는다. 기계 열(machine_*)은 파이프라인이 읽을 때만 정해지고 검수가 건드리지
@@ -20,12 +21,15 @@ import sqlite3
 from dataclasses import dataclass
 
 from .forms.template import DATE_PARTS, Template
+from .intake.dates import iso_date
 from .review.store import meta_from_reviews
 from .store.db import upsert
 
 ISO_DATE = re.compile(r"^(?P<y>\d{4})-(?P<m>\d{2})-(?P<d>\d{2})$")
 
-HUMAN_SOURCES = ("review", "label", "filename")
+# 사람(과 파일명)에서 온 값의 출처 — 이 목록 하나를 가져다 쓴다 (review/queue.py, review/export.py, evaluate/meta.py).
+# decision: 결정 기록으로 정한 날짜 (tasks/0007 4.2). 그 쪽의 date.month·date.day 도 이 출처가 된다
+HUMAN_SOURCES = ("review", "decision", "label", "filename")
 MACHINE_STATUSES = ("auto", "pending", "unlisted", "empty")
 CHECKS = ("match", "mismatch", "unread", "none")
 
@@ -50,18 +54,46 @@ def _clean(v) -> str | None:
     return s or None
 
 
+def page_date(site, source_name: str, page_no: int, decided: str | None = None) -> tuple[str | None, str | None]:
+    """쪽의 날짜와 그 출처 (tasks/0007 4.2) — 분류의 후보, doc_page.work_date, doc_page_meta 의 date 가 다 이것 하나를 쓴다.
+    순서: 결정(decided — 쪽의 결정 > 문서의 결정, intake.decisions.DocDecisions.page_date) > 쪽 라벨 > 문서 라벨 > 파일명 규칙.
+    라벨의 값은 지금처럼 다듬어(_clean) 그대로 쓴다 — ISO 가 아닌 라벨 날짜면 쪽 메타가 월·일을 대조하지 않는다 (human_values)."""
+    if decided:
+        return decided, "decision"
+    for lab in (site.labels.get(f"{source_name}#{page_no}", {}), site.labels.get(source_name, {})):
+        v = _clean(lab.get("date"))
+        if v is not None:
+            return v, "label"
+    d = site.date_from_filename(source_name)
+    return (d, "filename") if d else (None, None)
+
+
+def document_date(site, source_name: str, decided: str | None = None) -> tuple[str | None, str | None]:
+    """문서의 날짜와 그 출처 (tasks/0007 4.2): 문서의 결정 > 문서 라벨 > 파일명 규칙 — 달력에 있는 ISO 날짜만 친다 (ISO 가
+    아닌 라벨, 달력에 없는 파일명 날짜는 날짜가 아니다). 없으면 (None, None) — 그 문서는 needs_date 로 기다린다.
+    쪽의 날짜만 있는 문서도 기다린다 (쪽 라벨·쪽의 결정은 문서의 날짜가 아니다)."""
+    if decided and iso_date(decided):
+        return decided, "decision"
+    v = iso_date(_clean(site.labels.get(source_name, {}).get("date")))
+    if v:
+        return v, "label"
+    v = iso_date(site.date_from_filename(source_name))
+    return (v, "filename") if v else (None, None)
+
+
 def human_values(con: sqlite3.Connection, site, source_name: str, page_no: int, page_id: str,
-                 template: Template | None) -> dict[str, tuple[str, str]]:
-    """사람·파일명에서 온 값: {키: (값, 출처)}. 출처는 review | label | filename. 날짜의 부분은 날짜에서 만든다.
+                 template: Template | None, decided: str | None = None) -> dict[str, tuple[str, str]]:
+    """사람·파일명에서 온 값: {키: (값, 출처)}. 출처는 review | decision | label | filename. 날짜의 부분은 날짜에서 만든다.
+    decided: 결정 기록으로 정한 그 쪽의 날짜 (쪽의 결정 > 문서의 결정) — 날짜는 page_date 의 순서.
     검수에서 빈 칸이면 (None, "review") — 라벨의 값을 지우고, 기계 값이 그 자리를 채우지도 못한다 (사람의 답이 이긴다)."""
     out: dict[str, tuple[str, str]] = {}
-    d = site.date_from_filename(source_name)
-    if d:
-        out["date"] = (d, "filename")
     for lab in (site.labels.get(source_name, {}), site.labels.get(f"{source_name}#{page_no}", {})):
         for k, v in lab.items():
-            if _clean(v) is not None:
+            if _clean(v) is not None and k != "date":
                 out[k] = (_clean(v), "label")
+    d, src = page_date(site, source_name, page_no, decided)
+    if d is not None:
+        out["date"] = (d, src)
     if template is not None:
         for k, v in meta_from_reviews(con, page_id, template).items():
             if v is None:                                   # 검수에서 빈 칸: 라벨의 값을 지우고 기계 값도 막는다
@@ -159,12 +191,15 @@ def machine_of(con: sqlite3.Connection, page_id: str) -> dict[str, MachineRead]:
 
 def refresh_page(con: sqlite3.Connection, site, page_id: str) -> dict | None:
     """검수를 저장한 직후: 기계 열은 그대로 두고 최종 값·출처·대조를 다시 계산해 적는다. 돌려주는 값: 최종 메타."""
+    from .intake.decisions import decided_date
+
     pg = con.execute("SELECT p.page_no, p.template_name, d.source_name FROM doc_page p JOIN doc_document d "
                      "ON p.document_id = d.document_id WHERE p.page_id = ?", (page_id,)).fetchone()
     if pg is None:
         return None
     tpl = site.templates.get(pg["template_name"]) if pg["template_name"] else None
-    human = human_values(con, site, pg["source_name"], pg["page_no"], page_id, tpl)
+    # 결정으로 정한 날짜를 잊지 않는다 (tasks/0007 4.2) — 차량번호를 검수한 뒤에도 그 쪽의 날짜는 결정의 것
+    human = human_values(con, site, pg["source_name"], pg["page_no"], page_id, tpl, decided_date(con, page_id))
     rows = resolve(page_id, tpl, human, machine_of(con, page_id))
     write(con, page_id, rows)
     return final_meta(rows)

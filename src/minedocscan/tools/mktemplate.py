@@ -32,6 +32,7 @@ from pathlib import Path
 import yaml
 
 from ..forms.template import METER_SLOTS, ROLES, Template, TemplateError
+from ..imaging.align import rotate_upright
 from ..imaging.grid import detect_grid, detect_grid_roi
 from ..imaging.io import imwrite, load_pages
 from ..review.export import inside_git_tree
@@ -41,7 +42,9 @@ NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 
 def init_template(image: str | Path, name: str, templates_dir: str | Path, roi: tuple[int, int, int, int] | None = None,
                   header_rows: int = 1, page: int = 1, dpi: int = 200, handler: str = "generic",
-                  title: str | None = None, overwrite: bool = False) -> Path:
+                  title: str | None = None, overwrite: bool = False, rotate: int = 0) -> Path:
+    """rotate: 기준 이미지를 시계 방향으로 이만큼 돌려 세운다 (돌아간 스캔으로 템플릿을 만들 때 — tasks/0007 4.4).
+    파이프라인은 쪽을 이 기준 이미지의 방향으로 세운다. roi 는 세운 그림의 좌표다."""
     gray = None
     for no, g in load_pages(image, dpi):
         if no == page:
@@ -49,6 +52,7 @@ def init_template(image: str | Path, name: str, templates_dir: str | Path, roi: 
             break
     if gray is None:
         raise ValueError(f"{image} 에 {page} 페이지가 없습니다")
+    gray = rotate_upright(gray, rotate)
     if roi:
         ys, xs = detect_grid_roi(gray, roi)
     else:

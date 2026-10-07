@@ -15,30 +15,55 @@
 
 판정(status)은 최종 값(검수가 있으면 검수값)으로 한다. 기계가 읽은 횟수(trips_raw)의 합은 log_trips_raw,
 matrix_trips_raw 에 같이 적어 인식기끼리 비교하는 일치율의 재료로 쓴다 (report.py).
-dates 를 주면 그 날짜만 다시 계산한다 — 검수를 저장한 직후에 쓴다.
+dates 를 주면 그 날짜만 다시 계산한다 — 검수를 저장한 직후, 문서를 다시 처리한 직후(그 문서가 있던 날짜와 있는 날짜). 행이 하나도
+남지 않은 날짜의 교차검증·배차 관측은 지워진다.
+
+순서에 기대지 않는다 (tasks/0007 4.8): 자리 배정은 먼저 나온 쪽에 자리를 주므로, 그날의 행을 쪽의 순서(문서의 순서, 쪽 번호 —
+store/order.py)로, 한 쪽 안에서는 필드의 자리(doc_field.row_no, x0)로 읽는다. 행이 들어간 순서(rowid)가 아니다 — 문서를 다시
+처리하면 그 문서의 행이 맨 뒤로 간다. 커밋은 부른 쪽이 한다 (쪽·문서·검수 저장의 단위를 가운데에서 끊지 않는다).
 """
 from __future__ import annotations
 
 import sqlite3
 
 from ..store.db import upsert
+from ..store.order import document_key
 
 
 def crosscheck_haul(con: sqlite3.Connection, exclude_materials: list[str] | None = None,
                     dates: list[str] | None = None) -> dict:
+    """dates=None 이면 전부: 운반 행이 있는 날짜와, 교차검증·배차 관측만 남은 날짜(그 날짜의 쪽이 다 지워졌다 — 지운다)."""
     exclude = set(exclude_materials or [])
     if dates is None:
-        dates = [r[0] for r in con.execute("SELECT DISTINCT work_date FROM prod_haul WHERE work_date IS NOT NULL ORDER BY 1")]
+        dates = sorted({r[0] for t in ("prod_haul", "xcheck_haul", "eq_assignment_obs")
+                        for r in con.execute(f"SELECT DISTINCT work_date FROM {t} WHERE work_date IS NOT NULL")})
     totals: dict[str, int] = {}
-    for date in dates:
+    for date in sorted(set(d for d in dates if d)):
         for k, v in _crosscheck_date(con, date, exclude).items():
             totals[k] = totals.get(k, 0) + v
-    con.commit()
     return totals
 
 
+def haul_rows(con: sqlite3.Connection, date: str) -> list:
+    """그날의 prod_haul 행 — 쪽의 순서(문서의 순서, 쪽 번호), 한 쪽 안에서는 필드의 자리(row_no, x0), 마지막으로 haul_id.
+    문서·쪽·필드 행이 없는 행(교차검증만 따로 시험할 때)은 쪽 ID 의 순서로 뒤에. 교차검증과 eval --meta 가 같이 쓴다."""
+    rows = con.execute(
+        "SELECT h.*, p.page_no AS o_page_no, d.document_id AS o_document_id, d.source_rel AS o_source_rel, "
+        "d.source_path AS o_source_path, f.row_no AS o_row_no, f.x0 AS o_x0 FROM prod_haul h "
+        "LEFT JOIN doc_page p ON h.page_id = p.page_id LEFT JOIN doc_document d ON p.document_id = d.document_id "
+        "LEFT JOIN doc_field f ON f.field_id = h.source_field_id WHERE h.work_date = ?", (date,)).fetchall()
+
+    def key(r):
+        doc = ((0, document_key(r["o_source_rel"], r["o_source_path"], r["o_document_id"]))
+               if r["o_document_id"] is not None else (1, r["page_id"]))
+        return (doc, r["o_page_no"] or 0, r["page_id"], -1 if r["o_row_no"] is None else r["o_row_no"], r["o_x0"] or 0,
+                r["haul_id"])
+
+    return sorted(rows, key=key)
+
+
 def _crosscheck_date(con: sqlite3.Connection, date: str, exclude: set[str]) -> dict:
-    rows = con.execute("SELECT * FROM prod_haul WHERE work_date=?", (date,)).fetchall()
+    rows = haul_rows(con, date)
     matrix = [r for r in rows if r["source_role"] == "matrix" and r["material"] not in exclude]
     log = [r for r in rows if r["source_role"] == "log" and r["material"] not in exclude]
 

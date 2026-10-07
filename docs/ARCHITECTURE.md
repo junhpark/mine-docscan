@@ -26,7 +26,8 @@
 
 ```mermaid
 flowchart LR
-  A[스캔 PDF·이미지<br/>ARCHIVE_ROOT] --> B[ingest<br/>해시·페이지 분리]
+  IN[접수 폴더<br/>INBOX] -.watch·serve.-> A
+  A[스캔 PDF·이미지<br/>ARCHIVE_ROOT] --> B[등록<br/>해시·쪽 수·날짜]
   B --> C[classify<br/>어느 양식인가<br/>동시 판은 한 후보]
   C --> D[align<br/>기준 이미지에 정합<br/>동시 판이면 판마다]
   D --> E[extract<br/>셀 크롭·잉크·체크·덩어리<br/>인쇄 층을 뺀 값 유무]
@@ -43,14 +44,16 @@ flowchart LR
 
 | 단계 | 모듈 | 하는 일 | 모델 필요 |
 |---|---|---|---|
-| ingest | `pipeline/runner.py`, `imaging/io.py` | 파일 SHA-256 으로 문서 등록(중복 차단), PDF 를 200 dpi 회색조로 렌더링 | 아니오 |
+| 접수 | `intake/inbox.py`, `intake/worker.py` | 스캐너의 저장 폴더(접수 폴더)에서 다 쓰인 파일만 보관 폴더의 `intake/` 로 복사하고 해시를 다시 확인해 등록한 뒤 치운다 (아래 "등록과 처리") | 아니오 |
+| 등록 | `pipeline/runner.py`, `imaging/io.py` | 파일 SHA-256 으로 문서 등록(중복 차단), 쪽 수, 날짜(결정 > 라벨 > 파일명 — 없으면 `needs_date`). 처리할 때 PDF 를 200 dpi 회색조로 렌더링 | 아니오 |
 | classify | `forms/classify.py` | 각 템플릿 기준 이미지와 ORB 정합을 시도해 인라이어가 가장 많은 양식을 고른다. 1위/2위 비율이 낮으면 표시. 그날의 동시 판 묶음은 한 후보다 (§5) | 아니오 |
-| align | `imaging/align.py` | ORB → 비율 검정 → RANSAC 호모그래피. 정합 뒤 표마다 괘선을 다시 검출해 템플릿과의 오차(px, 중앙값)를 잰다. 기준 미달이면 `align_failed`. 동시 판의 묶음이면 판마다 정합해 괘선 오차로 하나를 고른다 (`pipeline/runner.py`, §5) | 아니오 |
+| align | `imaging/align.py` | ORB → 비율 검정 → RANSAC 호모그래피. 호모그래피의 회전각이 90° 단위로 0 이 아니면 쪽을 정확히 세워 다시 정합한다(`align_upright`). 정합 뒤 표마다 괘선을 다시 검출해 템플릿과의 오차(px, 중앙값)를 잰다. 기준 미달이면 `align_failed`. 동시 판의 묶음이면 판마다 정합해 괘선 오차로 하나를 고른다 (`pipeline/runner.py`, §5) | 아니오 |
 | extract | `imaging/cells.py`, `marks.py`, `blobs.py` | 셀 크롭과 잉크 비율, ✓ 판정, 괘선 제거 + RLSA 로 글씨 덩어리를 셀에 배정(여러 칸에 걸친 메모 구분). 템플릿에 인쇄 층이 있으면 role 표의 형식 있는 칸은 인쇄를 뺀 이진 그림으로 잰다 (§5) | 아니오 |
 | recognize | `recognize/` | 셀 크롭 + 문맥 → 텍스트·신뢰도·후보. 쪽 메타가 되는 표 밖 필드(`meta_key`)는 먼저, 메타 필드 모델로 (§8) | **예 (플러그인)** |
 | correct | `correct/` | 후보(문구 DB, 마스터)에서 고르거나 편집거리 제한 안에서만 수정 | 선택 (플러그인) |
 | validate + load | `handlers/` | 양식의 의미를 적용해 `doc_field` 와 업무 테이블에 적재, 행 단위 검수 여부 결정 | 아니오 |
-| finalize | `validate/crosscheck.py` | 모든 문서를 처리한 뒤 양식 간 교차검증, 그날의 실제 배차 관측 | 아니오 |
+| 다시 스캔 | `imaging/signature.py`, `pipeline/runner.py` | 적재 전에 손글씨 자리의 서명을 같은 날·같은 계열의 앞 순서 적재된 쪽과 견준다. 0.80 이상이면 붙잡는다 (`duplicate`) | 아니오 |
+| finalize | `validate/crosscheck.py` | 문서를 처리할 때마다 그 문서가 있던 날짜·장비에 대해 양식 간 교차검증, 그날의 실제 배차 관측, 계기 검산 | 아니오 |
 
 인식 백엔드가 없어도(`null`) 나머지는 전부 돈다. 이때 손글씨 셀은 "값이 있다"는 사실만 기록되고 검수 대기로 간다.
 값의 유무만으로도 교차검증이 가능하다(어느 칸에 적었는지가 두 양식에서 같아야 한다).
@@ -58,13 +61,58 @@ flowchart LR
 ### 실행기가 아는 것과 모르는 것
 
 `pipeline/runner.py` 는 단계 순서와 상태 기록만 안다. 양식의 기하는 템플릿이, 의미는 핸들러가, 글자는 인식 백엔드가 안다.
-같은 파일을 다시 넣으면 같은 키로 덮어쓰므로(멱등), 인식기를 바꾼 뒤 그대로 다시 돌리면 된다.
+문서를 다시 처리하면 그 문서가 만든 행을 지우고 다시 만들므로(멱등), 인식기를 바꾼 뒤 그대로 다시 돌리면 된다.
+
+### 등록과 처리 (tasks/0007, ADR 0019)
+
+- **등록** = 파일을 한 번 열어 해시와 쪽 수를 적는다. 열리지 않으면(쓰레기 바이트, 쪽이 없는 PDF, 손상 방침에 걸린 PDF, 여러 쪽 TIFF)
+  날짜와 상관없이 `failed`. **처리**(`Pipeline.process_document`) = 그 문서의 쪽을 분류·정합·적재. `process_file(path)` 는 "등록하고 바로 처리".
+- **문서의 날짜**는 문서의 결정 > 문서 라벨(ISO 날짜만) > 파일명 규칙(원래 파일명에). 없으면 `needs_date` — 쪽·필드·업무 행 없이 기다린다.
+  **쪽의 날짜**는 쪽의 결정 > 문서의 결정 > 쪽 라벨 > 문서 라벨 > 파일명 — `pagemeta.page_date` 한 곳 (분류 후보, `doc_page.work_date`,
+  `doc_page_meta` 의 `date`, 핸들러의 `ctx.work_date` 가 같이 쓴다). 날짜가 없는 쪽은 핸들러에 넘기지 않는다 — 업무 테이블에 날짜 없는 행이 없다.
+- **다시 처리 대기는 상태가 아니라 요청 번호**다: `work_requested`(결정을 저장할 때, 앞 문서가 바뀌었을 때 +1) > `work_done`(처리를 시작할 때
+  읽은 번호를 끝날 때 적는다). 처리하는 도중에 온 요청은 남아서 다음 바퀴에 처리된다. 대기 중인 문서는 문서의 순서대로 처리한다.
+- **처리 = 지우고 다시 만들기**: 원본을 찾는다(닿지 않으면 건드리지 않고 다음 바퀴) → 그 문서가 만든 행을 자식부터 지운다
+  (`store.db.PAGE_TABLES` — 업무 행, `doc_page_sig`, `doc_page_meta`, `doc_field`, `doc_page`; 검수·결정은 남는다)과 같은 트랜잭션에서
+  그 문서가 있던 날짜·장비를 다시 계산 → 버린 문서면 `discarded`, 날짜가 없으면 `needs_date` → 쪽마다 결정·분류·정합·빈 쪽·다시 스캔·핸들러
+  → 지금 날짜·장비를 다시 계산(등록된 핸들러 전부의 `finalize(…, dates, equipment)`)하고 상태와 `work_done`. 문서를 읽다 실패하면 그 문서의 행을
+  지우고 `failed`.
+- **쪽마다 커밋한다** (`store.db.write_txn` — `BEGIN IMMEDIATE`, WAL, busy timeout 30초). 화면의 저장은 쪽 하나만큼(1–2초) 기다린다.
+  끊기면 그 문서는 `received` 로 남아 다시 처리된다.
+- **순서에 기대지 않는다** (`store/order.py`): 문서의 순서 = (접수한 문서는 뒤, 보관 경로를 `/` 로 나눈 성분들, 문서 ID) — 파이썬에서 견준다
+  (SQL 의 `ORDER BY` 는 DB 마다 글자 순서가 다르다). 쪽의 순서 = (문서의 순서, 쪽 번호). 교차검증의 자리 배정은 쪽의 순서와 필드의 자리로 읽고,
+  계기의 연속성은 쪽 ID 까지 견주고, 같은 날의 점검 행(`insp_daily` — 날짜:장비)은 쪽의 순서가 뒤인 쪽이 이긴다 (적재·지우기·검수 모두).
+- **불변식**: 문서를 몇 번을 어떤 순서로 다시 처리하든 지금의 DB = 같은 파일·같은 검수·같은 결정으로 처음부터 만든 DB
+  (시각·요청 번호·경로·`eq_equipment` 를 빼고). `tests/test_review_store.py` 의 흔들기(`-m slow`)가 고정한다.
+- **결정 기록**(`intake/decisions.py`): 사람이 문서·쪽에 대해 정한 것(`date` · `discard`·`restore` · `keep`)은 검수 파일 옆의 추가 전용
+  `decisions.jsonl` 이 원본이고 `doc_decision` 은 사본이다. 유효한 결정은 대상마다·묶음마다 가장 뒤의 것. 저장 = 전부 검사 → 파일에 한 줄 →
+  `doc_decision` → 그 문서의 요청 번호 +1. 결정은 업무 테이블을 직접 고치지 않는다 — 적용하는 곳은 처리 하나다. 파이프라인은 시작할 때 파일을
+  쓰는 트랜잭션 안에서 읽어 들이고, 유효한 결정이 바뀐 문서에 다시 처리를 요청한다. `regress` 도 결정은 읽는다 (검수는 읽지 않는다).
+- **파이프라인은 한 번에 하나** (`pipeline/lock.py`): DB 옆의 `pipeline.lock` 에 배타 트랜잭션 — 죽은 프로세스의 잠금이 남지 않는다.
+  `run`·`watch`·`serve` 의 작업 스레드가 잡는다. 결정·검수의 저장은 잠금과 상관없다.
+
+### 쪽의 방향, 빈 쪽, 다시 스캔한 쪽 (tasks/0007, ADR 0020)
+
+- **방향**: 첫 정합의 인라이어가 `MIN_INLIERS` 이상이면 호모그래피의 회전각을 90° 단위로 반올림해, 0 이 아니면 쪽을 `np.rot90` 으로 정확히
+  세우고 다시 정합한다 (`imaging/align.align_upright`). 쓰는 것은 세운 쪽의 결과다. 정확히 돌린 쪽의 결과는 바로 선 쪽과 같다 (무손실 그림에서
+  `doc_field` 의 기계 값·업무 테이블까지). `doc_page.rotation`(0·90·180·270 — 시계 방향으로 그만큼 돌리면 선다). `doc_page.homography` 는 그대로
+  "렌더링한 원래 쪽 → 템플릿"이다 (세우는 회전을 합성해 적는다) — 원본 해상도 크롭과 인쇄 층의 다시 펴기는 방향을 몰라도 돈다. 바로 선 쪽은 정합을
+  지금과 같은 횟수만 한다. 동시 판은 세운 쪽으로 판을 다시 고른다. `template print-layer`·`preview --scan`·`variant` 도 같은 방법, `template init --rotate`.
+- **빈 쪽**: 양식을 못 찾은 쪽 중 어두운 화소(`binarize` → 2 × 2 열기)의 비율이 `blank_max_ink`(0.02) 미만이면 `blank`. 문서를
+  `needs_review` 로 만들지 않는다. 양식을 찾은 쪽은 아무리 옅어도 빈 쪽이 아니다.
+- **다시 스캔한 쪽**: 서명 = 정합 그림 → `binarize` → 인쇄(인쇄 층, 없으면 기준 이미지의 마스크)와 표 밖 필드를 0 → 2 × 2 열기 →
+  16 px 칸마다 잉크 화소의 수 (`imaging/signature.py`, `Template.signature_mask`). 같은 날짜·같은 계열(`family`, 없으면 템플릿 이름)의
+  **자기보다 앞 순서인 적재된 쪽** 중 가장 비슷한 것과의 코사인이 `dup_min_sim`(0.80) 이상이면 `duplicate`(필드·업무 행 없음, `duplicate_of`·
+  `duplicate_sim`, 문서는 `needs_review`). `keep` 이 있으면 견주지 않는다. 문서를 처리한 뒤 뒤 순서의 문서에 다시 처리를 요청한다
+  (① 그 날짜·계열에 붙잡힌 쪽이 있는 문서, ② 서명이 기준 이상인 적재된 쪽이 있는 문서) — 결과가 처리한 순서와 상관없다.
+  사람이 셋 중 하나를 정한다: 뒤쪽 `discard` / 앞쪽 `discard` / 두 쪽 `keep`. 기계가 스스로 버리거나 합치지 않는다.
 
 ### 상태
 
 ```
-doc_document.status : received → processed | needs_review | failed
-doc_page.status     : unknown_form | classified_only | align_failed | loaded | error
+doc_document.status : received → processed | needs_review | needs_date | discarded | failed
+                      (다시 처리 대기 = received 이거나 work_requested > work_done — 옛 상태와 옛 행을 그대로 가진 채 기다린다)
+doc_page.status     : unknown_form | blank | classified_only | align_failed | duplicate | discarded | loaded | error
 doc_field.review_status / 업무 행 review_status : auto | pending → reviewed
 ```
 
@@ -74,9 +122,13 @@ doc_field.review_status / 업무 행 review_status : auto | pending → reviewed
   그 위에서 표를 잡는다 (§5).
 - `align_failed` — 정합 품질 미달. 값을 뽑지 않고 검수로 보낸다(잘못된 좌표에서 뽑은 값은 없는 것보다 나쁘다).
   동시 판의 묶음이면 통과한 판이 하나도 없을 때다.
-- `failed` / `error` — 문서를 읽지 못했거나(문서, 롤백) 쪽 하나에서 예외가 났다(쪽, `SAVEPOINT` 로 그 쪽의 행만 되돌림). `error` 컬럼에 예외 종류와
+- `needs_date` — 날짜를 얻지 못한 문서. 쪽 행이 없다. 사람이 날짜를 정하면(`doc date`, 화면) 다시 처리된다. `run` 의 종료 코드는 0 이다.
+- `discarded` — 사람이 버린 문서·쪽. 쪽은 상태만 남는다. `restore` 로 되살린다.
+- `blank` · `duplicate` — 빈 쪽, 다시 스캔한 것으로 붙잡힌 쪽 (위). `blank` 는 문서를 `needs_review` 로 만들지 않는다.
+- `failed` / `error` — 문서를 읽지 못했거나(문서, 그 문서의 행을 지운다) 쪽 하나에서 예외가 났다(쪽, `SAVEPOINT` 로 그 쪽의 행만 되돌림). `error` 컬럼에 예외 종류와
   메시지만 남는다. 한 문서의 실패가 전체를 멈추지 않고, 숨기지도 않는다: 요약에 목록이 나오고 종료 코드는 1 이다. `run --strict` 는 첫 오류에서 멈춘다.
-  `run --skip-existing` 은 끝까지 처리된 같은 해시의 문서만 건너뛰고 `failed` 는 다시 한다 — 템플릿이나 인식기를 바꾼 뒤에는 쓰지 않는다.
+  `run --skip-existing` 은 끝까지 처리된 같은 해시의 문서(`processed`·`needs_review` — 쪽 오류 없음, 대기 중 아님)와 `discarded` 만 건너뛰고,
+  `needs_date` 는 날짜만 다시 보고, `failed` 는 다시 한다 — 템플릿이나 인식기를 바꾼 뒤에는 쓰지 않는다.
 - `reviewed` — 사람이 종이를 보고 값을 확정했다(`value`) 또는 빈 칸임을 확정했다(`empty`). 읽을 수 없다고 표시한 셀(`illegible`)은
   `pending` 으로 남고 대기열과 정답에서 빠진다. 업무 행은 구성 필드 중 하나라도 `pending` 이면 `pending`, 아니고 하나라도 `reviewed` 면
   `reviewed`, 아니면 `auto` 다. 검수 흐름은 §7.1.
@@ -84,8 +136,9 @@ doc_field.review_status / 업무 행 review_status : auto | pending → reviewed
 ## 4. 계층과 데이터 위치
 
 ```
-ARCHIVE_ROOT   스캔 원본. 읽기 전용으로 취급 (공유 드라이브·NAS)
-SITE PACK      현장별 양식 정의(기준 이미지·인쇄 층)·옵션·라벨·회귀 기준. 저장소 밖 (개인정보 포함)
+INBOX          스캐너 프로그램의 저장 폴더 (접수 폴더). 다 쓰인 파일을 보관 폴더로 옮긴 뒤 치운다. 같은 바이트는 _already/, 읽을 수 없는 것은 _failed/
+ARCHIVE_ROOT   스캔 원본 (공유 드라이브·NAS). intake/<해-달>/<받은 시각>-<문서 ID>/ 아래에만 쓴다 — 그 밖은 읽기만 한다
+SITE PACK      현장별 양식 정의(기준 이미지·인쇄 층)·옵션·라벨·회귀 기준, 검수·결정 기록(reviews/). 저장소 밖 (개인정보 포함)
 WORK_ROOT      정합 이미지, SQLite DB, 리포트. 로컬 디스크. 언제든 다시 만들 수 있다
 DB             운영에서는 PostgreSQL (예정). 지금은 WORK_ROOT 의 SQLite
 저장소          코드, 문서, 합성 데이터 생성기. 현장에 관한 것은 없다
@@ -289,6 +342,8 @@ DB             운영에서는 PostgreSQL (예정). 지금은 WORK_ROOT 의 SQLi
 ```mermaid
 erDiagram
   doc_document ||--o{ doc_page : has
+  doc_document ||--o{ doc_decision : "target (문서·쪽)"
+  doc_page ||--o| doc_page_sig : "page_id (적재된 쪽)"
   doc_page ||--o{ doc_field : has
   doc_page ||--o{ doc_page_meta : "page_id, meta_key"
   doc_field ||--o| insp_daily : source_field_id
@@ -304,15 +359,17 @@ erDiagram
 
 | 층 | 테이블 | 내용 |
 |---|---|---|
-| 문서 | `doc_document` | 원본 파일. ID = SHA-256 앞 16자리 → 같은 스캔의 중복 접수 차단. `source_rel`(archive_root 기준)로 다른 컴퓨터에서도 원본을 찾는다. 상태·오류·경고(`warning` — 복구해서 연 PDF, `[pipeline] damaged_pdf = "warn"`) |
-| | `doc_page` | 페이지별 양식(동시 판이면 고른 판), 분류 여유, 정합 품질, 정합 이미지 경로, 호모그래피(렌더링한 쪽 픽셀 → 템플릿 픽셀)와 렌더링 dpi, 상태, 오류. 값 유무를 잰 인쇄 층의 해시 `print_sha`(쓰지 않았으면 NULL), 동시 판마다의 괘선 오차 `variant_errs`(JSON `{판: 오차 \| null}`, 판이 하나면 NULL) (§5, 스키마 7) |
+| 문서 | `doc_document` | 원본 파일. ID = SHA-256 앞 16자리 → 같은 스캔의 중복 접수 차단. `source_rel`(archive_root 기준)로 다른 컴퓨터에서도 원본을 찾는다. 상태·오류·경고(`warning` — 복구해서 연 PDF, `[pipeline] damaged_pdf = "warn"`). 등록한 시각 `received_at`(접수한 문서는 보관 폴더 이름에서 — 다시 처리해도 바뀌지 않는다), 날짜의 출처 `date_source`(`decision`·`label`·`filename`), 요청 번호 `work_requested`·`work_done` (스키마 8) |
+| | `doc_page` | 페이지별 양식(동시 판이면 고른 판), 분류 여유, 정합 품질, 정합 이미지 경로, 호모그래피(렌더링한 쪽 픽셀 → 템플릿 픽셀)와 렌더링 dpi, 상태, 오류. 값 유무를 잰 인쇄 층의 해시 `print_sha`(쓰지 않았으면 NULL), 동시 판마다의 괘선 오차 `variant_errs`(JSON `{판: 오차 \| null}`, 판이 하나면 NULL) (§5, 스키마 7). 방향 `rotation`, 다시 스캔으로 붙잡혔으면 `duplicate_of`(앞쪽, 외래 키 없음)·`duplicate_sim` (스키마 8) |
 | | `doc_field` | 셀 하나. 좌표(bbox), 값의 형식(`format`, 스키마 6), 잉크, 값 유무(기계 `has_value_raw` / 최종 `has_value`), 원문 `value_raw`, 최종값 `value_final`, 신뢰도, 후보, 값을 만든 주체, 검수 상태(`review_status`)와 기계가 정한 상태(`status_raw` — 자동 적재 오류율의 분모) |
 | | `doc_page_meta` | 쪽 × 메타 키(`vehicle_no`, `operator`, `date`, `date.month`, `date.day` …): 최종 값과 출처(`review`·`label`·`filename`·`machine`), 그 키를 적는 필드, 기계가 읽은 값·신뢰도·상태(`auto`·`pending`·`unlisted`·`empty`), 대조 결과 (§5, 스키마 5) |
 | | `doc_review` | 사람이 입력한 값 한 건. 원본은 사이트 팩의 `reviews/reviews.jsonl` 이고 이 테이블은 사본이다 (ADR 0008) |
-| | `meta_schema` | 스키마 버전 (지금 7). 버전이 다른 DB 파일은 열지 않는다 (`run --fresh` 로 다시 만든다) |
+| | `doc_decision` | 문서·쪽에 대한 사람의 결정 한 건(`date`·`discard`·`restore`·`keep`). 원본은 `reviews/decisions.jsonl` 이고 이 테이블은 사본이다 (ADR 0019, 스키마 8) |
+| | `doc_page_sig` | 적재된 쪽의 서명(손글씨 자리, base64 글자열)·계열·날짜 — 다시 스캔한 쪽을 견주는 데만 (ADR 0020, 스키마 8) |
+| | `meta_schema` | 스키마 버전 (지금 8). 버전이 다른 DB 파일은 열지 않는다 (`run --fresh` 로 다시 만든다) |
 | 마스터 | `eq_equipment` | 장비. ISO 23725 의 FleetDefinition 구조(식별자 UUID, HID, 장비 유형)를 따른다. 같은 키는 항상 같은 UUID |
 | | `eq_assignment_obs` | 그날 실제로 누가 어느 차를 몰았는가 (관측값). 인쇄된 머리글과 다르면 표시 |
-| 업무 | `insp_daily` | 일일 장비 점검: 날짜 × 장비 → 이상 유/무, 점검내역 |
+| 업무 | `insp_daily` | 일일 장비 점검: 날짜 × 장비 → 이상 유/무, 점검내역. 같은 날 두 쪽이 같은 장비를 적으면 쪽의 순서가 뒤인 쪽(`page_id`, 스키마 8) |
 | | `prod_haul` | 운반 실적: 날짜 × 자리(차량) × 광종 × 편 × 근무조 → 횟수. 두 양식에서 각각 들어온다. `trips` 는 최종, `trips_raw` 는 기계가 읽은 값 |
 | | `xcheck_haul` | 두 양식의 같은 값 비교: `match` / `mismatch` / `missing_log` / `missing_matrix`. 판정은 최종 값, 기계 값의 합도 `*_trips_raw` 에 같이 둔다 |
 | | `eq_usage_daily` | 장비 가동 기록: 쪽 하나에 한 행 (하루 두 장이면 두 행). 날짜, 양식, 장비명·장비 ID(대응표, 없으면 NULL), 운전자, 계기 칸의 종류(`reading_kind`), 계기 시작·종료·총(수), 시각 시작·종료, 근무 시각 범위(JSON)와 분의 합, 작업 줄 수, 서명 유무, 가동 시간과 근거(`hours_basis`), 기계 값(`meter_*_raw`), 상태, 출처 칸 셋 (스키마 6) |
@@ -320,7 +377,10 @@ erDiagram
 | | `xcheck_usage` | 가동 일보의 검산 한 행 = 검산 하나: 종류(`total` 총 = 종료 − 시작, `subtotal` 소계 = 합, `continuity` 계기의 연속성), 비교한 값 둘과 차이, 결과, 사이에 낀 날 수, 비교 상대의 쪽, 비교한 칸 (§7) |
 
 규칙:
-- 쓰기는 `store.db.upsert()` 만 쓴다 (`INSERT … ON CONFLICT … DO UPDATE`). 재실행은 덮어쓴다.
+- 쓰기는 `store.db.upsert()` 만 쓴다 (`INSERT … ON CONFLICT … DO UPDATE`). 다시 처리는 그 문서의 행을 지우고 다시 만든다. `received_at`·
+  요청 번호는 `upsert` 로 덮지 않는다 (`insert_only`, 전용 UPDATE). 쓰는 트랜잭션은 `write_txn`(`BEGIN IMMEDIATE`)으로 시작한다 — 읽고 나서
+  쓰기로 올라가는 트랜잭션은 다른 연결이 그 사이에 커밋하면 기다리지 않고 실패한다.
+- 쪽을 가리키는 테이블의 목록 `store.db.PAGE_TABLES` (지우는 순서) — 새 업무 테이블을 더할 때 같이 고친다.
 - **기계 값과 최종 값을 따로 둔다.** `value_raw`·`confidence`·`backend`·`has_value_raw`·`status_raw`·`trips_raw` 는 언제나 기계의 것이고 검수해도 바뀌지 않는다.
   `value_final`·`has_value`·`trips` 는 최종 값이다. 업무 테이블은 최종 값에서 만든다.
 - 컬럼이 바뀌면 `store/db.py` 의 `SCHEMA_VERSION` 을 올린다. 마이그레이션은 없다 (ADR 0005). 사람이 입력한 값은 파일에 있으므로 DB 는 언제든 다시 만든다.
@@ -563,16 +623,27 @@ class Corrector(Protocol):
 
 ## 11. 프로그램 형태
 
-지금은 명령줄 도구 하나다(`minedocscan`). 1단계가 완성되었을 때의 모습은 다음과 같고, 전부 같은 패키지를 쓴다.
+명령줄 도구 하나다(`minedocscan`). 현장에서는 `serve` 하나를 띄워 둔다.
 
 ```
 스캐너가 접수 폴더에 PDF 저장
       ↓
-감시 서비스 (예정)      새 파일을 발견하면 Pipeline.process_file()
+minedocscan serve --reviewer jp          한 프로세스, 스레드 둘, 127.0.0.1:8765
+  ├ 작업 스레드 (intake/worker.py)      poll_seconds 마다 한 바퀴: 접수(intake/inbox.py) → 대기 중인 문서 처리(문서의 순서대로)
+  │                                      자기 DB 연결·자기 사이트 팩, 파이프라인 잠금. 처리 밖의 예외도 그 문서만 failed, 스레드는 죽지 않는다
+  └ 화면 스레드 (review/server.py)       홈(할 일·최근 문서·작업 상태), 문서 화면(날짜·버리기·되살리기·다시 스캔 의심 쪽의 세 선택),
+                                         대기열 검수 화면. 자기 DB 연결. 쓰는 것은 검수와 결정의 저장뿐 — 결정을 저장하면 작업 스레드를 깨운다
       ↓
-DB (PostgreSQL 예정)
-      ↓
-검수 화면 (최소 형태 구현)  셀 크롭을 보여 주고 값을 입력한다 → reviews.jsonl + reviewed (review/). 문서 단위 화면은 예정
+DB (SQLite WAL — PostgreSQL 예정)
 ```
+
+- `minedocscan watch [--once]` 는 화면 없이 작업 스레드의 바퀴만 돈다.
+- 홈의 남은 수는 DB 가 바뀔 때(`PRAGMA data_version`, `total_changes`)만 다시 센다 — 5초마다 대기열을 통째로 만들지 않는다. 표본 대기열(`haul-numbers`·
+  `checks`)은 홈에 두지 않는다.
+- **PyMuPDF 는 여러 스레드에서 같이 쓰면 안 된다** — `imaging/io.PDF_LOCK` 하나로 PyMuPDF 로 읽는 곳(열기·쪽 꺼내기·렌더링·닫기)을 전부
+  감싼다 (합성 PDF 를 쓰는 `tools/synth.py` 는 `serve` 안에서 돌지 않아 밖이다). `load_pages` 는 쪽을 내주는 동안 잠금을 놓는다.
+- 쪽 그림(`/page.png`)은 원본에서 그때그때 렌더링하고 방향을 알면 세운다 (몇 장만 메모리에, 디스크에 쓰지 않는다).
+- 서버 로그에는 경로와 상태 코드만, `watch`·`serve` 의 요약에는 수와 문서 ID 만 — 파일명·날짜·메모를 찍지 않는다.
+- 사이트 팩을 고치면 `serve` 를 다시 띄운다 (돌고 있는 것은 알아채지 않는다).
 
 구현 상태와 순서는 [ROADMAP.md](ROADMAP.md) 에 있다.

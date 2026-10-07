@@ -16,6 +16,7 @@
   templates/<양식>/print.png       인쇄 층 (선택, `template print-layer` 가 쓴다): 손글씨가 빠진 빈 양식 — 손글씨의 잔상이 남을 수 있다
   labels/pages.json                사람이 붙인 페이지 메타 (선택)
   reviews/reviews.jsonl            검수 기록 — 사람이 입력한 값 (추가 전용, 도구가 쓴다)
+  reviews/decisions.jsonl          결정 기록 — 문서·쪽의 날짜, 버리기·되살리기, "다른 종이" (추가 전용, 도구가 쓴다)
   models/<이름>/                   인식기 모델 (선택, `minedocscan recognizer train` 이 쓴다): model.onnx, card.json, train-log.jsonl
                                    (메타 필드 모델은 classes.json 도 — 이름·차량번호가 들어 있다)
   expected/regression.json         회귀 기준 수치 (선택, `minedocscan regress --update` 가 쓴다)
@@ -358,6 +359,25 @@ concurrent: true
 `machine` 은 검수 당시 기계가 낸 값이다. 템플릿을 고쳐 `bbox` 가 달라진 기록은 `review stats` 가 건수를 보여 준다 (적용은 한다).
 실제 값(이름·차량번호)이 들어가므로 저장소에 넣지 않는다.
 
+## reviews/decisions.jsonl
+
+문서와 쪽에 대해 사람이 정한 것의 **원본**이다 (ADR 0019). 검수 파일과 같은 폴더에 있고(`MINEDOCSCAN_REVIEWS` 를 주면 그 옆),
+같은 규칙을 따른다: 한 줄 = 결정 하나, 추가 전용, 지우거나 손으로 편집하지 않는다. DB(`doc_decision`)는 사본이다 — 문서 ID 가 파일의 해시이므로
+`WORK_ROOT` 를 지우고 다시 돌려도 같은 파일이면 결정이 그대로 붙는다. 쓰는 것은 `minedocscan doc date|discard|restore|keep` 과 운영 화면
+(`minedocscan serve`) 이다.
+
+```json
+{"decision_id": "…", "target": "ab12cd34ef56ab78-p2", "kind": "date", "value": "2030-01-09",
+ "decided_by": "jp", "decided_at": "2030-01-10T00:12:44Z", "note": ""}
+```
+
+- `target` 은 문서 ID 또는 쪽 ID(`<문서 ID>-p<쪽 번호>`). `kind` 는 `date`(문서·쪽, `value` 는 ISO 날짜) · `discard`·`restore`(문서·쪽) ·
+  `keep`(쪽 — 다시 스캔한 것이 아니라 다른 종이다).
+- 유효한 결정은 대상마다, 묶음(`date` / `discard`·`restore` / `keep`)마다 파일에서 가장 뒤의 것 하나. 버린 쪽에 `keep` 이 있어도 버린 것이다.
+- 결정을 저장하면 그 문서가 다시 처리 대기가 되고, `watch`·`serve` 의 다음 바퀴가 그 문서를 지우고 다시 만든다. 결정은 업무 테이블을 직접 고치지 않는다.
+- **`regress` 도 결정은 읽는다** (검수는 읽지 않는다) — 날짜와 버리기는 무엇을 적재하는가의 일부다. 기준에 든 문서에 결정을 내리면 회귀 수치가 움직인다.
+- 값·이름은 없지만 현장의 운영 기록이다 — 검수 파일과 같이 저장소 밖에 두고 같이 백업한다. `note` 는 로그에 찍지 않는다.
+
 ## models/<이름>/
 
 `minedocscan recognizer train --crops … --name <이름>` 이 만든다 (같은 이름이 있으면 멈춘다 — 덮어쓰지 않는다). 현장의 손글씨로 학습한 것이므로
@@ -402,6 +422,8 @@ operator     = "op-v1"
    minedocscan template init <이미지 또는 PDF> --name <이름> --page 3 --roi x0,y0,x1,y1 --header-rows 2
    ```
    괘선을 검출해 `templates/<이름>/template.yaml` 과 `reference.png` 를 쓴다. `--roi` 는 표 하나의 영역(200 dpi 픽셀)이다 (표 이름은 `main`).
+   돌아간 스캔(스캐너에 짧은 변부터 넣은 B5 가로 양식)이면 `--rotate 90|180|270` — 시계 방향으로 그만큼 돌려 세운 그림을 기준 이미지로 쓴다
+   (`--roi` 는 세운 그림의 좌표다). "바로 선 것"은 기준 이미지의 방향이다 — 돌아서 들어온 쪽은 파이프라인이 그 방향으로 세운다.
    `--roi` 가 없으면 쪽 전체에서 잡은 표 하나를 쓰거나(표가 여럿인 쪽에서는 틀린 표가 된다 — 지운다), 잡지 못하면 `regions: []` 로 둔다.
    표가 여러 개면 나머지 표는 `template add-region` 으로 하나씩 더한다 (아래 "가동 일보 템플릿을 만드는 절차" 4).
    셀 정의 없이 두면(`regions: []`) **분류 전용**으로 동작한다 — 그것만으로도 묶음 PDF 에서 그 양식을 골라내고 통계를 낼 수 있다

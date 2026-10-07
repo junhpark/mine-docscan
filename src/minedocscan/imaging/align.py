@@ -8,7 +8,9 @@ ORB 특징점 → 비율 검정 → RANSAC 호모그래피. 인쇄된 양식(제
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
@@ -63,6 +65,60 @@ def warp_to_template(gray: np.ndarray, homography, ref_shape: tuple[int, ...]) -
     h, w = ref_shape[:2]
     H = np.asarray(homography, dtype=np.float64)
     return cv2.warpPerspective(gray, H, (w, h), flags=cv2.INTER_LINEAR, borderValue=255)
+
+
+# ── 쪽의 방향 (tasks/0007 4.4) ─────────────────────────────────────────────────
+# 양식은 B5 가로인데 급지 폭이 216 mm 인 스캐너에는 짧은 변부터 들어가 90° 돈 그림이 된다 (뒤집으면 270°·180°).
+# ORB 와 호모그래피가 회전을 흡수해 돌아간 쪽도 정합은 되지만, 결과가 조용히 달라졌다 (실제 83쪽: 값 유무가 16–32칸 다름,
+# 괘선 오차 +1.5–4 px). 첫 정합의 호모그래피에서 방향을 읽어(90° 단위에서 벗어난 각은 최대 2.05°) 정확히 되돌려 세운 뒤 다시
+# 정합하면 정합 그림이 바로 선 쪽과 바이트까지 같았다 (249/249). 새 임계값은 없다 — 방향을 믿는 기준은 정합의 MIN_INLIERS 다.
+ROTATIONS = (0, 90, 180, 270)
+
+
+def orientation(homography) -> int:
+    """정합의 호모그래피(쪽 → 템플릿)에서 쪽의 방향: 시계 방향으로 그만큼 돌리면 바로 선다 (0 | 90 | 180 | 270).
+    회전각 atan2(H[1,0], H[0,0]) 을 90° 단위로 반올림한다 — 반시계 방향으로 90° 돈 쪽이 +90° 로 읽힌다."""
+    H = np.asarray(homography, dtype=np.float64)
+    ang = math.degrees(math.atan2(H[1, 0], H[0, 0]))
+    return int(round(ang / 90.0)) % 4 * 90
+
+
+def rotate_upright(gray: np.ndarray, rotation: int) -> np.ndarray:
+    """쪽을 시계 방향으로 rotation 만큼 정확히 돌린다 (np.rot90 — 화소를 옮기기만 한다, 보간 없음)."""
+    if rotation not in ROTATIONS:
+        raise ValueError(f"방향은 {ROTATIONS} 중 하나: {rotation!r}")
+    return np.ascontiguousarray(np.rot90(gray, -(rotation // 90))) if rotation else gray
+
+
+def rotation_matrix(shape: tuple[int, ...], rotation: int) -> np.ndarray:
+    """돌리기 전 쪽의 화소 좌표 → rotate_upright 로 세운 쪽의 화소 좌표 (3×3). shape: 돌리기 전 쪽의 (높이, 너비)."""
+    h, w = shape[:2]
+    M = np.eye(3)
+    for _ in range(rotation // 90):                      # 시계 방향 90° 한 번: (x, y) → (h − 1 − y, x), 그다음 크기가 (w, h)
+        M = np.array([[0.0, -1.0, h - 1.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]) @ M
+        h, w = w, h
+    return M
+
+
+def align_upright(gray: np.ndarray, align: Callable, min_inliers: int = MIN_INLIERS) -> tuple:
+    """쪽을 세워서 정합한다 (tasks/0007 4.4): align(그림) → AlignResult (또는 (AlignResult, 덤…) 튜플 — 동시 판의 묶음).
+    첫 정합의 인라이어가 min_inliers 이상이고 방향이 0 이 아니면 쪽을 그만큼 정확히 세워 다시 정합하고 그 결과를 쓴다
+    (통과 여부도 그 결과로). 바로 선 쪽은 정합을 한 번만 한다 (지금과 같은 횟수).
+    돌려주는 값: (align 의 결과 — 그 AlignResult 의 homography 는 **돌리기 전 쪽 → 템플릿**으로 합성한 것, 정합 그림은 세운 쪽의 것,
+    방향, 세운 쪽의 그림). 원본 해상도 크롭·인쇄 층의 다시 펴기는 저장된 호모그래피만으로 돈다 (방향을 몰라도)."""
+    out = align(gray)
+    ar = out[0] if isinstance(out, tuple) else out
+    rotation = orientation(ar.homography) if ar.n_inliers >= min_inliers else 0
+    if rotation == 0:
+        return out, 0, gray
+    upright = rotate_upright(gray, rotation)
+    out = align(upright)
+    first = out[0] if isinstance(out, tuple) else out
+    if first.n_inliers:                                  # 정합이 됐으면 호모그래피를 원래 쪽 기준으로 (안 됐으면 단위 행렬 그대로)
+        first = replace(first, homography=np.asarray(first.homography, dtype=np.float64)
+                        @ rotation_matrix(gray.shape, rotation))
+    out = (first, *out[1:]) if isinstance(out, tuple) else first
+    return out, rotation, upright
 
 
 def grid_error(warped: np.ndarray, regions: list[dict]) -> float:

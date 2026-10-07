@@ -43,6 +43,7 @@
 </head>
 <body>
 <header>
+  <a id="home" href="/" hidden>← 홈</a>
   <span class="q" id="qname">…</span>
   <span>검수자 <b id="reviewer">…</b></span>
   <span class="prog">진행 <b id="done">0</b> / <b id="total">0</b></span>
@@ -82,6 +83,7 @@
     state.dotted = q.dotted_clock ? { re: new RegExp(q.dotted_clock.pattern), maxMinute: q.dotted_clock.max_minute,
                                       maxDay: q.dotted_clock.max_day_minutes } : null;
     state.queue = q.name;
+    $('home').hidden = !q.home;          // 운영 화면(serve)에서 왔으면 홈으로 (tasks/0007 4.9)
     $('qname').textContent = '대기열 ' + q.name + ' · ' + (q.site || '');
     // 숫자 정답을 만드는 대기열: 이 규칙이 인식기의 "빈 칸"과 "거절"의 정답이 된다 (tasks/0003 4.3, docs/DATA.md)
     $('qhint').innerHTML = (q.name === 'haul-numbers' || q.name === 'mismatch')
