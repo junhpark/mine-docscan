@@ -237,3 +237,15 @@ def test_template_check_preview_and_variant_note(masked_world, tmp_path):
         with pytest.raises(ConfigError):
             _redact({"redact": bad})
     assert SitePack(site.root).redact == {"meta_keys": None, "pad_px": None}
+
+
+def test_info_shows_redact_and_haul_table(masked_world, capsys):
+    import json
+
+    from minedocscan.cli import main
+
+    st = masked_world["st"]
+    assert main(["info", "--json", "--site", str(st.site), "--work-root", str(st.work_root)]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["redact"] == {"meta_keys": ["operator", "vehicle_no"], "pad_px": DEFAULT_PAD_PX, "default": True}
+    assert data["haul_table"] == {"columns": 0, "slots": 0}

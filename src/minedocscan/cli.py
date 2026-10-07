@@ -410,6 +410,17 @@ def cmd_info(a) -> int:
         dpath = s.decisions_path(site.root)
         data["decisions"] = {"path": str(dpath), "lines": count_lines(dpath)}   # 결정 기록 (tasks/0007 4.3) — 값·이름이 없다
         lines.append(f"결정 기록: {dpath} ({data['decisions']['lines']}줄)")
+        from .export.masked import DEFAULT_META_KEYS, DEFAULT_PAD_PX
+
+        red = site.redact
+        keys = red["meta_keys"] if red["meta_keys"] is not None else list(DEFAULT_META_KEYS)
+        pad = red["pad_px"] if red["pad_px"] is not None else DEFAULT_PAD_PX
+        data["redact"] = {"meta_keys": keys, "pad_px": pad, "default": red == {"meta_keys": None, "pad_px": None}}
+        data["haul_table"] = {k: len(v) for k, v in site.haul_table.items()}       # 순서를 적은 수만 (자리 이름은 찍지 않는다)
+        lines.append(f"가린 쪽 그림 [redact]: 메타 키 {', '.join(keys)}, 넓히는 폭 {pad} px"
+                     + (" (기본값)" if data["redact"]["default"] else ""))
+        lines.append(f"운반 표 [haul_table]: 열 순서 {data['haul_table']['columns']}개, 자리 순서 {data['haul_table']['slots']}개 지정"
+                     + (" (없음 — 템플릿의 행 순서·자리 이름 순)" if not any(data["haul_table"].values()) else ""))
         data["inbox"] = {"path": str(s.inbox) if s.inbox else None, "settle_seconds": s.settle_seconds,
                          "give_up_seconds": s.give_up_seconds, "poll_seconds": s.poll_seconds}     # 접수 폴더 (4.7)
         lines.append(f"접수 폴더: {s.inbox} (다 쓰인 뒤 {s.settle_seconds:g}초, 포기 {s.give_up_seconds:g}초, "
