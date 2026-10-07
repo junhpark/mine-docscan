@@ -577,7 +577,8 @@ MATERIAL_DISPLAY = {"ORE": "광석", "WASTE": "폐석", "SURFACE": "갱외"}
 
 
 def add_display(name: str, spec: dict) -> dict:
-    """합성 템플릿에 display 를 넣는다 (그 자리의 이름이 표에 있으면). 운반 표의 행은 "광석 L0" 처럼, 행렬의 자리 열은 자리 이름."""
+    """합성 템플릿에 display 를 넣는다 (그 자리의 이름이 표에 있으면). 운반 표의 행은 "광석 L0" 처럼, 행렬의 자리 열은 자리 이름.
+    가릴 상자(redact)도 하나 — 첫 표의 머리글 줄."""
     spec = copy.deepcopy(spec)
     if name in TEMPLATE_DISPLAY:
         spec["display"] = TEMPLATE_DISPLAY[name]
@@ -595,6 +596,12 @@ def add_display(name: str, spec: dict) -> dict:
     for f in spec.get("fields") or []:
         if f.get("name") in FIELD_DISPLAY:
             f["display"] = FIELD_DISPLAY[f["name"]]
+    regs = spec.get("regions") or []
+    if regs:                     # 가릴 상자 하나 (tasks/0008 4.9 — 첫 표의 머리글 줄, 실제 양식의 결재란·인쇄된 이름 자리 대신). 기하라 판마다 다르다
+        from ..forms.template import cell_lines
+
+        ys, xs = cell_lines(regs[0])
+        spec["redact"] = [{"name": "header_row", "bbox": [int(xs[0]), int(ys[0]), int(xs[-1]), int(ys[1])]}]
     return spec
 
 

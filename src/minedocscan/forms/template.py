@@ -125,6 +125,8 @@ class Template:
         self.handler_options: dict = spec.get("handler_options", {}) or {}
         self.regions: list[dict] = spec.get("regions", []) or []
         self.fields: list[dict] = spec.get("fields", []) or []
+        # 가릴 상자 (tasks/0008 4.9): 템플릿이 아는데 필드가 아닌 자리 (결재란, 인쇄된 이름·등록번호 열). 기하다 — 판마다 따로 적는다
+        self.redact: list[dict] = spec.get("redact") or []
         self.family: str | None = spec.get("family") or None
         self.concurrent: bool = spec.get("concurrent") is True     # 잘못된 값(문자열 …)은 problems() 가 오류로 잡는다
         self.valid_from: str | None = _iso_date(self.name, "valid_from", spec.get("valid_from"))
@@ -181,6 +183,29 @@ class Template:
         elif c and not self.family:
             out.append(f"{self.name}: concurrent 는 family 가 있을 때만 씁니다 — 같은 날 섞여 쓰이는 판끼리 같은 family 를 적습니다")
         out += self.print_problems()
+        out += self._redact_problems()
+        return out
+
+    def _redact_problems(self) -> list[str]:
+        """redact: [{name, bbox: [x0, y0, x1, y1]}, …] — 이름은 겹치지 않는 글자, bbox 는 정수 넷이고 넓이가 있다
+        (쪽 안인지는 template check 가 기준 이미지의 크기로 본다)."""
+        v = self.spec.get("redact")
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            return [f"{self.name}: redact 는 상자의 목록이어야 합니다 ([{{name, bbox: [x0, y0, x1, y1]}}, …])"]
+        out, names = [], []
+        for i, r in enumerate(v, 1):
+            if not isinstance(r, dict) or not isinstance(r.get("name"), str) or not r["name"].strip():
+                out.append(f"{self.name}: redact {i}번째 상자: name(빈 문자열이 아닌 글자)과 bbox 가 있어야 합니다")
+                continue
+            names.append(r["name"])
+            b = r.get("bbox")
+            if not (isinstance(b, list | tuple) and len(b) == 4 and all(isinstance(x, int) and not isinstance(x, bool) for x in b)):
+                out.append(f"{self.name}/redact/{r['name']}: bbox 는 정수 네 개 [x0, y0, x1, y1]")
+            elif b[2] <= b[0] or b[3] <= b[1]:
+                out.append(f"{self.name}/redact/{r['name']}: 넓이가 없는 상자입니다 (x1 > x0, y1 > y0)")
+        out += [f"{self.name}: redact 의 이름 {n!r} 이 겹칩니다" for n in sorted({n for n in names if names.count(n) > 1})]
         return out
 
     def print_problems(self) -> list[str]:

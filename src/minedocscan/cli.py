@@ -85,6 +85,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--from", dest="date_from", help="이 날짜부터 (--to 와 같이)")
     e.add_argument("--to", dest="date_to", help="이 날짜까지 (양 끝 포함)")
     e.add_argument("--allow-in-repo", action="store_true", help="저장소 안에 쓰기 (합성 데이터만 — 엑셀에는 현장의 값이 들어 있다)")
+    m = esub.add_parser("masked-pages", parents=[common],
+                        help="가린 쪽 그림 (PNG, 파일 이름은 쪽 ID) — 서명·작성자·차량번호 필드, 템플릿의 redact 상자, 글자 칸을 한 색으로. "
+                             "템플릿이 아는 자리만 가린다 — 사람이 보고 나서 쓴다 (tasks/0008 4.9). 잠금을 잡지 않는다")
+    m.add_argument("out", help="내보낼 폴더 (저장소 밖 — 가린 그림도 현장 데이터다)")
+    g = m.add_mutually_exclusive_group(required=True)
+    g.add_argument("--date", help="그 날짜의 적재된 쪽 (YYYY-MM-DD)")
+    g.add_argument("--page-id", nargs="+", help="이 쪽들 (적재된 쪽만)")
+    m.add_argument("--keep-text", action="store_true", help="글자 칸을 남긴다 (meta_key 가 없는 이름 필드도 남는다)")
 
     p = sub.add_parser("publish", parents=[common],
                        help="통합 DB(PostgreSQL)로 싣기 — 지문이 다른 문서·날짜만 한 트랜잭션으로 갈아 끼운다 (tasks/0008 4.8). "
@@ -1380,12 +1388,15 @@ def _export_days(a) -> tuple[set[str] | None, set[str] | None]:
 
 
 def cmd_export(a) -> int:
-    """export excel: 파이프라인 잠금을 잡고 (serve·watch 가 돌면 한 줄로 알리고 끝낸다 — 4.1), 작업 DB 를 읽기 전용으로 열어 쓴다."""
+    """export excel: 파이프라인 잠금을 잡고 (serve·watch 가 돌면 한 줄로 알리고 끝낸다 — 4.1), 작업 DB 를 읽기 전용으로 열어 쓴다.
+    export masked-pages: 잠금 없이 읽기만 (4.9)."""
     from .export.writer import ExportError, check_out_dir, export_excel, format_result
     from .store.db import open_db_readonly
 
     s = _settings(a)
     site = _need_site(s)
+    if a.export_command == "masked-pages":
+        return _export_masked(a, s, site)
     out = Path(a.out) if a.out else s.excel_dir
     if out is None:
         raise SystemExit("엑셀 폴더가 없습니다: OUT 또는 [export] excel_dir (MINEDOCSCAN_EXCEL_DIR)")
@@ -1408,6 +1419,30 @@ def cmd_export(a) -> int:
         lock.release()
     _emit(a, {"excel": r.as_dict(), "written": r.written, "deleted": r.deleted, "failed": r.failed}, format_result(r))
     return 1 if (r.failed or r.missing_dir) else 0
+
+
+def _export_masked(a, s: Settings, site) -> int:
+    from .export.masked import export_masked, format_summary
+    from .intake.dates import iso_date
+    from .review.export import inside_git_tree
+    from .store.db import open_db_readonly
+
+    out = Path(a.out)
+    if inside_git_tree(out):
+        raise SystemExit(f"{out} 은 git 작업 트리 안입니다. 가린 그림도 현장 데이터이므로 저장소 밖에 내보내세요 "
+                         "(템플릿이 아는 자리만 가렸다 — 가렸다고 저장소·이슈에 넣어도 되는 것이 아니다)")
+    if a.date and iso_date(a.date) != a.date:
+        raise SystemExit(f"--date 는 YYYY-MM-DD: {a.date!r}")
+    try:
+        con = open_db_readonly(s.resolved_db_url)
+    except FileNotFoundError as e:
+        raise SystemExit(f"{e} — 먼저 run·watch 로 처리합니다") from None
+    try:
+        r = export_masked(con, site, s, out, date=a.date, page_ids=a.page_id, keep_text=a.keep_text)
+    finally:
+        con.close()
+    _emit(a, {"masked_pages": r}, format_summary(r, out))
+    return 0
 
 
 def cmd_publish(a) -> int:

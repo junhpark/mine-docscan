@@ -49,6 +49,7 @@ class SitePack:
         _check_families(self.templates)
         self.equipment_aliases: dict[str, str] = _equipment_aliases(self.config, self.templates)
         self.haul_table: dict[str, list[str]] = _haul_table(self.config)
+        self.redact: dict = _redact(self.config)
         self._labels: dict | None = None
         pat = self.config.get("ingest", {}).get("date_from_filename")
         self._date_re = re.compile(pat) if pat else None
@@ -277,6 +278,27 @@ def _haul_table(config: dict) -> dict[str, list[str]]:
     if unknown:
         raise ConfigError(f"site.toml 의 [haul_table] 에 모르는 키가 있습니다: {', '.join(unknown)} (columns, slots)")
     return out
+
+
+def _redact(config: dict) -> dict:
+    """site.toml 의 [redact] (가린 쪽 그림 — tasks/0008 4.9): meta_keys = ["operator", …] 가릴 메타 키 (없으면 None — 기본은
+    export/masked.DEFAULT_META_KEYS), pad_px = 표 밖 필드·redact 상자를 넓히는 폭 (없으면 None — 기본은 export/masked.DEFAULT_PAD_PX).
+    현장의 것이라 코드에 적지 않는다. 틀리면 ConfigError 한 줄."""
+    from ..config import ConfigError
+
+    raw = config.get("redact") or {}
+    if not isinstance(raw, dict):
+        raise ConfigError("site.toml 의 [redact] 는 표여야 합니다 (meta_keys = [...], pad_px = N)")
+    unknown = sorted(set(raw) - {"meta_keys", "pad_px"})
+    if unknown:
+        raise ConfigError(f"site.toml 의 [redact] 에 모르는 키가 있습니다: {', '.join(unknown)} (meta_keys, pad_px)")
+    keys = raw.get("meta_keys")
+    if keys is not None and (not isinstance(keys, list) or not all(isinstance(k, str) and k.strip() for k in keys)):
+        raise ConfigError("site.toml 의 [redact] meta_keys 는 메타 키(글자)의 목록이어야 합니다 — 예: [\"operator\", \"vehicle_no\"]")
+    pad = raw.get("pad_px")
+    if pad is not None and (not isinstance(pad, int) or isinstance(pad, bool) or not 0 <= pad <= 200):
+        raise ConfigError(f"site.toml 의 [redact] pad_px 는 0–200 의 정수여야 합니다: {pad!r}")
+    return {"meta_keys": [k.strip() for k in keys] if keys is not None else None, "pad_px": pad}
 
 
 def _equipment_aliases(config: dict, templates: dict[str, Template]) -> dict[str, str]:
