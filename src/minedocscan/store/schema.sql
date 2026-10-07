@@ -1,12 +1,13 @@
 -- minedocscan 스키마.
--- SQLite(개발·시험)와 PostgreSQL(운영) 양쪽에서 그대로 실행되는 부분집합만 쓴다.
+-- 작업 DB 는 SQLite 다 (ADR 0021). 통합 DB(PostgreSQL)에는 이 정의에서 만든 표에 결과의 사본을 싣는다 (publish/ — 형을 넓히고
+-- 외래 키 없이). 그래서 양쪽에서 그대로 통하는 부분집합만 쓴다.
 --   · 날짜·시각은 ISO 8601 문자열(TEXT), 불리언은 INTEGER 0/1
 --   · 쓰기는 store/db.py 의 upsert() (INSERT … ON CONFLICT … DO UPDATE) 만 사용
 --
 -- 세 층으로 나눈다.
 --   doc_*   문서 층  — 파이프라인만 쓴다. 모든 값의 출처(페이지·좌표·신뢰도)를 여기서 추적한다
 --   eq_*    마스터   — 장비. ISO 23725 FleetDefinition 구조를 따른다
---   insp_*, prod_*, xcheck_*  업무 층 — 2단계(통합DB·입력체계·대시보드)와 공유하는 면
+--   insp_*, prod_*, xcheck_*  업무 층 — 2단계(통합DB·입력체계·대시보드)가 통합 DB 에 실린 사본을 읽는다 (쓰지 않는다)
 
 -- ── 스키마 버전 ────────────────────────────────────────────────────────────
 -- 마이그레이션은 만들지 않는다 (ADR 0005). 컬럼이 바뀌면 버전을 올리고, 버전이 다른 DB 는 열지 않고
@@ -186,7 +187,7 @@ CREATE TABLE IF NOT EXISTS eq_assignment_obs (
 );
 
 -- ── 업무 층 ────────────────────────────────────────────────────────────────
--- 일일 장비 점검: 직접 입력(2단계)과 스캔 입력이 같은 테이블에 들어간다
+-- 일일 장비 점검: 스캔 입력. 2단계의 직접 입력은 2단계의 표에 적고 뷰로 합친다 (ROADMAP "2단계와의 접점", ADR 0021)
 CREATE TABLE IF NOT EXISTS insp_daily (
   inspection_id   TEXT PRIMARY KEY,          -- inspection_date:equipment_id
   inspection_date TEXT NOT NULL,

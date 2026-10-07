@@ -86,6 +86,13 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--to", dest="date_to", help="이 날짜까지 (양 끝 포함)")
     e.add_argument("--allow-in-repo", action="store_true", help="저장소 안에 쓰기 (합성 데이터만 — 엑셀에는 현장의 값이 들어 있다)")
 
+    p = sub.add_parser("publish", parents=[common],
+                       help="통합 DB(PostgreSQL)로 싣기 — 지문이 다른 문서·날짜만 한 트랜잭션으로 갈아 끼운다 (tasks/0008 4.8). "
+                            "대상은 환경변수 MINEDOCSCAN_PUBLISH_URL 로만")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--check", action="store_true", help="쓰지 않고 다른 범위의 수만 (같으면 0, 다르면 1, 닿지 못하면 2). 잠금을 잡지 않는다")
+    g.add_argument("--rebuild", action="store_true", help="이 프로그램이 만든 표만 지우고 다시 만든 뒤 싣는다 (스키마 버전·싣기의 판이 다를 때)")
+
     p = sub.add_parser("run", parents=[common], help="스캔 파일/폴더를 처리해 DB 에 적재")
     p.add_argument("paths", nargs="*", help="파일 또는 폴더. 없으면 archive_root 전체. 상대경로는 archive_root 기준으로도 찾는다")
     p.add_argument("--recognizer", help="기본 인식 백엔드 ([recognize] backend 대신). [recognize.by_kind] 에 적힌 종류는 그쪽 "
@@ -344,6 +351,15 @@ def cmd_info(a) -> int:
     lines.append(f"엑셀 폴더: {s.excel_dir} (전체 훑기 {s.export_sweep_minutes:g}분마다"
                  + (", 기계 값 열 있음" if s.machine_values else "") + ")" if s.excel_dir
                  else "엑셀 폴더: 없음 ([export] excel_dir 또는 MINEDOCSCAN_EXCEL_DIR) — 자동 내보내기 꺼짐")
+    from .publish.core import describe_url
+
+    data["publish"] = {"target": describe_url(s.publish_url) if s.publish_url else None, "schema": s.publish_schema,
+                       "enabled": s.publish_on, "sweep_minutes": s.publish_sweep_minutes,
+                       "connect_timeout_s": s.publish_connect_timeout_s, "retry_seconds": s.publish_retry_seconds}
+    lines.append(f"통합 DB: {data['publish']['target']} 스키마 {s.publish_schema} ("
+                 + ("켜짐" if s.publish_on else "꺼짐 — [publish] enabled = false") + f", 전체 훑기 {s.publish_sweep_minutes:g}분마다, "
+                 f"연결 {s.publish_connect_timeout_s:g}초, 다시 연결 {s.publish_retry_seconds:g}초 뒤)" if s.publish_url
+                 else "통합 DB: 없음 (환경변수 MINEDOCSCAN_PUBLISH_URL) — 싣기 꺼짐")
     site = _need_site(s) if s.site and Path(s.site).is_dir() else None
     data["recognizer"] = _describe_recognizer(s, site)
     data["meta_readers"] = _describe_meta(s, site)
@@ -635,14 +651,15 @@ def cmd_serve(a) -> int:
         from .forms.sitepack import SitePack
 
         screen_site = SitePack(site.root)
-        excel = worker.after.get("excel") if worker is not None else None
-        ops = OpsApp(con, screen_site, s, a.reviewer, worker=worker, watching=not a.no_watch, wake=wake, excel=excel)
+        jobs = worker.after if worker is not None else {}
+        ops = OpsApp(con, screen_site, s, a.reviewer, worker=worker, watching=not a.no_watch, wake=wake,
+                     excel=jobs.get("excel"), publish=jobs.get("publish"))
         try:
             app = ReviewApp(con, screen_site, s, a.reviewer, "pending", ops=ops)
         except ValueError as e:
             raise SystemExit(str(e)) from None
-        if excel is not None:
-            app.on_touched = excel.mark                                 # 검수 저장 → 작업 스레드의 다음 바퀴 (깨우지 않는다)
+        if worker is not None:                                          # 검수 저장 → 작업 스레드의 다음 바퀴 (깨우지 않는다)
+            app.on_touched = lambda t: [job.mark(t) for job in worker.after.values()]
         if thread is not None:
             thread.start()
         try:
@@ -660,20 +677,24 @@ def cmd_serve(a) -> int:
 
 
 def _round_jobs(s: Settings, site) -> dict:
-    """watch·serve 의 바퀴 끝의 일 (tasks/0008 4.7·4.8): 엑셀 내보내기 (꺼져 있으면 아무것도 하지 않는다 — 상태만 화면에).
-    켤 수 없으면(저장소·접수 폴더 안) 시작할 때 한 줄로 알린다."""
+    """watch·serve 의 바퀴 끝의 일 (tasks/0008 4.7·4.8): 엑셀 내보내기 → 통합 DB 싣기 (꺼져 있으면 아무것도 하지 않는다 — 상태만
+    화면에). 켤 수 없으면(저장소·접수 폴더 안, psycopg 가 없다) 시작할 때 한 줄로 알린다."""
     from .export.auto import AutoExport
+    from .publish.auto import AutoPublish
 
-    excel = AutoExport(s, site)
-    if excel.notice:
-        print(excel.notice, file=sys.stderr)
-    return {"excel": excel}
+    jobs = {"excel": AutoExport(s, site), "publish": AutoPublish(s)}
+    for job in jobs.values():
+        if job.notice:
+            print(job.notice, file=sys.stderr)
+    return jobs
 
 
 def _worth_showing(out: dict) -> bool:
-    x = out.get("excel") or {}
+    x, p = out.get("excel") or {}, out.get("publish") or {}
     return bool(out.get("processed") or out.get("received") or out.get("already") or out.get("moved_failed")
-                or x.get("written") or x.get("deleted") or x.get("failed") or x.get("missing_dir") or out.get("excel_error"))
+                or x.get("written") or x.get("deleted") or x.get("failed") or x.get("missing_dir") or out.get("excel_error")
+                or p.get("error") or any((p.get("replaced") or {}).values()) or any((p.get("removed") or {}).values())
+                or out.get("publish_error"))
 
 
 def _check_inbox(s: Settings) -> None:
@@ -1389,7 +1410,53 @@ def cmd_export(a) -> int:
     return 1 if (r.failed or r.missing_dir) else 0
 
 
-COMMANDS = {"info": cmd_info, "run": cmd_run, "report": cmd_report, "pages": cmd_pages, "eval": cmd_eval,
+def cmd_publish(a) -> int:
+    """publish: 늘 전체를 훑는다 (파이프라인 잠금을 잡고 — serve·watch 가 돌면 한 줄로 알리고 끝낸다). --check 는 잠금 없이 읽기만.
+    출력에는 대상의 호스트·DB·스키마와 수만 — URL·비밀번호·값을 찍지 않는다. 닿지 못하면 종료 코드 2."""
+    from .publish import core
+    from .publish.scopes import Orphans
+    from .store.db import open_db_readonly
+
+    s = _settings(a)
+    if not s.publish_url:
+        raise SystemExit("통합 DB 가 없습니다: 환경변수 MINEDOCSCAN_PUBLISH_URL (설정 파일에는 적지 않습니다)")
+    where = f"{core.describe_url(s.publish_url)} 스키마 {s.publish_schema}"
+    lock = None if a.check else _pipeline_lock(s)
+    try:
+        try:
+            con = open_db_readonly(s.resolved_db_url)
+        except FileNotFoundError as e:
+            raise SystemExit(f"{e} — 먼저 run·watch 로 처리합니다") from None
+        try:
+            if a.rebuild:
+                core.rebuild(s)
+            res = core.run(con, s, full=True, check=a.check)
+        except Orphans as e:
+            print(f"싣지 않았습니다: {e} — 작업 DB 를 run --fresh 로 다시 만드십시오", file=sys.stderr)
+            return 2
+        except core.PublishError as e:
+            print(core.scrub(str(e), s.publish_url), file=sys.stderr)
+            return e.code
+        finally:
+            con.close()
+    finally:
+        if lock is not None:
+            lock.release()
+    rep, rem = res.replaced, res.removed
+    if a.check:
+        text = (f"통합 DB {where}: 다른 범위 — 문서 {rep['document']}, 날짜 {rep['date']}, 통째 {rep['whole']}; "
+                f"대상에만 있는 범위 — 문서 {rem['document']}, 날짜 {rem['date']} (견준 범위 {res.checked})")
+        _emit(a, {"publish_check": res.as_dict()}, text)
+        return 1 if res.changed else 0
+    text = (f"통합 DB {where} 에 실었습니다{' (표를 만들었습니다)' if res.created else ''}: 갈아 끼운 범위 — 문서 {rep['document']}, "
+            f"날짜 {rep['date']}, 통째 {rep['whole']}; 지운 범위 — 문서 {rem['document']}, 날짜 {rem['date']}; 넣은 행 {res.rows}"
+            + (f"; 실을 수 없는 값(NUL 문자 …)이 있어 건너뛴 범위 {res.skipped} — 그 범위의 옛 행은 대상에서 지웠습니다"
+               if res.skipped else ""))
+    _emit(a, {"publish": res.as_dict()}, text)
+    return 0
+
+
+COMMANDS = {"info": cmd_info, "publish": cmd_publish, "run": cmd_run, "report": cmd_report, "pages": cmd_pages, "eval": cmd_eval,
             "regress": cmd_regress, "template": cmd_template, "synth": cmd_synth, "review": cmd_review,
             "doc": cmd_doc, "watch": cmd_watch, "serve": cmd_serve, "export": cmd_export,
             "recognizer": cmd_recognizer}

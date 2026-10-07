@@ -431,6 +431,7 @@ class Pipeline:
                        source_rel: str | None = None, received_at: str | None = None) -> dict:
         """읽지 못한 문서: 그 문서의 행을 지우고(있었다면 — 그 날짜·장비를 다시 계산) failed, work_done = work_requested."""
         err = _error_text(e)
+        self.touched.documents.add(document_id)
         row = self._document_row(document_id, path, source_name, "failed", err, source_rel=source_rel)
         row["received_at"] = received_at or _received_now(row["source_rel"])
         with write_txn(self.con):

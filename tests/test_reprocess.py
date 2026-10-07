@@ -26,12 +26,12 @@ from minedocscan.pipeline import Pipeline
 from minedocscan.pipeline.lock import PipelineBusy, PipelineLock
 from minedocscan.pipeline.runner import update_document_status
 from minedocscan.review.store import Review, field_id_of, save
-from minedocscan.store.db import open_db
+from minedocscan.store.db import PUBLISH_SKIP_COLUMNS, open_db
 from minedocscan.tools.synth import T_INSP, T_LOG
 
 BUSINESS = {"prod_haul": "work_date", "prod_tally": "work_date", "eq_usage_daily": "work_date", "insp_daily": "inspection_date",
             "xcheck_haul": "work_date", "eq_assignment_obs": "work_date", "xcheck_usage": "work_date"}
-SKIP = ("created_at", "received_at", "work_requested", "work_done", "source_path")   # 시각·요청 번호·경로 (4.8)
+SKIP = PUBLISH_SKIP_COLUMNS          # 시각·요청 번호·경로 (4.8) — 통합 DB 에 싣지 않는 열과 같다 (store/db.py, tasks/0008 4.8)
 RECEIVED = date(2030, 1, 10)                                                      # 결정의 "받은 날" — 시계에 기대지 않는다
 
 

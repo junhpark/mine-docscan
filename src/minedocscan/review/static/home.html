@@ -103,6 +103,13 @@
     return ' <a class="xl" href="/export/day.xlsx?date=' + encodeURIComponent(day) + '" title="그 날짜의 엑셀">엑셀</a>'
       + ' <a class="xl" href="/export/month.xlsx?month=' + encodeURIComponent(day.slice(0, 7)) + '" title="그 달의 엑셀">월</a>';
   }
+  // 통합 DB 싣기 (tasks/0008 4.8): 대상은 호스트·DB·스키마만 (비밀번호 없이 — 서버가 그렇게 준다)
+  function publishText(p) {
+    if (!p || !p.enabled) return '통합 DB: ' + ({no_driver: '꺼짐 (psycopg 없음)', disabled: '꺼짐 ([publish] enabled = false)', no_watch: '꺼짐 (--no-watch)'}[p && p.reason] || '꺼짐 (MINEDOCSCAN_PUBLISH_URL 없음)');
+    let t = '통합 DB ' + esc(p.target) + '/' + esc(p.schema) + ': ' + (p.last_ok_at ? '마지막 ' + esc(p.last_ok_at) : '실은 적 없음');
+    if (p.last_error) t += ' · <span class="status-failed">싣지 못함 (' + esc(p.last_error) + ', 밀린 범위 ' + p.behind + ')</span>';
+    return t;
+  }
   function exportText(x) {
     if (!x || !x.enabled) return '엑셀: ' + ({refused: '꺼짐 (저장소·접수 폴더 안이라 쓰지 않습니다)', no_watch: '꺼짐 (--no-watch)'}[x && x.reason] || '꺼짐 (excel_dir 없음)');
     let t = '엑셀: ' + (x.last_at ? '마지막 ' + esc(x.last_at) + ' · ' + x.written + '개 씀' + (x.deleted ? ', ' + x.deleted + '개 지움' : '') : '쓴 적 없음');
@@ -140,7 +147,7 @@
     try { h = await getJSON('/api/home'); } catch (e) { msg(e.message); return; }
     templates = h.templates || {};
     $('site').textContent = (h.site || '') + ' · 검수자 ' + (h.reviewer || '');
-    $('worker').innerHTML = workerText(h) + ' · ' + exportText(h.export);
+    $('worker').innerHTML = workerText(h) + ' · ' + exportText(h.export) + ' · ' + publishText(h.publish);
     const t = h.todo;
     const q = t.queues || {};
     let out = '<h2>할 일</h2><div class="box todo">';

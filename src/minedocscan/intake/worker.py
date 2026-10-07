@@ -124,4 +124,13 @@ def format_round(r: dict) -> str:
                          + (f", 쓰지 못함 {x['failed']} (다음 바퀴에 다시)" if x["failed"] else ""))
     if r.get("excel_error"):
         parts.append(f"엑셀: 내보내지 못함 ({r['excel_error']})")
+    p = r.get("publish")
+    if p and p.get("error"):
+        parts.append(f"통합 DB: 싣지 못함 ({p['error']}, 밀린 범위 {p['behind']}) — 다음에 다시")
+    elif p and (any(p["replaced"].values()) or any(p["removed"].values()) or p.get("skipped")):
+        parts.append(f"통합 DB: 갈아 끼운 범위 {sum(p['replaced'].values())}, 지운 범위 {sum(p['removed'].values())}"
+                     + (f", 실을 수 없는 값이 있어 건너뛴 범위 {p['skipped']}" if p.get("skipped") else "")
+                     + (" (전체 훑기로 다시 했다)" if p.get("fell_back") else ""))
+    if r.get("publish_error"):
+        parts.append(f"통합 DB: 싣지 못함 ({r['publish_error']})")
     return ", ".join(parts)

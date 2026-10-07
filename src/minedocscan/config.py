@@ -10,6 +10,10 @@
   MINEDOCSCAN_DB_URL        DB 주소 (기본: sqlite:///<work_root>/minedocscan.db)
   MINEDOCSCAN_REVIEWS       검수 기록 파일 (기본: <site>/reviews/reviews.jsonl — 사이트 팩 안, 추가 전용)
   MINEDOCSCAN_DAMAGED_PDF   손상 PDF(라이브러리가 복구해서 연 파일)의 처리: fail(기본) | warn
+  MINEDOCSCAN_EXCEL_DIR     엑셀 폴더 (watch·serve 가 바퀴 끝에 쓴다 — tasks/0008 4.7)
+  MINEDOCSCAN_PUBLISH_URL   통합 DB(PostgreSQL) — postgresql://사용자:비밀번호@호스트/DB. **환경변수로만** 받는다 (설정 파일에 적지
+                            않는다 — 적으면 ConfigError). 어디에도 찍지 않는다 (호스트·DB 이름만 — publish/core.describe_url)
+  MINEDOCSCAN_PUBLISH_SCHEMA 통합 DB 의 스키마 (기본 minedocscan)
 
 값이 틀리면(TOML 문법, 숫자가 아닌 숫자 값, 범위 밖, 모르는 선택지) ConfigError 하나로 무엇이 틀렸는지 한 줄로 알린다.
 명령줄(cli.main)은 그것을 트레이스백 없이 보여 주고 0 이 아닌 코드로 끝난다.
@@ -64,7 +68,19 @@ class Settings:
     excel_dir: Path | None = None
     export_sweep_minutes: float = 30.0   # 전체 훑기의 간격 (분). 0 이면 시작할 때만 — 다른 프로세스가 쓴 검수와 놓친 것을 잡는다
     machine_values: bool = False         # 업무 시트·긴 표에 "기계 값(확정 아님)" 열을 따로 둔다 (기본은 싣지 않는다 — ADR 0008)
+    # 통합 DB 로 싣기 (tasks/0008 4.8): URL 은 환경변수로만 (repr 에도 나오지 않게). enabled 가 None 이면 URL 이 있을 때 켜진다
+    publish_url: str | None = field(default=None, repr=False)
+    publish_schema: str = "minedocscan"
+    publish_enabled: bool | None = None
+    publish_sweep_minutes: float = 30.0  # 전체 훑기의 간격 (분). 0 이면 시작할 때만
+    publish_connect_timeout_s: float = 5.0
+    publish_retry_seconds: float = 60.0  # 연결에 실패한 뒤 이만큼은 다시 연결하지 않는다 (꺼진 서버에 바퀴마다 매달리지 않게)
     extra: dict = field(default_factory=dict)
+
+    @property
+    def publish_on(self) -> bool:
+        """싣기가 켜져 있나: URL 이 있고 [publish] enabled 가 false 가 아니다."""
+        return bool(self.publish_url) and self.publish_enabled is not False
 
     @property
     def aligned_dir(self) -> Path:
@@ -105,6 +121,9 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
     pipe = _table(raw, "pipeline", path)
     intake = _table(raw, "intake", path)
     export = _table(raw, "export", path)
+    publish = _table(raw, "publish", path)
+    if any(k in publish for k in ("url", "dsn", "password")):
+        raise ConfigError("[publish] 에 URL·비밀번호를 적지 않습니다 — 환경변수 MINEDOCSCAN_PUBLISH_URL 로만 받습니다")
     rec = _table(raw, "recognize", path)
     by_kind = rec.get("by_kind", {}) or {}
     if not isinstance(by_kind, dict):
@@ -134,6 +153,12 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         excel_dir=_p(export.get("excel_dir")),
         export_sweep_minutes=_number(export, "sweep_minutes", 30.0, float, "[export] sweep_minutes", lo=0.0),
         machine_values=_flag(export, "machine_values", False, "[export] machine_values"),
+        publish_schema=str(publish.get("schema", "minedocscan")),
+        publish_enabled=(None if "enabled" not in publish else _flag(publish, "enabled", True, "[publish] enabled")),
+        publish_sweep_minutes=_number(publish, "sweep_minutes", 30.0, float, "[publish] sweep_minutes", lo=0.0),
+        publish_connect_timeout_s=_number(publish, "connect_timeout_s", 5.0, float, "[publish] connect_timeout_s", lo=1.0,
+                                          hi=600.0),
+        publish_retry_seconds=_number(publish, "retry_seconds", 60.0, float, "[publish] retry_seconds", lo=0.0),
         extra=raw,
     )
     env = os.environ
@@ -151,11 +176,20 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         s.inbox = Path(env["MINEDOCSCAN_INBOX"])
     if env.get("MINEDOCSCAN_EXCEL_DIR"):
         s.excel_dir = Path(env["MINEDOCSCAN_EXCEL_DIR"])
+    if env.get("MINEDOCSCAN_PUBLISH_URL"):
+        s.publish_url = env["MINEDOCSCAN_PUBLISH_URL"]
+    if env.get("MINEDOCSCAN_PUBLISH_SCHEMA"):
+        s.publish_schema = env["MINEDOCSCAN_PUBLISH_SCHEMA"]
     if env.get("MINEDOCSCAN_DAMAGED_PDF"):
         s.damaged_pdf = env["MINEDOCSCAN_DAMAGED_PDF"]
     for k, v in overrides.items():
         if v is not None:
             setattr(s, k, Path(v) if k in ("archive_root", "work_root", "site", "reviews", "inbox", "excel_dir") else v)
+    import re
+
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", s.publish_schema):
+        raise ConfigError("[publish] schema (또는 MINEDOCSCAN_PUBLISH_SCHEMA) 는 영문 소문자·숫자·밑줄 "
+                          f"(영문 소문자나 밑줄로 시작, 63자 안): {s.publish_schema!r}")
     if s.damaged_pdf not in DAMAGED_PDF:
         raise ConfigError(f"[pipeline] damaged_pdf (또는 MINEDOCSCAN_DAMAGED_PDF) 는 {' | '.join(DAMAGED_PDF)}: "
                           f"{s.damaged_pdf!r}")

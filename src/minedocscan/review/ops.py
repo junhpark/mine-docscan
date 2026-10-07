@@ -36,10 +36,11 @@ PNG_CACHE = 24                           # 쪽 그림 몇 장 (문서 화면의 
 
 class OpsApp:
     def __init__(self, con: sqlite3.Connection, site, settings, reviewer: str, worker=None, watching: bool = True,
-                 wake=None, excel=None):
+                 wake=None, excel=None, publish=None):
         self.con, self.site, self.settings, self.reviewer = con, site, settings, reviewer
         self.worker, self.watching, self.wake = worker, watching, wake
         self.excel = excel                       # 자동 내보내기 (export/auto.AutoExport) — 작업 스레드가 쓴다. 화면은 상태만 읽는다
+        self.publish = publish                   # 통합 DB 싣기 (publish/auto.AutoPublish) — 같은 방식
         self._counts: tuple | None = None
         self._png: OrderedDict = OrderedDict()
 
@@ -88,7 +89,7 @@ class OpsApp:
                          "failed_documents": sum(d["status"] == "failed" for d in docs),
                          "waiting": sum(d["waiting"] for d in docs), "queues": self.remaining()},
                 "recent": [_doc_brief(d) for d in recent],
-                "export": self.export_status(),
+                "export": self.export_status(), "publish": self.publish_status(),
                 "templates": {t.name: t.title for t in self.site.templates.values()}}
 
     def export_status(self) -> dict:
@@ -202,6 +203,13 @@ class OpsApp:
             self._png.popitem(last=False)
         return png
 
+
+    def publish_status(self) -> dict:
+        """통합 DB 싣기의 상태: 켜짐·꺼짐(이유), 대상(호스트·DB·스키마 — 비밀번호 없이), 마지막 성공 시각, 밀린 범위의 수,
+        마지막 실패의 종류."""
+        if self.publish is None:
+            return {"enabled": False, "reason": "no_watch" if not self.watching else "off"}
+        return dict(self.publish.status)
 
     # ── 엑셀 내려받기 ───────────────────────────────────────────────────────
     def export_xlsx(self, kind: str, params: dict) -> tuple[bytes, str]:
