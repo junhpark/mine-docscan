@@ -1,10 +1,11 @@
 """통합 DB 로 싣기 — 서버 없이 되는 것 (tasks/0008 단계 5, 4.8): 대상의 DDL(schema.sql 에서), 범위와 지문(순수 함수),
 연결 함수를 바꿔 끼운 시험(닿지 않는 서버 — 비밀번호가 어디에도 찍히지 않는다, 다시 연결하는 간격), 드라이버가 없을 때.
-PostgreSQL 이 있어야 하는 것은 test_publish_pg.py (-m postgres).
+PostgreSQL 이 있어야 하는 것은 test_publish_pg.py (-m postgres). 실제 드라이버의 시간 제한을 기다리는 시험 하나도 postgres 작업에서.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -234,27 +235,66 @@ def test_describe_and_scrub():
     assert SECRET not in core.describe_url(f"password='{SECRET}' dbname=x")
     text = core.scrub(f"failed: {URL} password={SECRET}", URL)
     assert SECRET not in text and "writer:" not in text
+    # 비밀번호에 '/'·'?'·'#' 가 그대로 — 어디까지가 비밀인지 모른다. 키워드 꼴의 값에 '://' 가 있어도 키워드 꼴이다
+    for bad in ("postgresql://writer:20/Ab9x@db.example.invalid/site", f"postgresql://w:/{SECRET}@h/d",
+                f"postgresql://w:{SECRET}?x@h/d", f"postgres://w:{SECRET}#x@h/d", f"postgresql://md:4821/{SECRET}@h/d"):
+        assert core.describe_url(bad) == "(읽을 수 없는 URL)", bad
+        assert SECRET not in core.scrub(f"x {bad} y", bad) and "Ab9x" not in core.scrub(f"x {bad} y", bad)
+    kw = f"host=127.0.0.1 port=1 password=Se://{SECRET} dbname=d"
+    assert core.describe_url(kw) == "127.0.0.1:1/d"
+    assert core.describe_url(f"host='a b' dbname='{SECRET} x'") == "?/?"       # 찍을 수 없는 글자의 이름은 ? 로
 
 
+def test_info_and_the_home_do_not_show_odd_urls(world, monkeypatch, capsys):
+    """설정이 이상한 꼴이어도(비밀번호에 '/', 키워드 꼴의 비밀번호에 '://') info·홈 JSON·연결 실패의 글에 비밀번호가 없다."""
+    from minedocscan.cli import _worth_showing, main
+
+    st = world["st"]
+    common = ["--site", str(st.site), "--archive-root", str(st.archive_root), "--work-root", str(st.work_root)]
+    monkeypatch.setattr(core, "connect", refusing([]))
+    for url in (f"postgresql://writer:/{SECRET}@127.0.0.1:1/site", f"host=127.0.0.1 port=1 password=Se://{SECRET} dbname=site"):
+        monkeypatch.setenv("MINEDOCSCAN_PUBLISH_URL", url)
+        assert main(["info", "--json", *common]) == 0
+        assert main(["publish", *common]) == 2
+        printed = "".join(capsys.readouterr())
+        assert SECRET not in printed
+        pub = AutoPublish(replace(st, publish_url=url))
+        failed = pub.after_round(world["pipe"].con, Touched(everything=True))
+        assert SECRET not in json.dumps(pub.status) + failed.message
+    assert _worth_showing({"publish": {"replaced": {}, "removed": {}, "skipped": 1}})        # 건너뛴 범위만 있어도 알린다
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(not os.environ.get("MINEDOCSCAN_TEST_PG_URL"), reason="postgres 작업에서 (서버는 쓰지 않지만 드라이버의 시간 제한을 기다린다)")
 def test_real_driver_to_a_closed_port_keeps_the_timeout_and_the_secret():
-    """실제 드라이버로 닫힌 포트(127.0.0.1)에 붙으면 connect_timeout_s 안에 실패하고, 우리가 내는 글에 비밀번호가 없다."""
+    """실제 드라이버로 닫힌 포트(127.0.0.1)에 붙으면 바로 실패하고, 받기만 하고 답하지 않는 서버에는 connect_timeout_s 에 실패한다
+    (시간 제한이 드라이버에 닿는다 — 없으면 드라이버의 기본 130초). 우리가 내는 글에 비밀번호가 없다."""
     pytest.importorskip("psycopg")
     import socket
     import time
+
+    from minedocscan.config import Settings
 
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()                                                          # 닫힌 포트
-    url = f"postgresql://writer:{SECRET}@127.0.0.1:{port}/site"
-    from minedocscan.config import Settings
-
-    st = Settings(publish_url=url, publish_connect_timeout_s=2.0)
-    t0 = time.monotonic()
     with pytest.raises(core.PublishError) as e:
-        core.open_target(st)
-    assert time.monotonic() - t0 < 10
+        core.open_target(Settings(publish_url=f"postgresql://writer:{SECRET}@127.0.0.1:{port}/site", publish_connect_timeout_s=2.0))
     assert e.value.kind == "connect" and SECRET not in str(e.value) and "127.0.0.1" in str(e.value)
+    silent = socket.socket()                                           # 연결은 받되(커널이 받는다) 답하지 않는다
+    silent.bind(("127.0.0.1", 0))
+    silent.listen(4)
+    try:
+        url = f"postgresql://writer:{SECRET}@127.0.0.1:{silent.getsockname()[1]}/site"
+        t0 = time.monotonic()
+        with pytest.raises(core.PublishError) as e:
+            core.open_target(Settings(publish_url=url, publish_connect_timeout_s=2.0))
+        took = time.monotonic() - t0
+    finally:
+        silent.close()
+    assert 1.5 < took < 20, took
+    assert e.value.kind == "connect" and SECRET not in str(e.value)
 
 
 def test_a_conflict_in_a_dirty_publish_falls_back_to_a_full_sweep(monkeypatch):

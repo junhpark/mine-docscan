@@ -180,8 +180,18 @@ def check_business(con, b: dict, day: str, site=None) -> None:
         assert r["수"] == (t["count"] if st == "value" else None) and r[L.STATE] == L.ROW_STATE[st]
     # 교차검증: 그 날짜·자리·광종·편의 운반 행이 전부 확정일 때만 횟수, 아니면 판정에 (잠정)
     for r in business_rows(b, "xcheck_haul"):
-        if r["자리"] == L.UNRESOLVED_SLOT:
+        if r["자리"] == L.UNRESOLVED_SLOT:                    # 자리 미정: 그 쪽(출처)의 일보 행이 전부 확정일 때만 (행이 없으면 확정 아님)
             assert r["차량번호"] is None and r["작성자"] is None
+            pids = [src[x] for x in r[L.SOURCE].split(", ")]
+            hs = [h[0] for h in con.execute(
+                f"SELECT source_field_id FROM prod_haul WHERE source_role = 'log' AND material = ? AND level = ? AND page_id IN "
+                f"({','.join('?' * len(pids))})", (r["광종"], r["편"], *pids))]
+            ok = bool(hs) and all_sure(state_of(con, f) for f in hs)
+            xs = con.execute("SELECT * FROM xcheck_haul WHERE work_date = ? AND slot LIKE 'unresolved:%' AND material = ? "
+                             "AND level = ?", (day, r["광종"], r["편"])).fetchall()
+            assert any((r["일보 횟수"], r["행렬 횟수"]) == ((x["log_trips"], x["matrix_trips"]) if ok else (None, None))
+                       and r["판정"] == L.XCHECK_STATUS[x["status"]] + ("" if ok else L.PROVISIONAL) for x in xs), r
+            assert (r[L.STATE] == L.ROW_STATE["value"]) if ok else r[L.STATE] in (L.ROW_STATE["pending"], L.ROW_STATE["illegible"])
             continue
         x = con.execute("SELECT * FROM xcheck_haul WHERE work_date = ? AND slot = ? AND material = ? AND level = ?",
                         (day, r["자리"], r["광종"], r["편"])).fetchone()
@@ -373,6 +383,32 @@ def test_unconfirmed_values_are_not_exported(null_run, low_day):
     with_machine = [r for r in rows if r[L.MACHINE] is not None]
     assert with_machine and all(r[L.STATE] == L.ROW_STATE["pending"] and r["횟수"] is None for r in with_machine)
     assert {r[L.MACHINE] for r in with_machine} <= machine
+
+
+def test_monthly_long_table_has_no_unconfirmed_values(low_day):
+    """월별의 긴 표(운반): 확정이 아닌 행의 횟수는 비고, 기계 값은 machine_values 일 때만 따로 둔 열에 (일별과 같은 규칙)."""
+    from minedocscan.export.monthly import monthly_book
+
+    con, site = low_day["pipe"].con, low_day["pipe"].site
+    days = days_of(con)
+    machine = {typed(v, "integer") for v in machine_values_of(con)}
+    n = con.execute("SELECT COUNT(*) FROM prod_haul WHERE has_value = 1 OR review_status = 'pending'").fetchone()[0]
+    for mv in (False, True):
+        with read_txn(con):
+            b = monthly_book(con, site, days[0][:7], days, machine_values=mv)
+        s = sheet(b, L.LONG["haul"])
+        names = [c[0] for c in s["rows"][0]]
+        rows = [{k: c[0] for k, c in zip(names, r, strict=True)} for r in s["rows"][1:]]
+        assert len(rows) == n
+        unsure = [r for r in rows if r[L.STATE] in (L.ROW_STATE["pending"], L.ROW_STATE["illegible"])]
+        assert len(unsure) > 20 and all(r["횟수"] is None for r in unsure)
+        assert all(r["횟수"] is not None for r in rows if r[L.STATE] == L.ROW_STATE["value"])
+        if not mv:
+            assert L.MACHINE not in names
+        else:
+            with_machine = [r for r in rows if r[L.MACHINE] is not None]
+            assert with_machine and all(r in unsure for r in with_machine)
+            assert {r[L.MACHINE] for r in with_machine} <= machine
 
 
 def test_reviews_turn_cells_into_values_and_illegible(low_day, tmp_path):

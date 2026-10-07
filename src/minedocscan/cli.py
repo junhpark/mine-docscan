@@ -637,8 +637,7 @@ def cmd_serve(a) -> int:
     from .intake import decisions as decs
     from .intake.worker import Worker, format_round
     from .pipeline import Pipeline
-    from .review.ops import OpsApp
-    from .review.server import ReviewApp, serve
+    from .review.server import serve
     from .review.store import import_into
     from .store.db import open_db
 
@@ -670,15 +669,10 @@ def cmd_serve(a) -> int:
         from .forms.sitepack import SitePack
 
         screen_site = SitePack(site.root)
-        jobs = worker.after if worker is not None else {}
-        ops = OpsApp(con, screen_site, s, a.reviewer, worker=worker, watching=not a.no_watch, wake=wake,
-                     excel=jobs.get("excel"), publish=jobs.get("publish"))
         try:
-            app = ReviewApp(con, screen_site, s, a.reviewer, "pending", ops=ops)
+            _ops, app = _screen_apps(con, screen_site, s, a.reviewer, worker, wake, watching=not a.no_watch)
         except ValueError as e:
             raise SystemExit(str(e)) from None
-        if worker is not None:                                          # 검수 저장 → 작업 스레드의 다음 바퀴 (깨우지 않는다)
-            app.on_touched = lambda t: [job.mark(t) for job in worker.after.values()]
         if thread is not None:
             thread.start()
         try:
@@ -693,6 +687,21 @@ def cmd_serve(a) -> int:
         if lock is not None:
             lock.release()
     return 0
+
+
+def _screen_apps(con, site, s: Settings, reviewer: str, worker, wake, watching: bool = True):
+    """serve 의 화면 쪽 (화면 스레드의 연결): 운영 화면 — 결정을 저장하면 작업 스레드를 깨운다 — 과 검수 화면 — 검수 저장은 바퀴 끝의
+    일(엑셀·싣기)에 건드린 것만 넘기고 깨우지 않는다 (tasks/0008 4.7). 돌려주는 값: (OpsApp, ReviewApp)."""
+    from .review.ops import OpsApp
+    from .review.server import ReviewApp
+
+    jobs = worker.after if worker is not None else {}
+    ops = OpsApp(con, site, s, reviewer, worker=worker, watching=watching, wake=wake,
+                 excel=jobs.get("excel"), publish=jobs.get("publish"))
+    app = ReviewApp(con, site, s, reviewer, "pending", ops=ops)
+    if worker is not None:
+        app.on_touched = lambda t: [job.mark(t) for job in worker.after.values()]
+    return ops, app
 
 
 def _round_jobs(s: Settings, site) -> dict:
@@ -714,6 +723,7 @@ def _worth_showing(out: dict) -> bool:
                 or x.get("written") or x.get("deleted") or x.get("failed") or x.get("missing_dir") or out.get("excel_error")
                 or x.get("kept") or x.get("skipped_dates")
                 or p.get("error") or any((p.get("replaced") or {}).values()) or any((p.get("removed") or {}).values())
+                or p.get("skipped")
                 or out.get("publish_error"))
 
 

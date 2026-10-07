@@ -43,6 +43,7 @@ class AutoPublish:
         self.notice: str | None = None
         self.reason: str | None = None
         self.fell_back = 0                            # 더러운 범위만 싣다가 전체 훑기로 넘어간 횟수
+        self.skipped: set = set()                     # 지금 대상에 없는 건너뛴 범위 — 다시 견준 바퀴에서만 고친다 (더러운 바퀴가 0 으로 덮지 않게)
         if not settings.publish_url:
             self.reason = "off"
         elif settings.publish_enabled is False:
@@ -92,8 +93,9 @@ class AutoPublish:
         if full:
             self.last_sweep = now
         self.fell_back += res.fell_back
+        self.skipped = (self.skipped - res.checked_ids) | res.skipped_ids
         self.status = dict(self.status, last_ok_at=self.now(), behind=0, last_error=None, replaced=res.changed,
-                           skipped=res.skipped, fell_back=self.fell_back)
+                           skipped=len(self.skipped), fell_back=self.fell_back)
         return res
 
 

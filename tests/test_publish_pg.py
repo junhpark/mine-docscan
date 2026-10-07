@@ -102,8 +102,9 @@ def test_decisions_and_reprocessing_with_dirty_scopes_only(world, pg):
     싣기 → 불변식. 점검표의 이기는 쪽이 바뀌는 경우(a 를 버리면 같은 날의 c 가 이긴다)와 일보의 자리가 다른 문서로 옮겨 가는 경우가 든다."""
     pipe, site, ids = world["pipe"], world["site"], world["ids"]
     con = pipe.con
-    auto = AutoPublish(pg)
-    assert auto.after_round(con, Touched()).created                          # 시작할 때의 전체 훑기
+    auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0))
+    first = auto.after_round(con, Touched())
+    assert first.created and first.full                                       # 시작할 때의 전체 훑기
     path = world["st"].decisions_path(site.root)
     a, b, e = ids["a_2030-01-07"], ids["b_2030-01-07"], ids["e_2030-01-07"]
     winner = {r[0]: r[1] for r in con.execute("SELECT inspection_id, page_id FROM insp_daily")}
@@ -119,7 +120,7 @@ def test_decisions_and_reprocessing_with_dirty_scopes_only(world, pg):
         t, pipe.touched = pipe.touched, Touched()
         r = auto.after_round(con, t)
         assert r is not None and not isinstance(r, Exception) and not getattr(r, "kind", None), r
-        assert not r.fell_back
+        assert not r.fell_back and not r.full and r.checked < first.checked   # 더러운 범위만 (전체 훑기가 아니다)
         assert_same(con, pg)
         now = {r_[0]: r_[1] for r_ in con.execute("SELECT inspection_id, page_id FROM insp_daily")}
         moved |= any(winner.get(k) and v.split("-p")[0] != winner[k].split("-p")[0] for k, v in now.items())
@@ -167,6 +168,18 @@ def test_one_transaction_and_unsuitable_values(world, pg):
     assert_same(con, pg, skip_docs={bad})
     assert remote(pg, f'SELECT COUNT(*) FROM "{pg.publish_schema}".doc_page WHERE document_id = %s', (bad,)) == [(0,)]
     assert publish(world, pg, check=True).replaced["document"] == 1
+    # 바퀴 끝의 싣기: 건너뛴 범위의 수는 그 범위를 다시 견준 바퀴에서만 바뀐다 (다른 문서의 더러운 바퀴가 0 으로 덮지 않는다)
+    from minedocscan.cli import _worth_showing
+
+    auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0))
+    out = auto.after_round(con, Touched())
+    assert out.full and out.skipped == 1 and auto.status["skipped"] == 1 and _worth_showing({"publish": out.as_dict()})
+    other = world["ids"]["d_2030-01-08"]
+    assert not auto.after_round(con, Touched(documents={other})).full and auto.status["skipped"] == 1
+    con.execute("UPDATE doc_field SET value_final = 'ab' WHERE value_final = 'a' || char(0) || 'b'")
+    con.commit()
+    assert not auto.after_round(con, Touched(documents={bad})).full and auto.status["skipped"] == 0
+    assert_same(con, pg)
 
 
 def test_versions_rebuild_and_views(world, pg):
@@ -267,8 +280,10 @@ def test_reprocess_fuzz_with_dirty_publishing(world, pg, seed):
         t, pipe.touched = pipe.touched, Touched()
         t.add(box)
         box.__init__()
+        everything = t.everything
         r = auto.after_round(con, t)
         assert r is None or hasattr(r, "replaced"), r
+        assert r is None or not r.full or r.fell_back or everything, n         # 더러운 범위만 (넘어간 것은 따로 센다)
         assert_same(con, pg)
 
     reprocess_fuzz(world, steps=12, seed=seed, fresh=False, on_touched=box.add, after_step=step)

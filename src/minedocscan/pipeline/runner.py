@@ -100,6 +100,7 @@ class Pipeline:
         self.on_document = None         # 문서 하나의 처리를 시작할 때 (document_id) — 화면의 작업 상태
         # 처리가 건드린 것 (날짜·문서·장비 — tasks/0008 4.7): 작업 스레드가 바퀴의 끝에 가져가 엑셀·통합 DB 에 다시 볼 범위로 쓴다
         self.touched = Touched()
+        self._unreachable_seen: set[tuple[str, int]] = set()    # 건드린 것으로 남긴 닿지 않는 문서 (문서, 요청 번호)
 
     # ── 입력 ───────────────────────────────────────────────────────────────
     @staticmethod
@@ -249,6 +250,11 @@ class Pipeline:
         src = resolve_source(row["source_path"], row["source_rel"], self.settings.archive_root)
         if src is None and not dec.doc.discarded:
             self.summary["unreachable"].append(document_id)
+            # 결정이 요청 번호를 올렸으면 처리하지 못해도 그 날짜의 "다시 처리 대기" 수가 바뀐다 — 요청 번호마다 한 번만 건드린 것으로
+            key = (document_id, row["work_requested"])
+            if key not in self._unreachable_seen:
+                self._unreachable_seen.add(key)
+                self.touched.documents.add(document_id)
             return {"document_id": document_id, "status": "unreachable", "pages": []}
         if self.on_document:
             self.on_document(document_id)

@@ -161,6 +161,15 @@ def test_unresolved_logs_and_unknown_slots(world_db, bundles):
     check_no_log_value_is_lost(con, b, "2030-01")
     xs = [r for r in xcheck_rows(b) if r["자리"] == L.UNRESOLVED_SLOT]
     assert xs and all(r["차량번호"] is None for r in xs)            # 교차검증의 키(unresolved:<차량번호>)를 싣지 않는다
+    # 일별 업무 시트: 자리 미정 쪽의 교차검증 행은 그 쪽의 운반 행이 확정일 때만 횟수 (null 처리 — 값이 있는 칸은 검수 대기)
+    from test_export_excel import book, business_rows, check_business
+
+    for day in days_of(con):
+        d = book(con, site, day)
+        check_business(con, d, day, site)
+    rows = [r for r in business_rows(book(con, site, "2030-01-07"), "xcheck_haul") if r["자리"] == L.UNRESOLVED_SLOT]
+    assert any(r["판정"].endswith(L.PROVISIONAL) for r in rows) and all(r["일보 횟수"] is None for r in rows
+                                                                        if r["판정"].endswith(L.PROVISIONAL))
 
 
 def xcheck_rows(b: dict) -> list[dict]:

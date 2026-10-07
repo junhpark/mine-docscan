@@ -37,7 +37,8 @@ class Touched:
         return bool(self.dates or self.documents or self.removed or self.refs or self.everything)
 
     def all_dates(self, con: sqlite3.Connection) -> set[str]:
-        """dates + 장비(refs)의 가동 기록이 있는 모든 날짜 + 문서의 쪽이 있는 날짜 (지금의 DB 에서)."""
+        """dates + 장비(refs)의 가동 기록이 있는 모든 날짜 + 문서의 날짜와 그 문서의 쪽이 있는 날짜 (지금의 DB 에서 —
+        버린 문서는 쪽이 없어도 문서의 날짜로 대기 수에 든다)."""
         from .validate.usage import equipment_ref
 
         out = {d for d in self.dates if d}
@@ -47,11 +48,13 @@ class Touched:
                     out.add(r["work_date"])
         if self.documents:
             ids = sorted(self.documents)
-            for i in range(0, len(ids), 500):
-                chunk = ids[i:i + 500]
+            for i in range(0, len(ids), 400):           # 400 × 2 자리 < SQLite 의 옛 상한 999
+                chunk = ids[i:i + 400]
+                marks = ",".join("?" * len(chunk))
                 out |= {r[0] for r in con.execute(
-                    f"SELECT DISTINCT work_date FROM doc_page WHERE work_date IS NOT NULL AND document_id IN "
-                    f"({','.join('?' * len(chunk))})", chunk)}
+                    f"SELECT DISTINCT work_date FROM doc_page WHERE work_date IS NOT NULL AND document_id IN ({marks}) "
+                    f"UNION SELECT DISTINCT work_date FROM doc_document WHERE work_date IS NOT NULL AND document_id IN ({marks})",
+                    chunk + chunk)}
         return out
 
 

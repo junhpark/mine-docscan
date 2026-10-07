@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import shutil
 import threading
 from dataclasses import replace
 
@@ -19,7 +20,7 @@ from minedocscan.export.xlsx import read_values
 from minedocscan.intake import decisions as decs
 from minedocscan.intake.worker import Worker, format_round
 from minedocscan.review.ops import OpsApp
-from minedocscan.review.server import ApiError, ReviewApp
+from minedocscan.review.server import ApiError
 from minedocscan.review.store import review_from_field, save
 from minedocscan.store.db import open_db, read_txn
 from minedocscan.touched import Touched
@@ -192,15 +193,24 @@ def test_processing_reports_old_and_new_dates_and_failed_documents(world, tmp_pa
 def test_screen_review_is_exported_on_the_next_round_without_waking_the_worker(world, tmp_path):
     """serve 의 모양: 작업 스레드(자기 연결)가 바퀴를 돌고, 화면 스레드(자기 연결)의 검수 저장은 건드린 것만 넘긴다 (깨우지 않는다).
     다음 바퀴(여기서는 깨우기 신호로 바퀴를 넘긴다 — poll_seconds 를 기다리지 않게)에 그 날짜의 파일이 바뀐다."""
+    from minedocscan.cli import _screen_apps
+
     pipe, site, st = world["pipe"], world["site"], world["st"]
     out = tmp_path / "엑셀 폴더"
     out.mkdir()
     x = auto(world, out)
     worker = Worker(pipe, after={"excel": x})
     screen = open_db(st.resolved_db_url)
-    app = ReviewApp(screen, site, st, "jp", "pending")
-    app.on_touched = x.mark
-    stop, wake = threading.Event(), threading.Event()
+
+    class Wake(threading.Event):                                  # 깨우기 신호를 몇 번 보냈나 (기다림이 지운 뒤에도 센다)
+        sets = 0
+
+        def set(self):
+            self.sets += 1
+            super().set()
+
+    stop, wake = threading.Event(), Wake()
+    ops, app = _screen_apps(screen, site, st, "jp", worker, wake)   # serve 와 같은 연결 (운영 화면 + 검수 화면)
     rounds: list[dict] = []
     done = [threading.Event() for _ in range(3)]
 
@@ -216,7 +226,7 @@ def test_screen_review_is_exported_on_the_next_round_without_waking_the_worker(w
         fid, day = screen.execute("SELECT source_field_id, work_date FROM prod_haul WHERE source_role = 'log' AND "
                                   "review_status = 'pending' ORDER BY haul_id LIMIT 1").fetchone()
         app.post_review({"field_id": fid, "verdict": "value", "value": "7"})
-        assert not wake.is_set() and len(rounds) == 1             # 검수 저장은 작업 스레드를 깨우지 않는다
+        assert wake.sets == 0 and len(rounds) == 1                # 검수 저장은 작업 스레드를 깨우지 않는다
         wake.set()                                                # poll_seconds 가 지난 것처럼
         assert done[1].wait(120)
         assert rounds[1]["excel"]["written"] == 2                 # 그 날짜의 일별 파일과 그 달의 파일
@@ -224,9 +234,15 @@ def test_screen_review_is_exported_on_the_next_round_without_waking_the_worker(w
         stop.set()
         wake.set()
         t.join(60)
+    try:
+        assert not t.is_alive()
+        assert same_as_db(pipe.con, site, out) == 4
+        n = wake.sets                                             # 같은 연결에서 결정은 깨운다 (깨우기 신호가 이어져 있다)
+        doc = world["ids"]["d_2030-01-08"]
+        assert ops.post_decision({"items": [{"target": doc, "kind": "discard"}], "confirm": True})["ok"]
+        assert wake.sets == n + 1 and x.box.take().documents == {doc}
+    finally:
         screen.close()
-    assert not t.is_alive()
-    assert same_as_db(pipe.con, site, out) == 4
 
 
 def test_full_sweep_catches_reviews_from_another_process(world, tmp_path):
@@ -350,6 +366,18 @@ def test_downloads_equal_the_model(world, tmp_path):
         assert have == want, s["name"]
     data, name = ops.export_xlsx("month", {"month": "2030-01"})
     assert name == "2030-01.xlsx" and data[:2] == b"PK"
+    f = tmp_path / name
+    f.write_bytes(data)
+    days = [r[0] for r in con.execute("SELECT DISTINCT work_date FROM doc_page WHERE work_date LIKE '2030-01-%' ORDER BY 1")]
+    with read_txn(con):
+        book = monthly_book(con, site, "2030-01", days)
+    got = read_values(f)
+    for s in book["sheets"]:
+        want, have = model_rows(s), got[s["name"]]
+        for i, row in enumerate(s["rows"]):
+            if any(c[1].startswith("stamp") for c in row):
+                have[i], want[i] = have[i][:1], want[i][:1]
+        assert have == want, s["name"]
     for kind, params, status in (("day", {"date": "2030-02-30"}, 400), ("day", {"date": "20300107"}, 400),
                                  ("day", {"date": "2031-01-07"}, 404), ("month", {"month": "2030-13"}, 400),
                                  ("month", {"month": "2031-01"}, 404), ("day", {}, 400)):
@@ -448,3 +476,21 @@ def test_a_decision_from_the_screen_marks_its_documents(world, tmp_path):
     doc = world["ids"]["d_2030-01-08"]
     assert ops.post_decision({"items": [{"target": doc, "kind": "discard"}], "confirm": True})["ok"]
     assert doc in x.box.take().documents
+    # 버린 문서(쪽이 없다 — 문서의 날짜만 남는다)를 원본에 닿지 않을 때 되살린다: 처리는 못 하지만 그 날짜의 "다시 처리 대기"가 1 이 된다
+    pipe.process_pending()
+    t, pipe.touched = pipe.touched, Touched()
+    x.after_round(pipe.con, t)
+    assert pipe.con.execute("SELECT COUNT(*) FROM doc_page WHERE document_id = ?", (doc,)).fetchone()[0] == 0
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    shutil.move(str(world["scans"] / "d_2030-01-08.pdf"), moved / "d_2030-01-08.pdf")
+    assert ops.post_decision({"items": [{"target": doc, "kind": "restore"}], "confirm": True})["ok"]
+    pipe.process_pending()
+    assert pipe.summary["unreachable"][-1] == doc and doc in pipe.touched.documents      # 처리도 건드린 것으로 남긴다
+    t, pipe.touched = pipe.touched, Touched()
+    r = x.after_round(pipe.con, t)
+    assert r is not None and set(r.written) == {daily_path("2030-01-08"), monthly_path("2030-01")}
+    assert same_as_db(pipe.con, site, out) and export_excel(pipe.con, site, out, full=True).written == []
+    pipe.process_pending()                                    # 같은 요청 번호로 다시 닿지 않으면 다시 건드리지 않는다
+    assert not pipe.touched.documents
+    shutil.move(str(moved / "d_2030-01-08.pdf"), world["scans"] / "d_2030-01-08.pdf")

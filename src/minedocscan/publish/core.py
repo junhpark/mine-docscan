@@ -53,6 +53,8 @@ class Result:
     full: bool = False
     fell_back: bool = False              # 더러운 범위만 싣다가 실패해 전체 훑기로 다시 했다
     created: bool = False                # 대상의 표를 이번에 만들었다
+    checked_ids: set = field(default_factory=set, repr=False)    # 견준 범위 (종류, 키) — AutoPublish 가 건너뛴 범위를 들고 있는 데
+    skipped_ids: set = field(default_factory=set, repr=False)    # 건너뛴 범위 (종류, 키) — 찍지 않는다 (문서 ID·날짜)
 
     @property
     def changed(self) -> int:
@@ -64,38 +66,58 @@ class Result:
 
 
 # ── 연결 ───────────────────────────────────────────────────────────────────
+_URL = re.compile(r"(?i)postgres(?:ql)?://")
+_NAME = re.compile(r"[A-Za-z0-9._:\-]{1,253}")               # 찍어도 되는 호스트·DB 이름 (그 밖의 글자면 ? — 비밀번호의 조각일 수 있다)
+_KW = re.compile(r"(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S+)")
+
+
+def _name(v: str | None, missing: str = "?") -> str:
+    v = (v or "").strip("'")
+    return missing if not v else v if _NAME.fullmatch(v) else "?"
+
+
 def describe_url(url: str | None) -> str:
-    """찍어도 되는 대상의 이름: 호스트(:포트)/DB — 사용자·비밀번호 없이. postgresql://… 꼴과 libpq 의 키워드 꼴(host=… dbname=…)
-    둘 다 — 그 밖의 글자는 그대로 내지 않는다."""
+    """찍어도 되는 대상의 이름: 호스트(:포트)/DB — 사용자·비밀번호 없이. postgresql://… 꼴과 libpq 의 키워드 꼴(host=… dbname=…).
+    그 밖의 글자는 내지 않는다: URL 의 사용자 정보 뒤(경로·질의)에 '@' 가 있으면 비밀번호에 '/'·'?'·'#' 가 그대로 들어간 것이라
+    어디까지가 비밀인지 모른다 → 읽을 수 없는 URL. 호스트·DB 이름은 글자·숫자·'.-_' 만 (아니면 ?)."""
     if not url:
         return "(없음)"
-    if "://" not in url:                                     # 키워드 꼴: 아는 키만 고른다 (password 는 보지 않는다)
-        kv = dict(re.findall(r"(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S+)", url))
-        host = kv.get("host", "localhost").strip("'")
-        port = f":{kv['port'].strip(chr(39))}" if kv.get("port") else ""
-        return f"{host}{port}/{kv.get('dbname', '?').strip(chr(39))}" if kv else "(읽을 수 없는 연결 문자열)"
+    s = url.strip()
+    if not _URL.match(s):                                     # 키워드 꼴: 아는 키만 고른다 (password 는 보지 않는다)
+        kv = {k.lower(): v for k, v in _KW.findall(s)}
+        if not kv:
+            return "(읽을 수 없는 연결 문자열)"
+        port = (kv.get("port") or "").strip("'")
+        return f"{_name(kv.get('host'), 'localhost')}{':' + port if port.isdigit() else ''}/{_name(kv.get('dbname'))}"
     try:
-        u = urlsplit(url)
-        host = u.hostname or "localhost"
+        u = urlsplit(s)
+        if "@" in u.path + u.query + u.fragment:
+            return "(읽을 수 없는 URL)"
+        host = _name(u.hostname, "localhost")
         port = f":{u.port}" if u.port else ""
     except ValueError:
         return "(읽을 수 없는 URL)"
-    db = (u.path or "/").lstrip("/").split("?")[0]
-    return f"{host}{port}/{db or '?'}"
+    return f"{host}{port}/{_name(u.path.lstrip('/'))}"
 
 
 def scrub(text: str, url: str | None) -> str:
-    """글에서 URL·비밀번호를 지운다 (안전장치 — 드라이버의 글을 찍지 않는 것이 먼저다)."""
+    """글에서 URL·비밀번호를 지운다 (안전장치 — 드라이버의 글을 찍지 않는 것이 먼저다). URL 꼴이면 '://' 와 마지막 '@' 사이 전부를
+    비밀로 본다 (비밀번호에 '/' 가 그대로 들어가 urlsplit 이 잘못 가르는 때도)."""
     if not url:
         return text
     out = text.replace(url, describe_url(url))
+    secrets = []
+    m = _URL.match(url.strip())
+    if m and "@" in url:
+        info = url.strip()[m.end():url.strip().rindex("@")]
+        secrets += [info, info.split(":", 1)[-1]]
     try:
-        pw = urlsplit(url).password
+        secrets.append(urlsplit(url).password)
     except ValueError:
-        pw = None
-    if pw:
-        out = out.replace(pw, "***")
-    return re.sub(r"password=\S+", "password=***", out)
+        pass
+    for sec in sorted({x for x in secrets if x and len(x) >= 3}, key=len, reverse=True):
+        out = out.replace(sec, "***")
+    return re.sub(r"password\s*=\s*('(?:[^'\\]|\\.)*'|\S+)", "password=***", out)
 
 
 def psycopg_connect(url: str, timeout_s: float):
@@ -264,6 +286,7 @@ def publish(con, target: Target, full: bool = True, documents: Iterable[str] = (
             have = target.state(None) if full else target.state(kind, keys.get(kind, ()))
             for sc in build(con, kind, keys.get(kind, ())):
                 res.checked += 1
+                res.checked_ids.add(sc.id)
                 old = have.get(sc.id)
                 if sc.key not in local[kind]:
                     if old is not None:                      # 대상에 있던 범위만 (실을 수 없어 건너뛴 범위는 행도 상태도 없다)
@@ -291,6 +314,7 @@ def publish(con, target: Target, full: bool = True, documents: Iterable[str] = (
                 raise RuntimeError("시험: 싣는 가운데의 실패")
             if sc.unsuitable():
                 res.skipped += 1                         # 옛 행은 위에서 지웠다. 상태 표에도 없다 — 다음에도 "다르다"
+                res.skipped_ids.add(sc.id)
                 continue
             for t, rows in sc.rows.items():
                 target.insert(t, _cols(con, t), rows)
