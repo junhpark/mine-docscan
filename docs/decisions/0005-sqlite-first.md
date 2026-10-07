@@ -1,6 +1,7 @@
 # 0005. SQLite 로 시작하고 PostgreSQL 로 옮길 수 있게
 
-상태: 채택 (2026-09)
+상태: 채택 (2026-09). 보완 → [0021](0021-publish-to-the-shared-db.md) (2026-10): 작업 DB 는 SQLite 그대로 두고 PostgreSQL 로 옮기지 않는다 —
+통합 DB 에는 결과의 사본을 싣는다. 아래의 "운영용 PostgreSQL 어댑터"는 만들지 않는다.
 
 ## 결정
 

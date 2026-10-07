@@ -25,6 +25,24 @@ settle_seconds = 5           # 수정 시각이 이만큼 지나고 열리는 �
 give_up_seconds = 120        # 이만큼 지나도 열리지 않으면 손상 방침대로 등록한다 (읽을 수조차 없으면 <inbox>/_failed 로)
 poll_seconds = 3             # 접수 폴더를 훑는 간격
 
+# 엑셀 내보내기 (docs/DATA.md, ADR 0022). excel_dir 가 없으면 자동 내보내기는 꺼져 있다 — export excel 은 OUT 을 받는다.
+# watch·serve 가 바퀴 끝(접수 → 처리 → 엑셀 → 싣기)에 바뀐 날짜의 일별·월별 파일만 다시 쓴다 (내용의 해시가 같으면 건드리지 않는다)
+# [export]
+# excel_dir = "D:/shared/minedocscan-excel"   # MINEDOCSCAN_EXCEL_DIR. 있는 폴더여야 한다 (만들지 않는다).
+#                                             # 저장소·접수 폴더·보관 폴더 안이면 켜지 않는다 — 엑셀에는 현장의 값(이름·차량번호)이 있다
+# sweep_minutes = 30         # 전체 훑기의 간격 (분). 0 이면 시작할 때만 — 다른 프로세스(review serve)가 쓴 검수와 놓친 것을 잡는다
+# machine_values = false     # true 면 업무 시트·긴 표에 "기계 값(확정 아님)" 열을 따로 둔다 (기본은 확정된 값만 — ADR 0008)
+
+# 통합 DB(PostgreSQL)로 싣기 (ADR 0021) — pip install -e ".[postgres]"
+# 대상의 URL(postgresql://사용자:비밀번호@호스트/DB)은 **환경변수 MINEDOCSCAN_PUBLISH_URL 로만** 준다. 이 파일에 적지 않는다
+# ([publish] 에 url·dsn·password 가 있으면 설정 오류). URL 이 없으면 싣기는 꺼져 있다. 대상의 계정은 그 스키마에만 쓰는 전용 계정으로
+# [publish]
+# schema = "minedocscan"     # 대상의 스키마 (MINEDOCSCAN_PUBLISH_SCHEMA). 영문 소문자·숫자·밑줄
+# enabled = true             # 없으면 URL 이 있을 때 켜진다. false 면 URL 이 있어도 watch·serve 가 싣지 않는다
+# sweep_minutes = 30         # 전체 훑기의 간격 (분). 0 이면 시작할 때만 — 그 사이에는 바뀐 문서·날짜만
+# connect_timeout_s = 5      # 연결을 기다리는 시간 (초, 1–600)
+# retry_seconds = 60         # 싣기에 실패한 뒤(연결·판이 다름·…) 이만큼은 다시 연결하지 않는다 (꺼진 서버에 바퀴마다 매달리지 않게)
+
 [recognize]
 backend = "null"             # 등록된 인식 백엔드 이름 (minedocscan info 로 확인) — 아래 by_kind 에 없는 칸 종류에 쓴다
 
@@ -51,5 +69,5 @@ backend = "none"
 [review]
 source_dpi = 300             # 검수 화면·크롭 내보내기에서 원본 PDF 를 렌더링하는 해상도 (스캔 원본과 같게)
 
-[database]
+[database]                   # 작업 DB — 로컬 SQLite 만. 통합 DB(PostgreSQL)는 위의 [publish] 로 싣는다 (ADR 0021)
 # url = "sqlite:///C:/minedocscan-work/minedocscan.db"       # 기본: sqlite:///<work_root>/minedocscan.db

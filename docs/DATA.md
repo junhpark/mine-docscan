@@ -17,6 +17,9 @@
 | 학습용 크롭(`export-crops`), 틀린 칸 모아 보기(`recognizer eval --errors`) | 저장소 밖 (기본 `WORK_ROOT/recognizer-errors`) | **아니오** — 현장 글씨. git 작업 트리 안이면 도구가 거절한다 |
 | 인쇄 층(`print.png` — `template print-layer`), 다른 판의 기준 이미지(`template variant` 가 쓴 `reference.png`) | 사이트 팩 안 (= `SITE/templates/<양식>/`) | **아니오** — 현장 스캔에서 나온 것. 인쇄 층에는 늘 같은 자리에 쓰는 손글씨(이름·서명)의 잔상이 남는다. git 작업 트리 안이면 도구가 거절한다 (`print-layer` 는 합성 사이트 팩이면 `--allow-in-repo`) |
 | 템플릿 미리보기(`template preview`, `--print`), 쪽 미리보기(`pages --thumbs`) | `WORK_ROOT/template-preview`, `WORK_ROOT/thumbs` | **아니오** — 실제 양식과 글씨. `template preview` 는 저장소 안이면 거절한다 |
+| 엑셀 폴더(일별·월별 파일)와 그 기록 파일(`.minedocscan-export.json`), 홈에서 내려받은 엑셀 | `[export] excel_dir` (또는 `MINEDOCSCAN_EXCEL_DIR`) — 현장이 여는 폴더. 내려받은 것은 브라우저의 내려받기 폴더 | **아니오** — 이름·차량번호·값·원래 파일명이 들어 있다. DB 의 사본이라 지워도 다시 만든다. 저장소 안·접수 폴더 안·보관 폴더 안이면 도구가 거절한다. 기록 파일(`.json`)은 `.gitignore` 가 막지 않는다 |
+| 가린 쪽 그림(`export masked-pages`) | 명령에 준 폴더 (저장소 밖) | **아니오** — 템플릿이 아는 자리만 가렸다. 가렸다고 커밋해도 되는 것이 아니다. git 작업 트리 안이면 도구가 거절한다 |
+| 통합 DB(PostgreSQL)의 URL·비밀번호 (`MINEDOCSCAN_PUBLISH_URL`) | 그 컴퓨터의 환경변수만 — `minedocscan.toml` 의 `[publish]` 에 `url`·`dsn`·`password` 를 적으면 설정 오류. 실은 표는 현장 서버의 `[publish] schema` | **아니오** — 문서·이슈·로그에도 쓰지 않는다 (예시는 `postgresql://사용자:비밀번호@호스트/DB`) |
 | 그 밖의 모델 가중치 | 로컬 또는 모델 저장소 | 아니오 |
 
 공유 드라이브의 현재 배치:
@@ -79,8 +82,11 @@ mine-docscan/                 ← MINEDOCSCAN_ARCHIVE_ROOT (읽기 전용 — �
 - 인쇄 층(`print.png`)과 그것을 그린 미리보기(`template preview --print`) — 빈 양식처럼 보이지만 쪽들을 겹쳐 만든 것이라, 날마다 같은 자리에
   같은 글씨로 쓰는 칸(작성자 이름, 서명, 늘 같은 점검란)은 쪽이 많아도 잔상이 남는다. 같은 자리에 쓰는 계기 값도 쪽이 적으면 남는다.
   다른 판의 기준 이미지(`template variant`)는 현장 스캔 그 자체다. 예외는 합성 양식으로 만든 것뿐이다 (시험은 시험 중에 만든다)
+- 내보낸 엑셀(엑셀 폴더의 파일, 홈에서 내려받은 파일)과 그 갈무리 — 차량번호·작성자, 인쇄된 머리글의 이름, 검수한 글자 칸, 원래 파일명이 들어 있다
+- 가린 쪽 그림 — 템플릿이 아는 자리만 가렸다. 표 위의 메모, 수 칸에 적은 이름, 템플릿에 적지 않은 인쇄는 남는다.
+  가렸다는 이유로 저장소·문서·PR·이슈에 넣지 않는다
 - 실제 이름·차량번호를 예시로 쓴 문서·주석·테스트·커밋 메시지
-- API 키와 비밀값 (`.env`, `minedocscan.toml`)
+- API 키와 비밀값 (`.env`, `minedocscan.toml`), 통합 DB 의 URL(`MINEDOCSCAN_PUBLISH_URL` — 비밀번호가 들어 있다)
 
 **이름·차량번호가 들어 있는 파일** (전부 저장소 밖):
 
@@ -93,9 +99,15 @@ mine-docscan/                 ← MINEDOCSCAN_ARCHIVE_ROOT (읽기 전용 — �
 | 메타 필드 모델의 종류 목록 | `SITE/models/<이름>/classes.json` | 고를 수 있는 이름·차량번호 (카드·학습 로그에는 없다 — 종류의 수와 분포만) |
 | 내보낸 메타 크롭 | `OUT/<split>/meta/<키>/*.png`, `OUT/<split>/meta/labels.jsonl` | 글씨 그림과 그 값 |
 | 틀린 칸 모아 보기 | `WORK_ROOT/recognizer-errors/` (또는 `--errors` 의 경로) | 글씨 그림과 기계·정답 값 |
-| DB | `WORK_ROOT/minedocscan.db` | `doc_page_meta`, `prod_haul`, `eq_assignment_obs` 의 값 |
+| DB | `WORK_ROOT/minedocscan.db` | `doc_field`, `doc_page_meta`, `prod_haul`, `eq_assignment_obs`, `xcheck_haul`, `eq_usage_daily` 의 값, `doc_review` 의 입력값, `doc_document` 의 파일명, `eq_equipment` 의 등록번호 |
+| 엑셀 | `[export] excel_dir` 의 `daily/`·`monthly/`, 홈에서 내려받은 파일 | 운반·배차·교차검증·가동 기록의 차량번호·작성자, 행렬의 인쇄된 머리글(이름·차량번호), 양식 시트의 표 밖 필드, 출처 열의 원래 파일명 |
+| 통합 DB 의 표 | 현장 서버의 PostgreSQL, `[publish] schema` (기본 `minedocscan`) | 작업 DB 의 행 그대로 — `doc_field`, `doc_page_meta`, `prod_haul`, `eq_assignment_obs`, `xcheck_haul`, `eq_usage_daily` 의 값, `doc_document` 의 파일명, `eq_equipment` 의 등록번호 |
+| 가린 쪽 그림 | `export masked-pages` 에 준 폴더 | 템플릿이 모르는 자리의 글씨와 인쇄 (`redact` 상자를 적지 않은 인쇄된 이름·차량번호·등록번호, 표 위의 메모, 수 칸에 적은 이름) |
 
-`pages --meta-mismatch`, `eval --meta`, `report`, `info`, `recognizer list`·`eval` 의 출력에는 값을 찍지 않는다 (수만). 값은 검수 화면(127.0.0.1)에서만 본다.
+`pages --meta-mismatch`, `eval --meta`, `report`, `info`, `recognizer list`·`eval` 의 출력에는 값을 찍지 않는다 (수만). 값은 검수 화면(127.0.0.1)과 내보낸 것(엑셀 폴더·내려받은 엑셀·통합 DB 의 표·가린 쪽 그림)에서만
+본다 — 명령의 출력·로그에는 없다.
+`export excel`·`publish` 의 요약에는 날짜와 수만, `watch`·`serve` 의 요약에는 수와 문서 ID 만 나온다. 통합 DB 는 어디서나(`publish`, `info`, 홈) 호스트·DB·스키마로만
+보인다 — 사용자·비밀번호 없이, 드라이버의 오류 글 없이 (예외의 종류만).
 `template print-layer`·`variant`·`add-region`·`check` 의 요약과 오류에는 칸 이름(`<표>/<열>/행 N`, `fields/<이름>`)과 수만 나온다 — 행 키는
 장비 번호일 수 있어 찍지 않는다. `info` 는 장비명 대응표를 이름 대신 해시로 보여 준다.
 
@@ -207,9 +219,108 @@ minedocscan doc discard|restore <문서 ID|쪽 ID> --reviewer jp    doc keep <�
 - 홈: 할 일(날짜를 정할 문서, 다시 스캔 의심 쪽, 양식 없는·정합 실패 쪽, 운영 대기열마다 남은 수 — 누르면 그 대기열), 최근 문서, 작업 상태.
   문서 화면: 첫 쪽들의 그림을 보고 종이의 날짜를 넣는다 (화면이 미리 채우지 않는다. 받은 날보다 뒤·31일 넘게 앞이면 한 번 되묻는다).
   다시 스캔 의심 쪽은 두 쪽을 나란히 놓고 "같은 종이 — 이 쪽을 버린다 / 먼저 쪽을 버리고 이 쪽을 쓴다 / 다른 종이 — 둘 다 쓴다".
-- 서버 로그와 감시 요약에는 경로·상태 코드, 수와 문서 ID 만 찍힌다 — 파일명·이름·날짜·메모는 화면에서만 본다. 화면의 갈무리를 문서·PR 에 붙이지 않는다.
+- 서버 로그와 감시 요약에는 경로·상태 코드, 수와 문서 ID 만 찍힌다 — 파일명·이름·날짜·메모는 화면과 내보낸 엑셀에서 본다 (로그·요약에는 없다). 화면의 갈무리를 문서·PR 에 붙이지 않는다.
 - 사이트 팩(템플릿·모델·대응표)을 고친 뒤에는 `serve` 를 다시 띄운다 (돌고 있는 감시는 알아채지 못한다). 윈도우에서 켤 때 같이 띄우려면
   `minedocscan serve --reviewer <이름>` 을 부르는 바로 가기를 시작 프로그램 폴더(`shell:startup`)에 둔다 (설치 파일·서비스 등록은 M6).
+
+### 내보내기: 엑셀 폴더, 통합 DB, 가린 쪽 그림
+
+내보낸 것은 전부 DB 의 사본이다 — 한 방향이고, 지워도 다시 만든다 ([ADR 0022](decisions/0022-exports-are-copies.md)). 원본은 스캔 파일·검수 기록·결정
+기록 셋뿐이고, 내보내기는 작업 DB 에 아무것도 쓰지 않는다. 엑셀이나 통합 DB 의 표를 고쳐도 DB 로 돌아오지 않는다 — 고치는 곳은 검수 화면이다.
+**셋 다 현장의 값(이름·차량번호)을 받는다** — 저장소 밖에 둔다 (위의 표).
+
+```bash
+# 엑셀 — 설정: [export] excel_dir = "…/현장이 여는 폴더" (또는 MINEDOCSCAN_EXCEL_DIR). serve·watch 가 바퀴 끝에 쓴다
+minedocscan export excel [OUT] [--date 2030-01-07 | --from … --to … | --month 2030-01]   # 손으로. 범위가 없으면 전부 훑는다 — 바뀐 파일만 쓴다
+#   OUT/daily/2030-01/2030-01-07.xlsx     하루치: 요약, 양식마다 한 장(종이와 같은 행·열), 업무 표
+#   OUT/monthly/2030-01.xlsx              한 달: 날짜별 요약, 운반 표, 배차, 긴 표
+#   OUT/.minedocscan-export.json          기록 파일: 파일마다 내용의 해시·모델의 판·쓴 시각
+
+# 통합 DB(PostgreSQL) — pip install -e ".[postgres]", MINEDOCSCAN_PUBLISH_URL=postgresql://사용자:비밀번호@호스트/DB (환경변수로만)
+minedocscan publish --check                # 쓰지 않고 다른 범위의 수 — 같으면 0, 다르면 1, 닿지 못하면 2
+minedocscan publish                        # 지문이 다른 문서·날짜만 한 트랜잭션으로 갈아 끼운다. serve·watch 도 바퀴 끝에 (엑셀 다음)
+minedocscan publish --rebuild              # 이 프로그램이 만든 표만 지우고 다시 만든 뒤 싣는다 (스키마 버전·싣기의 판이 다를 때)
+
+# 가린 쪽 그림 — 발표·보고서용. 사람이 보고 나서 쓴다
+minedocscan export masked-pages OUT --date 2030-01-07 [--keep-text]     # 또는 --page-id <쪽 ID>… → OUT/<쪽 ID>.png
+```
+
+쓰는 명령(`export excel`, `publish`, `publish --rebuild`)은 파이프라인 잠금을 잡는다 — `serve`·`watch` 가 돌고 있으면 한 줄로 알리고 끝난다 (설정이
+있으면 그쪽이 쓰고 있고, 엑셀은 홈에서 내려받는다. `--rebuild` 는 `serve` 를 내리고 친다). 읽기만 하는 `publish --check`·`export masked-pages` 는
+돌고 있어도 된다. `run`·`serve --no-watch` 는 내보내지 않는다.
+
+**엑셀 폴더**
+
+- **들어가는 것**: 양식 시트(종이와 같은 행·열, 표 밖 필드의 차량번호·작성자까지), 업무 시트(운반·배차·교차검증·가동 기록·작업량·계기 검산·점검 —
+  차량번호·작성자, 행렬의 인쇄된 머리글, 점검내역), 출처 열의 원래 파일명(`파일명#쪽`)과 쪽 ID·필드 ID. 칸은 **확정된 값만** — 검수 대기는 `?`,
+  사람이 읽지 못한 칸은 `판독 불가`, 합계는 그 줄이 전부 확정일 때만 (ADR 0022). 날짜를 정할 문서·실패한 문서는 없다 (홈에서 본다).
+- **저장소 밖에.** `OUT`(설정의 `excel_dir`)이 git 작업 트리 안·접수 폴더 안·보관 폴더 안이면 거절한다. `export excel` 명령만 합성 데이터일 때
+  `--allow-in-repo` 로 저장소 안에 쓸 수 있다 (설정의 `excel_dir` 에는 예외가 없다). 설정이 그렇다면 `serve`·`watch` 가 시작할 때 한 줄로
+  알리고 자동 내보내기를 켜지 않는다.
+- **폴더는 있어야 한다** — 없으면 만들지 않고(끊긴 네트워크 폴더의 자리에 로컬 폴더를 만들지 않게) "폴더가 없습니다"로 알린다. 처리는 계속되고
+  다음 바퀴에 다시 본다. 그 아래의 `daily/…`·`monthly/` 는 만든다.
+- **열려 있는 파일은 다음 바퀴에.** 같은 폴더의 임시 이름(`.xlsx` 가 아닌 것)에 쓰고 바꿔 넣는다 — 덜 쓰인 `.xlsx` 는 보이지 않는다. 바꾸지
+  못하면(윈도우: 엑셀이 그 파일을 열고 있다) 임시 파일을 치우고 "쓰지 못함"으로 센 뒤 다음 바퀴(명령이면 다음 실행)에 다시 한다 — 다른 이름으로
+  쓰지 않는다. 열어 둔 파일은 닫을 때까지 예전 내용이다. 홈과 감시 요약에 쓰지 못한 파일의 수가 나온다.
+- **바뀐 것만 쓴다** — 내용(모델)의 해시가 기록 파일과 같으면 파일을 건드리지 않는다 (수정 시각 그대로 — xlsx 의 바이트는 같은 내용이어도 쓸 때마다
+  다르다). `serve`·`watch` 는 처리·검수·결정이 건드린 날짜(계기의 연속성으로 번지는 같은 장비의 다른 날짜까지)와 그 달만 다시 보고, 시작할 때와
+  `[export] sweep_minutes`(30)마다 전부 훑는다 — 다른 프로세스(`review serve`)가 저장한 검수는 이 훑기에서 따라온다.
+- **지워도 된다.** 파일을 지우면 다음 전체 훑기(또는 `export excel`)에 다시 쓴다. 기록 파일까지 지웠으면 전부 다시 쓴다. 엑셀 폴더 자체를
+  지웠으면 사람이 다시 만든다 — 프로그램은 만들지 않는다 (위). 만들면 다음 바퀴에 전부 다시 쓴다 (기록 파일도 없으므로). 쪽이 하나도
+  남지 않은 날짜(문서를 버렸다, 날짜를 옮겼다)·달의 파일은 이 프로그램이 지운다 — 기록 파일에 있는 것만.
+- **사용자가 둔 파일은 지우지 않는다.** 이름 규칙(`daily/<YYYY-MM>/<YYYY-MM-DD>.xlsx`, `monthly/<YYYY-MM>.xlsx`)에 맞지 않는 파일은 건드리지 않는다.
+  규칙에 맞는 이름은 이 프로그램의 것이다 — 그 자리의 파일을 고쳐 두면 내용이 바뀔 때 덮어쓴다. 고친 엑셀은 다른 이름·다른 폴더에 둔다.
+  기록을 잃었으면 규칙에 맞는 파일이라도 지우지 않고 수로 알린다.
+- **정답을 만드는 사람은 엑셀을 보지 않는다** (눈가림 — [ADR 0008](decisions/0008-review-records.md)). 엑셀에는 자동 적재된 기계 값과 쪽 메타가
+  확정 값으로 보이고, `[export] machine_values = true` 면 검수 대기 칸의 기계 값까지 업무 시트·긴 표의 "기계 값(확정 아님)" 열에 나온다 (기본은 끔).
+  정답을 만드는 대기열(`haul-numbers`, `mismatch`, `page-fields`·`--audit`, `readings`, `checks`)은 기계 값을 숨긴다 — 엑셀을 옆에 띄우면 그것이
+  깨진다. 정답은 대기열에서만 넣는다.
+- 홈의 내려받기(`/export/day.xlsx?date=…`, `/export/month.xlsx?month=…`)는 같은 내용을 그때 만들어 준다 — 엑셀 폴더 설정이 없어도 되고 서버는
+  디스크에 쓰지 않는다. 내려받은 파일은 브라우저의 내려받기 폴더에 남는다 — 같은 현장 데이터다.
+
+**통합 DB**
+
+- **대상은 환경변수 `MINEDOCSCAN_PUBLISH_URL` 로만 받는다** — `minedocscan.toml` 의 `[publish]` 에 URL·비밀번호를 적으면 설정 오류다. 설정 파일에는
+  `schema`(기본 `minedocscan`, 환경변수 `MINEDOCSCAN_PUBLISH_SCHEMA` — 영문 소문자·숫자·밑줄), `enabled`(URL 이 있으면 켜짐), `sweep_minutes`(30),
+  `connect_timeout_s`(5), `retry_seconds`(60). URL 은 어디에도 찍히지 않는다 — `info`·`publish`·홈에는 호스트·DB·스키마만.
+- **전용 계정으로 그 스키마에만 쓴다** (관리자 계정을 쓰지 않는다). 처음 싣기(대상에 `pub_meta` 가 없을 때)와 `--rebuild` 는 늘
+  `CREATE SCHEMA IF NOT EXISTS` 를 보낸 뒤 그 안에 표와 상태 표(`pub_state`, `pub_meta`)를 만든다. PostgreSQL 은 스키마가 이미 있어도 이 문장에
+  그 DB 의 `CREATE` 권한을 요구한다 — 스키마를 미리 만들어 두는 것으로는 피하지 못한다. 그래서 전용 계정에는 그 DB 의 `CREATE` 와 그 스키마의
+  소유(또는 모든 권한)를 준다. 그 뒤의 싣기는 그 스키마의 표에만 쓴다. 이 스키마의 표는 이 프로그램이 갈아 끼운다 — 2단계는 읽기만
+  하고 자기 표·뷰는 따로 둔다. 싣기는 상태 표의 지문과 견주므로 대상에서 고친 행을 알아채지 못한다 (그 범위가 바뀔 때까지 틀린 사본으로 남는다).
+  `--rebuild` 는 이 프로그램이 만든 표만 지우고, 뷰가 걸려 있으면 지우지 않고 멈춘다.
+- **이름·차량번호가 간다** — 현장의 서버라는 전제다. 싣는 표 12개(`doc_document`, `doc_page`, `doc_field`, `doc_page_meta`, `eq_equipment`,
+  `eq_assignment_obs`, `insp_daily`, `prod_haul`, `prod_tally`, `eq_usage_daily`, `xcheck_haul`, `xcheck_usage`)의 행은 작업 DB 그대로다: 쪽 메타·운반·
+  배차·교차검증·가동 기록의 차량번호·작성자, 장비 마스터의 등록번호(`eq_equipment.registration`), 원래 파일명(`source_name`)과
+  보관 폴더 기준 경로(`source_rel`), 검수자(`reviewed_by`), 기계 값과 검수 대기인 값까지 (엑셀처럼 빼지 않는다 — 확정인지는
+  `doc_field.review_status` 로 본다). 빼는 열은 다섯뿐이다: `created_at`, `received_at`, `work_requested`, `work_done`, `source_path`
+  (검수 시각 `reviewed_at`, 정합 그림의 상대 경로 `aligned_image` 는 간다). 빼는 표: `doc_review`·`doc_decision`(원본은 파일이다),
+  `doc_page_sig`, `meta_schema`.
+- **서버가 꺼져 있으면** `serve`·`watch` 는 그 바퀴의 싣기만 건너뛰고 접수·처리·엑셀을 계속한다. 건드린 범위는 들고 있다가 다음에 같이 싣고,
+  싣기가 실패한 뒤(연결·권한·판 …) `retry_seconds` 동안은 다시 연결하지 않는다. 홈에는 밀린 범위의 수와 마지막 실패의 종류, 감시 요약에는
+  "통합 DB: 싣지 못함 (…, 밀린 범위 N) — 다음에 다시". 서버가 돌아오면 다음 바퀴에 따라온다 (아직 한 번도 훑지 못했으면 전부 훑는다). `publish` 명령은 한 줄(호스트·DB 와
+  예외의 종류)과 종료 코드 2.
+- **한 번의 싣기는 한 트랜잭션이다** — 중간에 끊기면 대상은 싣기 전 그대로이고, 읽는 쪽은 반쯤 바뀐 문서를 보지 않는다. `psycopg` 가 없으면
+  `publish` 는 한 줄과 종료 코드 2, `serve`·`watch` 는 시작할 때 한 번 알리고 싣기를 끈다.
+- 대상의 스키마 버전이나 싣기의 판이 이 프로그램과 다르면 싣지 않고 `publish --rebuild` 를 알린다. 실을 수 없는 값(NUL 문자가 든 글자 …)이 있는
+  범위(문서·날짜)는 싣지 않고 대상의 옛 행을 지운 뒤 수로 알린다. 범위·지문·불변식은 [ADR 0021](decisions/0021-publish-to-the-shared-db.md).
+
+**가린 쪽 그림**
+
+- **템플릿이 아는 자리만 가린다.** 정합 그림(템플릿 좌표) 위에서 서명 필드(`kind: signature`), 가릴 메타 키의 필드(기본 `operator`·`vehicle_no` —
+  `site.toml` 의 `[redact] meta_keys`), 템플릿의 `redact` 상자(결재란, 행렬 머리의 인쇄된 이름, 점검표의 인쇄된 등록번호 열 — 판마다 따로 적는다,
+  [SITE_PACK.md](SITE_PACK.md)), 글자 칸 전부(표의 `handwritten_text` 열은 괘선까지, 표 밖의 글자 필드)를 한 색(검정)으로 채운다 — 흐리게 하지
+  않는다. 표 밖 필드와 `redact` 상자는 `[redact] pad_px`(기본 16 px)만큼 넓혀서. 수 칸·✓ 칸·인쇄는 남는다.
+- **남는 것**: 표 위에 걸쳐 쓴 메모, 수 칸에 적은 이름, `redact` 상자를 적지 않은 인쇄(행렬 머리의 이름·차량번호는 상자를 적어야 가려진다),
+  넓힌 폭보다 더 넘어간 글씨. `--keep-text` 면 글자 칸과 `meta_key` 가 없는 이름 필드도 남는다. 그래서 **사람이 한 장씩 보고 나서 쓴다**
+  (명령의 요약도 그렇게 말한다).
+- 기본 `pad_px` 16 은 합성에서 잰 것이다 (합성 표 밖 필드 206개에서 글씨가 상자를 넘은 거리: 최대 11 px, 99 % 9 px). 실제 글씨는 더 넘을 수 있다 —
+  양식마다 한 쪽씩 내어 보고 현장의 값을 `site.toml` 에 적는다.
+- 적재된 쪽만 낸다. 파일 이름은 쪽 ID 다 (원래 파일명을 쓰지 않는다). 정합 그림이 없으면(`[pipeline] save_aligned = false`) 원본을 호모그래피로
+  다시 편다 — 원본에 닿지 않는 쪽은 내지 않고 수로 알린다. 요약에는 쪽 수와 OUT, 종류별로 가린 상자의 수,
+  내지 않은 쪽의 수(이유별), 넓힌 폭만 나온다 — 이름·값·원래 파일명은 없다.
+- **저장소 밖에.** 명령은 git 작업 트리 안의 `OUT` 을 거절한다. 가린 그림도 현장 데이터다 — 가렸다고 저장소·문서·PR·이슈에 넣어도 되는 것이 아니다.
+- 운영 화면(홈·문서 화면)의 그림은 가리지 않는다 — 127.0.0.1 에서 검수하는 사람이 본다.
 
 ### 검수값으로 평가하기
 

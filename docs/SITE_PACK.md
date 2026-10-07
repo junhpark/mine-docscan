@@ -10,7 +10,7 @@
 
 ```
 <site>/
-  site.toml                        현장 이름, 파일명 규칙, 장비 구분 대응, 교차검증 옵션
+  site.toml                        현장 이름, 파일명 규칙, 장비 구분 대응, 교차검증 옵션, 운반 표의 순서, 가린 그림의 옵션
   templates/<양식>/template.yaml   양식 정의
   templates/<양식>/reference.png   기준 이미지 (빈 양식 또는 깨끗한 스캔 한 장, 200 dpi)
   templates/<양식>/print.png       인쇄 층 (선택, `template print-layer` 가 쓴다): 손글씨가 빠진 빈 양식 — 손글씨의 잔상이 남을 수 있다
@@ -63,9 +63,49 @@ exclude_materials = ["SURFACE"]
 # 소금값을 바꾸는 것은 평가셋을 버리는 것이다 — 그 전의 수치와 비교하지 않는다
 split_salt = "synthetic-2030"
 test_share = 0.2
+
+[haul_table]
+# 월별 엑셀의 운반 표에서 광종·편 열과 자리 블록의 순서 (아래). 없으면 일보 템플릿의 행 순서, 자리 이름 순
+# columns = ["ORE|L0", "ORE|L1", "WASTE|L0"]   # "광종|편" — 일보 행의 material|level
+# slots = ["T01", "T02"]                       # 자리 — 행렬 열의 slot
+
+[redact]
+# 가린 쪽 그림 (export masked-pages — 아래 "가릴 자리")
+# meta_keys = ["operator", "vehicle_no"]       # 가릴 메타 키. 없으면 이 둘
+# pad_px = 16                                  # 표 밖 필드·redact 상자를 넓히는 폭 (px). 없으면 16
 ```
 
 코드에서는 `site.option("crosscheck.haul", "exclude_materials", [])` 처럼 읽는다. 새 옵션이 필요하면 여기에 절을 추가한다.
+
+### `[haul_table]` — 월별 엑셀의 운반 표
+
+월별 파일(`OUT/monthly/<YYYY-MM>.xlsx`)의 운반 표는 현장의 월별 작업일보 입력 시트와 같은 축이다: 행 = 날짜 × 주·야, 열 = 자리(`slot`)마다
+한 블록 × 광종·편 (표의 칸과 표시는 [ARCHITECTURE.md](ARCHITECTURE.md) §12.3). 이 절은 **열과 블록의 순서만** 정한다.
+
+- 기본 순서: 광종·편은 일보 템플릿(`handler: haul`, `role: log` — 템플릿 이름 순)의 운반 표(`handler_options.region`)의 **행 순서**, 열 이름은
+  그 행의 `display`(없으면 `광종|편` — 아래 "표시 이름"). 데이터에만 있는 광종·편은 뒤에 (이름 순). 자리 블록은 그 달의 일보·행렬에 나온 자리의
+  이름 순.
+- `columns` 는 `"광종|편"`(일보 행의 `material|level` — `|` 하나), `slots` 는 자리 이름(행렬 열의 `slot`). 적은 것이 그 순서로 앞에 오고,
+  **적지 않은 것은 기본 순서로 뒤에 붙는다** (빠뜨리지 않는다). 일보 템플릿에도 그 달의 데이터에도 없는 광종·편, 그 달에 나오지 않은 자리는
+  적어도 열·블록이 생기지 않는다.
+- 표시 이름은 여기서 정하지 않는다 — 일보 템플릿 행의 `display` 다.
+- 목록이 아니거나, 빈 글자, `|` 가 하나가 아닌 `columns` 항목, 겹치는 항목, 모르는 키(`columns`·`slots` 밖)는 사이트 팩을 읽을 때 `ConfigError`
+  한 줄이다 (몇 번째 항목인지만 — 값은 찍지 않는다).
+- 현장의 입력 시트에 맞춰 적는다 (편의 순서와 자리 블록의 순서). 현장에 관한 것이라 코드에 적지 않는다.
+- `minedocscan info` 가 지금 쓰는 값을 보여 준다 ("운반 표 [haul_table]: 열 순서 N개, 자리 순서 N개 지정" — 수만).
+
+### `[redact]` — 가린 쪽 그림의 옵션
+
+`export masked-pages` 가 가리는 자리 가운데 사이트 팩이 바꾸는 둘이다 (가리는 것 전체는 아래 "가릴 자리 (`redact`)").
+
+- `meta_keys`: 가릴 표 밖 필드의 `meta_key` 목록. 없으면 `["operator", "vehicle_no"]`. 적으면 기본을 **바꾼다** (더하는 것이 아니다) — 장비명도
+  가리려면 `["operator", "vehicle_no", "equipment"]`. 메타 키(빈 문자열이 아닌 글자)의 목록이 아니면 `ConfigError`.
+- `pad_px`: 표 밖 필드와 `redact` 상자를 사방으로 넓히는 폭 (px, 템플릿 좌표, 0–200 의 정수). 없으면 **16** — 합성 세 묶음(기본·메타 필드·가동 일보,
+  사흘씩)의 표 밖 필드 206개에서 그 칸의 글씨가 상자를 넘은 거리가 최대 11 px(작성자), 99 % 9 px, 95 % 5 px 였다 (16 px ≈ 2 mm). 실제 글씨는
+  더 넘을 수 있다 — 양식마다 한 쪽씩 내어 보고 글씨가 가린 상자를 넘으면 늘린다. 표의 글자 칸은 넓히지 않는다 (괘선까지 가린다).
+- 모르는 키(`meta_keys`·`pad_px` 밖)는 `ConfigError`.
+- `meta_keys` 의 이름은 템플릿의 `meta_key` 와 맞춰 보지 않는다 — 틀린 키는 아무것도 가리지 않는다.
+- `minedocscan info` 가 지금 쓰는 값을 보여 준다 ("가린 쪽 그림 [redact]: 메타 키 …, 넓히는 폭 N px", 기본값이면 "(기본값)").
 
 ## template.yaml
 
@@ -75,8 +115,11 @@ title: Dump truck daily haul log   # 사람이 읽는 이름
 # family: haul_matrix              # 선택: 같은 양식의 판 묶음. 개정판은 valid_from / valid_to (YYYY-MM-DD, 양 끝 포함) 로 가린다
 # valid_to: 2030-01-07
 # concurrent: true                 # 선택: 같은 날 섞여 쓰이는 판 — family 가 있을 때만 (아래 "같은 날 섞여 쓰이는 판")
+# display: 덤프트럭 운반 일보        # 선택: 엑셀에 보이는 이름 — 표·열·행·필드에도 (아래 "표시 이름")
 reference_image: reference.png
 # print_image: print.png           # 선택: 인쇄 층 (가동 일보의 role 표에만 쓰인다) — template print-layer 로 만든 뒤 사람이 적는다
+# redact:                          # 선택: 가린 쪽 그림에서 가릴 상자 — 필드가 아닌 자리 (아래 "가릴 자리")
+#   - {name: approval, bbox: [1800, 40, 2300, 200]}
 dpi: 200                           # 좌표계의 해상도. 설정의 dpi 와 같아야 한다
 page_size: [2339, 1654]            # 기준 이미지의 (폭, 높이) px
 handler: haul                      # generic | inspection | haul | usage
@@ -150,7 +193,7 @@ fields:
 
 - `row` 는 머리글을 뺀 데이터 행 번호(0부터), `key` 는 그 행을 식별하는 값(장비 등록번호, `광종|편` 등)이다.
 - 한 표 안에서 `key` 는 겹치면 안 된다. 양식의 여백 행은 `key` 를 비워 두면 `#<행 번호>` 로 구분된다.
-- `key` 외의 항목은 행 메타다. `printed` 열의 값과 핸들러가 쓰는 값을 여기에 적는다.
+- `key` 외의 항목은 행 메타다. `printed` 열의 값과 핸들러가 쓰는 값을 여기에 적는다. `display` 만은 그 행의 표시 이름이다 (아래 "표시 이름").
 
 ### 핸들러별 약속
 
@@ -309,11 +352,12 @@ concurrent: true
   상태다. 오류가 그 판과 계열, 두 줄(`family: <계열>`, `concurrent: true`)을 적을 판(계열과 이름이 같은 템플릿)을 말한다.
 - 사이트 팩 안에서 템플릿의 `name` 은 하나다 — 이름이 같은 템플릿이 둘이면(폴더 이름이 달라도) 오류다.
 - **동시 판끼리는 기하 밖의 모든 것이 같아야 한다**: `handler`·`handler_options`, 표(이름·`role`·`header_rows`·열·행 — 열·행의 메타
-  `shift`·`subtotal`·`item`·`place`·`header_*` … 까지 통째로), 필드(`bbox` 밖 전부). `format` 을 적지 않은 칸은 그 종류의 기본 형식으로
-  비교한다. 다를 수 있는 것은 괘선 좌표(`grid` — 나눔 선 포함)·필드의 `bbox`·기준 이미지·인쇄 층·이름·제목·유효 기간뿐이다. 다르면 사이트 팩을
-  읽을 때 오류다 (표 이름과 항목의 종류만 알린다 — 행 키·값은 찍지 않는다). 검수 기록이 칸을 찾는 `field_id` 에는 템플릿 이름이 없다 — 키가
-  같아야 판이 바뀐 쪽에도 검수가 붙고, 메타·`header_rows` 가 같아야 같은 `field_id` 가 판마다 같은 뜻의 칸을 가리킨다. `template variant` 는
-  그대로 복사한다. 한 판을 손으로 고치면 다른 판도 같이 고친다.
+  `shift`·`subtotal`·`item`·`place`·`header_*` … 와 `display` 까지 통째로), 필드(`bbox` 밖 전부), 양식의 `display`. `format` 을 적지 않은 칸은 그
+  종류의 기본 형식으로 비교한다. 다를 수 있는 것은 괘선 좌표(`grid` — 나눔 선 포함)·필드의 `bbox`·가릴 상자(`redact`)·기준 이미지·인쇄 층·
+  이름·제목·유효 기간뿐이다. 다르면 사이트 팩을 읽을 때 오류다 (표 이름과 항목의 종류만 알린다 — 행 키·값은 찍지 않는다). 검수 기록이 칸을
+  찾는 `field_id` 에는 템플릿 이름이 없다 — 키가 같아야 판이 바뀐 쪽에도 검수가 붙고, 메타·`header_rows` 가 같아야 같은 `field_id` 가 판마다
+  같은 뜻의 칸을 가리킨다. 엑셀의 양식 시트는 계열마다 한 장이라 `display` 도 같아야 한다. `template variant` 는 그대로 복사한다. 한 판을 손으로
+  고치면 다른 판도 같이 고친다.
 - `template check` 는 템플릿 하나만 본다. 판끼리의 키는 사이트 팩을 읽을 때(`info`, `run`) 드러난다.
 - 묶이지 않은 두 판은 분류가 모양으로 판 하나를 골라 그 판에만 정합한다 — 틀린 판의 괘선 오차가 정합 기준(6 px) 안이면 칸이 어긋난 채
   조용히 적재된다. 그래서 `concurrent` 를 한 판에만 적거나, `family` 를 한 판에만(또는 서로 다르게) 적으면 사이트 팩이 읽히지 않는다 (위의
@@ -324,6 +368,77 @@ concurrent: true
 - `eval` 과 oracle 은 사이트 팩이 있으면 동시 판의 정답을 계열로 맞춘다 — 정답의 `template` 이 어느 판의 이름이어도 같은 쪽에 붙는다.
 - 리포트: `report` 의 "동시 판 <계열>: 고른 쪽 …, 정합 실패 N, 고른 쪽 중 두 판의 괘선 오차 차이가 1 px 미만인 쪽 N" (두 판 모두 정합에
   실패한 쪽은 정합 실패로만 센다). 가르기 어려웠던 쪽은 `pages --variants` (정합 실패 쪽도 상태와 함께 나온다).
+
+### 표시 이름 (`display`)
+
+선택 키. **엑셀에 보이는 이름**이다 (tasks/0008 4.5). 실제 템플릿의 열 이름은 영문 식별자라 현장이 읽을 이름이 따로 필요하다 — 실제 양식에
+인쇄된 머리글대로 적는다. 양식(템플릿 맨 위)·표(region)·열·행·표 밖 필드 어디에나 둘 수 있다. 합성 일보의 예 (`synth --display-names`, 줄임):
+
+```yaml
+name: synth_haul_log
+title: Dump truck daily haul log (synthetic)
+display: 덤프트럭 운반 일보                  # 일별 파일의 양식 시트 이름, 쪽 머리의 양식 이름
+regions:
+  - name: haul
+    display: 운반 횟수                       # 표의 제목
+    columns:
+      - {idx: 0, name: material,  kind: printed, display: 광종}                        # 머리글 행
+      - {idx: 2, name: trips_day, kind: handwritten_number, shift: day, display: 주간}
+    rows:
+      - {row: 0, key: "ORE|L0", material: ORE, level: L0, display: 광석 L0}          # 행 이름, 운반 표의 광종·편 열 이름
+fields:
+  - {name: vehicle_no, kind: handwritten_text, bbox: [340, 290, 730, 355], meta_key: vehicle_no, display: 차량번호}
+```
+
+- 없으면 양식은 `title`, 표·열·필드는 `name`, 행은 `key` 가 보인다. 값은 빈 문자열이 아닌 글자 — 아니면 템플릿 오류다.
+- 쓰는 곳: 일별 파일의 양식 시트(시트 이름, 쪽 머리의 양식 이름, 표 밖 필드의 이름, 표의 제목·머리글 행·행 이름), 요약의 양식별 수, 월별 운반 표의
+  광종·편 열 이름(일보 템플릿 행의 `display` — 위 `[haul_table]`). 업무 시트의 머리글은 템플릿이 아니라 프로그램의 한 곳(`export/labels.py`)에서 온다.
+- 시트는 계열(`family`, 없으면 템플릿 이름)마다 한 장이고 이름은 계열의 표시 이름이다 — 계열 이름과 같은 이름의 템플릿, 없으면 이름이 가장 앞인
+  템플릿의 것. 시트 이름은 31자 안에서 잘리고 `[]:*?/\` 는 빠지며, 겹치면 `(2)` … 가 붙는다 (요약·업무 시트가 먼저 이름을 받는다 — 양식의
+  표시 이름이 "요약"이면 양식 시트가 "요약 (2)").
+- **표시에만 쓴다**: 분류·정합·핸들러·업무 테이블·`field_id`·인쇄된 값에 닿지 않는다. 고친 뒤 `run` 을 다시 할 필요는 없다 — 다음 `export excel`
+  에서 엑셀이 바뀐다 (`serve`·`watch` 가 돌고 있으면 다시 띄운다: 사이트 팩은 시작할 때 읽고, 시작할 때 전체를 훑는다).
+- **열 이름 `display` 는 쓸 수 없다** — `template check` 의 오류다. 인쇄된 칸의 값은 행의 메타에서 열 이름으로 찾기 때문에, 열 이름이 `display` 면
+  행의 표시 이름이 그 열의 인쇄된 값이 된다 (키 이름이 `label` 이 아닌 것도 같은 까닭이다 — 합성 일보의 곁표에 열 이름 `label` 이 있다).
+- **동시 판은 `display` 도 같아야 한다** — 양식의 `display` 와 표·열·행·필드의 `display` 모두 (위 "기하 밖의 모든 것"). 다르면 사이트 팩을 읽을
+  때 오류다. 양식의 `display` 는 시트가 계열마다 한 장이기 때문이고, 표·열·행·필드의 `display` 는 위의 "기하 밖의 모든 것" 비교에 든다. 날짜로 가리는 개정판은 같지 않아도 읽히지만 시트 이름은 위의 한 템플릿의 것이다.
+- 합성 예: `minedocscan synth out/x --display-names` — 합성 템플릿에 한글 `display` 와 `redact` 상자 하나를 넣는다 (`template.yaml` 만 바뀐다 —
+  스캔·정답·기준 이미지의 바이트는 그대로다).
+
+### 가릴 자리 (`redact`)
+
+선택 키. **가린 쪽 그림**(`export masked-pages` — 발표·보고서용)에서 한 색으로 채울 상자들이다. 템플릿이 아는데 필드가 아닌 자리를 적는다 —
+결재란, 행렬 양식 머리의 인쇄된 이름·차량번호, 점검표의 인쇄된 등록번호 열.
+
+```yaml
+redact:
+  - {name: approval,     bbox: [1800, 40, 2300, 200]}     # x0, y0, x1, y1 — 템플릿 좌표 (기준 이미지 픽셀)
+  - {name: header_names, bbox: [400, 380, 1100, 450]}
+```
+
+가린 쪽 그림은 정합 그림(템플릿 좌표) 위에서 **템플릿이 아는 자리만** 검정으로 채운다 (흐리게 하지 않는다 — [ADR 0022](decisions/0022-exports-are-copies.md),
+[ARCHITECTURE.md](ARCHITECTURE.md) §12.6):
+
+| 가리는 것 | 자리 | 넓히기 |
+|---|---|---|
+| 서명 | 표 밖 필드 중 `kind: signature` | `pad_px` |
+| 메타 필드 | 표 밖 필드 중 `meta_key` 가 `[redact] meta_keys`(기본 `operator`·`vehicle_no`)에 든 것 | `pad_px` |
+| `redact` | 이 상자들 | `pad_px` |
+| 글자 칸 (기본) | 표의 `handwritten_text` 칸(괘선까지)과 표 밖의 `handwritten_text` 필드. `--keep-text` 면 남긴다 | 필드만 `pad_px` |
+
+- 수 칸·✓ 칸·인쇄된 칸, 표 안의 `kind: signature` 칸은 남는다 (서명은 표 밖 필드만 가린다 — 표에 서명 열이 있으면 그 자리를
+  `redact` 상자로 적는다). 표 위에 걸쳐 쓴 메모, 수 칸에 적은 이름, **템플릿에 적지 않은 인쇄는 남는다** — 내보낸 그림은 사람이 보고 나서 쓴다.
+  가렸다고 저장소·이슈에 넣어도 되는 것이 아니다 (현장 데이터 — [DATA.md](DATA.md)).
+- `--keep-text` 로 낼 양식에 `meta_key` 가 없는 이름 필드가 있으면 그 필드는 남는다 — 그 자리도 `redact` 상자로 적는다 (`redact` 는 `--keep-text`
+  에서도 가린다).
+- 검사: 읽을 때 — `redact` 는 목록, 상자마다 `name`(빈 문자열이 아닌 글자, 템플릿 안에서 겹치지 않는다)과 `bbox`(정수 넷), 넓이(x1 > x0, y1 > y0).
+  틀리면 템플릿 오류다 (사이트 팩이 읽히지 않는다). `template check` 는 여기에 **쪽 밖**(기준 이미지의 크기)을 더한다.
+- `template preview` 가 상자를 검은 점선 테두리와 대각선, `redact: <이름>` 으로 그린다 (넓히기 전의 상자) — 기준 이미지 위, `--scan` 이면 그 쪽
+  위에서 가릴 자리가 글씨·인쇄를 덮는지 본다.
+- **기하다 — 판마다 따로 적는다.** 동시 판(`concurrent`)끼리 다를 수 있는 것에 든다 (판 B 는 표가 내려가 있다). `template variant` 는 기존 판의
+  상자를 그대로 베끼고 요약에 "가릴 자리(redact N개)는 … 다시 확인하고 고칩니다"를 낸다 — 새 판의 쪽 위에서 `template preview --scan` 으로 보고
+  고친다.
+- `redact` 는 가린 그림에만 쓴다 — 분류·정합·칸·DB·엑셀은 그대로다.
 
 ## labels/pages.json
 
@@ -429,12 +544,15 @@ operator     = "op-v1"
    셀 정의 없이 두면(`regions: []`) **분류 전용**으로 동작한다 — 그것만으로도 묶음 PDF 에서 그 양식을 골라내고 통계를 낼 수 있다
    (쪽은 `classified_only`). 가동 일보는 이 상태에서 인쇄 층부터 만든다 (아래).
 3. **열과 행 채우기** — 열의 `name`·`kind`, 행의 `key` 와 메타. 인쇄된 값은 행 메타에 그대로 옮겨 적는다.
+   엑셀에 보일 이름은 `display` 로 — 양식·표·열·행·표 밖 필드에, 실제 양식에 인쇄된 머리글대로 적는다 (위 "표시 이름" — 열 이름 `display` 는 쓰지 않는다).
+   필드가 아닌 가릴 자리(결재란, 인쇄된 이름·등록번호)가 있으면 `redact` 상자도 (위 "가릴 자리").
 4. **핸들러 고르기** — 기존 핸들러로 표현되면 `handler` 와 `handler_options` 만 적는다. 새 종류의 기록이면 핸들러를 만든다 ([ARCHITECTURE.md](ARCHITECTURE.md) §10).
 5. **확인**
    ```bash
    minedocscan template check  <site>/templates/<이름>            # 오류를 전부: 읽기 오류, 겹치는 칸, 쪽 밖의 칸, 역할에 필요한 칸,
-                                                                  #   형식과 종류의 불일치, 열·행 이름 겹침 … (있으면 종료 코드 1)
-   minedocscan template preview <site>/templates/<이름>           # 칸·필드의 테두리·이름·종류·형식·역할·행 번호를 기준 이미지 위에
+                                                                  #   형식과 종류의 불일치, 열·행 이름 겹침, 열 이름 display,
+                                                                  #   redact 상자(쪽 밖·넓이·이름 겹침) … (있으면 종료 코드 1)
+   minedocscan template preview <site>/templates/<이름>           # 칸·필드의 테두리·이름·종류·형식·역할·행 번호와 가릴 자리를 기준 이미지 위에
    minedocscan template preview <site>/templates/<이름> --scan <PDF> --page 3   # 그 쪽을 정합한 위에 — 칸이 글씨에 맞는지
    minedocscan template preview <site>/templates/<이름> --print   # 인쇄 층(print_image) 위에 — 값 자리가 인쇄에 덮이지 않았나
                                                                   #   → WORK_ROOT/template-preview/*.png (저장소 안에는 쓰지 않는다)
@@ -503,6 +621,7 @@ operator     = "op-v1"
 5. **채우기** — 열 `name`·`kind`·`format`, 행 `key` 와 메타, 필드(장비명 `meta_key: equipment`, 운전자 `meta_key: operator`, 서명
    `kind: signature`, 연료·오일·특이사항 — 위 "핸들러별 약속"). 칸 안의 인쇄된 줄로 행을 나누는 선(`split_ys`·`split_xs`)은 잡히지 않으므로
    사람이 적고, 그만큼 `rows` 를 늘린다 (`row` 는 괘선과 나눔 선을 합친 순서). 인쇄가 든 칸은 떼어 내지 않는다.
+   엑셀에 보일 이름(`display`)과 가릴 자리(`redact`)도 여기서 (위 "새 양식을 추가하는 절차" 3).
 6. **확인**
    ```bash
    minedocscan template check   <site>/templates/<양식>             # "오류 없음" 일 때까지
@@ -570,7 +689,9 @@ minedocscan template preview $T --print          # → /tmp/demo/work/template-p
    - 그 쪽을 **표 영역(괘선 범위 + 60 px) 밖의 특징점**(머리·제목)으로 기존 판에 맞춰 편 그림이 새 판의 기준 이미지다. 표마다 기존 괘선을
      ±min(40 px, 이웃 표까지 간격의 절반) 안의 가장 가까운 괘선과 짝지어 **괘선만 다시 잡는다.** 붙은 표가 같이 쓰는 경계선(이 표의 괘선과
      3 px 안)은 간격에서 뺀다 — 작업 표와 계기 표가 붙어 있어도 그다음 괘선까지의 절반이 반경이다. 열·행·필드·`handler`·`role`·`format`·메타는
-     그대로 복사하고, 표 밖 필드의 `bbox` 도 그대로 둔다 (머리가 같은 자리라는 가정 — 미리보기로 확인한다).
+     그대로 복사하고, 표 밖 필드의 `bbox` 도 그대로 둔다 (머리가 같은 자리라는 가정 — 미리보기로 확인한다). `display` 도 그대로다 (판끼리 같아야 한다).
+   - 가릴 상자(`redact`)는 기존 판의 것을 **그대로 베낀다** — 기하라 판마다 따로이고, 표에 걸친 상자는 이 판에서 어긋날 수 있다. 요약의
+     "가릴 자리(redact N개)는 기존 판의 것을 그대로 베꼈습니다 — … 다시 확인하고 고칩니다" 줄을 따라 다음 단계의 미리보기로 보고 고친다.
    - 새 판에는 `family`(기존 판의 것, 없으면 기존 판의 이름)와 `concurrent: true` 가 적힌다. 유효 기간은 복사하고 `print_image` 는 복사하지 않는다.
    - **기존 판의 파일은 고치지 않는다** — 요약이 기존 판에 적을 줄(`family: …`, `concurrent: true`)을 알려 준다. 적기 전에는 사이트 팩이
      읽히지 않는다 (계열에 동시 판이 하나뿐 — 오류가 적을 판을 말한다). `run` 전에 적는다.
@@ -580,7 +701,7 @@ minedocscan template preview $T --print          # → /tmp/demo/work/template-p
      없음(분류 전용), 새 판의 이름이 기존 판과 같거나 옆 템플릿(기존 판의 `templates` 폴더, 출력 폴더의 부모)이 이미 씀, 표 밖 특징점의
      인라이어가 60 미만(머리·제목이 보이는 다른 쪽으로), 출력 폴더(기본: 기존 판 옆의 `<NAME>`)가 이미 있거나 git 작업 트리 안 (새 판의
      기준 이미지는 현장 스캔이다).
-3. **확인** — `template check <양식>_b`, `template preview <양식>_b --scan <PDF> --page N` (표 밖 필드의 `bbox` 가 맞는지), `info` (두 판이 같은
+3. **확인** — `template check <양식>_b`, `template preview <양식>_b --scan <PDF> --page N` (표 밖 필드의 `bbox` 와 가릴 자리 `redact` 가 맞는지), `info` (두 판이 같은
    계열의 "같은 날 섞여 쓰이는 판"으로 나오는지 — 키가 다르면 여기서 오류).
 4. **돌리기** — `run DB_scans --fresh` → `report` 의 "동시 판 <계열>: 고른 쪽 …, 정합 실패 N, 고른 쪽 중 두 판의 괘선 오차 차이가 1 px 미만인 쪽 N".
    가르기 어려웠던 쪽은 `pages --variants` (판마다의 괘선 오차를 같이 낸다).
@@ -622,4 +743,8 @@ minedocscan template print-layer /tmp/var/site/templates/synth_usage_log     # 1
 - 인쇄가 든 칸이 비어 있어도 늘 검수 대기다 → 그 양식에 인쇄 층(`print_image`)이 없다. role 표(`meter`·`shifts`·`tally`)의 칸만 인쇄 층으로 잰다.
 - `template check` 가 "인쇄 층이 칸의 절반 넘게 덮은 표의 손으로 쓰는 칸"을 알린다 → 칸 자리가 틀렸거나(값 자리가 인쇄 위), 층에 잔상이 있거나,
   다른 양식·다른 판의 층이다. `template preview --print` 로 본다.
-- 동시 판의 키가 다르다는 오류로 사이트 팩이 읽히지 않는다 → 한 판에만 표·열·행·필드를 더하거나 고쳤다. 다른 판도 똑같이 고친다.
+- 동시 판의 키가 다르다는 오류로 사이트 팩이 읽히지 않는다 → 한 판에만 표·열·행·필드(`display` 포함)를 더하거나 고쳤다. 다른 판도 똑같이 고친다.
+- 엑셀의 시트 이름·머리글·행 이름이 영문 식별자다 → 그 자리에 `display` 가 없다 (위 "표시 이름"). 업무 시트의 머리글은 템플릿과 무관하다.
+- 월별 운반 표의 편·자리 블록 순서가 현장 시트와 다르다 → `site.toml` 의 `[haul_table] columns`·`slots`. 편의 이름은 일보 템플릿 행의 `display`.
+- 가린 쪽 그림에 이름·번호가 남는다 → 템플릿이 모르는 자리다: 인쇄된 것은 `redact` 상자로, `meta_key` 가 다른 필드는 `[redact] meta_keys` 에 그 키를 넣고
+  (기본 `operator`·`vehicle_no` 도 같이 적는다 — 적으면 기본을 바꾼다), 글씨가 가린 상자를 넘으면 `[redact] pad_px` 를 늘린다. 표 위에 걸쳐 쓴 메모·수 칸에 적은 이름은 가리지 못한다 — 사람이 보고 그 쪽을 쓸지 정한다.

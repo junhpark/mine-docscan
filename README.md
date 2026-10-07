@@ -45,17 +45,36 @@ export MINEDOCSCAN_SITE=/경로/site-packs/<현장>          # 템플릿·현장
 export MINEDOCSCAN_ARCHIVE_ROOT=/경로/mine-docscan        # 스캔 원본 (접수한 파일을 intake/ 아래에만 쓴다 — 그 밖은 읽기만)
 export MINEDOCSCAN_INBOX=/경로/스캐너-저장-폴더          # 접수 폴더 (선택 — watch·serve 가 본다)
 export MINEDOCSCAN_WORK_ROOT=/로컬/작업폴더               # DB·정합 이미지 (로컬 디스크)
+export MINEDOCSCAN_EXCEL_DIR=/경로/엑셀-폴더              # 엑셀 사본 (선택 — 있는 폴더, 저장소·접수 폴더·보관 폴더 밖)
+export MINEDOCSCAN_PUBLISH_URL=postgresql://사용자:비밀번호@호스트/DB   # 통합 DB (선택 — 환경변수로만, 설정 파일에 적지 않는다)
 
-minedocscan info                    # 설정과 템플릿 확인
+minedocscan info                    # 설정과 템플릿 확인 (통합 DB 는 호스트·DB 이름만)
 minedocscan run DB_scans            # 폴더 또는 파일. 같은 파일을 다시 넣어도 행이 늘지 않습니다
 minedocscan report
 minedocscan regress                 # 사이트 팩에 저장한 기준 수치와 비교
 
 minedocscan serve --reviewer me     # 접수 폴더 감시 + 운영 화면 (127.0.0.1:8765): 날짜를 정할 문서, 다시 스캔 의심 쪽, 대기열
+                                    # 바퀴 끝(접수 → 처리 → 엑셀 → 싣기)에, 설정이 있으면(excel_dir·MINEDOCSCAN_PUBLISH_URL) 바뀐 날짜의
+                                    # 엑셀을 다시 쓰고 바뀐 문서·날짜를 통합 DB 에 싣는다 (시작할 때와 sweep_minutes 마다 전체 훑기,
+                                    # --no-watch 면 하지 않는다). 홈에서 날짜·달의 엑셀 내려받기 (설정 없이도)
 minedocscan doc list                # 문서 목록 (날짜를 정하기·버리기는 doc date|discard 또는 화면에서)
+
+minedocscan export excel [--month 2030-01]   # 일별·월별 엑셀을 손으로 (바뀐 파일만). serve·watch 가 돌면 그쪽이 쓴다
+minedocscan publish [--check]       # 통합 DB(PostgreSQL)로 싣기 — 지문이 다른 문서·날짜만 한 트랜잭션으로. serve·watch 가 돌면 그쪽이 싣는다
+                                    # --check 는 쓰지 않고 다른 범위의 수만 (같으면 0, 다르면 1, 닿지 못하면 2). pip install -e ".[postgres]"
+minedocscan export masked-pages /경로/밖 --date 2030-01-07   # 서명·작성자·차량번호 필드, 템플릿의 redact 상자, 글자 칸을
+                                                             # 한 색으로 가린 쪽 그림 (적재된 쪽만, 발표·보고서용)
 ```
 
 합성 접수 폴더로 해 보려면 `minedocscan synth out/intake --intake` (돌아간 쪽, 날짜 없는 이름, 빈 뒷면, 다시 스캔, 잘린 PDF …).
+
+엑셀과 통합 DB 의 표는 작업 DB 의 **사본**입니다 — 고쳐도 작업 DB 로 돌아오지 않습니다(고치는 곳은 검수 화면).
+엑셀에는 확정된 값만 싣습니다 (검수 대기 칸은 값 없이 `?`, 사람이 읽지 못한 칸은 `판독 불가`; 기계 값은 `[export] machine_values` 일 때만 따로 둔 열에).
+통합 DB 에는 작업 DB 의 행이 그대로 갑니다 — 검수 대기 행과 기계 값도 `review_status` 와 함께 가므로 읽는 쪽이 `review_status` 로 거릅니다.
+통합 DB 의 이 표들에는 쓰지 않습니다 — 다음 싣기가 범위째 갈아 끼웁니다. 2단계의 입력은 2단계의 표에 적고 뷰로 합칩니다.
+작업 DB 는 로컬 SQLite 그대로이고, 엑셀 파일이 열려 있거나 통합 DB 가 꺼져 있어도 스캔과 검수는 멈추지 않습니다
+([ADR 0021](docs/decisions/0021-publish-to-the-shared-db.md), [ADR 0022](docs/decisions/0022-exports-are-copies.md)).
+가린 쪽 그림은 템플릿이 아는 자리만 가립니다 — 사람이 보고 나서 씁니다.
 
 환경변수 대신 `minedocscan.toml` 을 써도 됩니다 ([config/minedocscan.example.toml](config/minedocscan.example.toml)).
 
@@ -72,6 +91,8 @@ src/minedocscan/
   store/       스키마와 쓰기 도우미, 문서의 순서
   intake/      접수 폴더, 결정 기록, 사람이 넣는 날짜, 감시 바퀴
   pipeline/    실행기, 한 번에 하나만 도는 잠금
+  export/      내보내기: 일별·월별 엑셀, 가린 쪽 그림 (DB 의 사본 — 읽기만 한다)
+  publish/     통합 DB(PostgreSQL)로 싣기 (문서·날짜 단위 지문)
   evaluate/    지표, 정답 비교, 실데이터 회귀
   tools/       합성 데이터 생성기, 템플릿 뼈대 도구
   cli.py       minedocscan 명령
@@ -103,3 +124,4 @@ config/        설정 예시
 
 현장 문서에는 개인정보(이름·서명·차량번호)가 있습니다. 스캔 원본, 기준 이미지, 실제 템플릿, 라벨, 정답 파일을
 이 저장소에 커밋하지 마십시오. `.gitignore` 가 이미지·PDF·엑셀·CSV·DB 를 기본으로 막고 있습니다.
+내보낸 엑셀과 가린 쪽 그림도 현장 데이터입니다 (명령이 저장소 안을 거절합니다). 통합 DB 의 주소는 비밀번호를 품으므로 환경변수로만 줍니다.
