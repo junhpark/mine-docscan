@@ -42,14 +42,20 @@ minedocscan review serve --site out/demo/site --work-root out/demo/work --review
 
 ```bash
 export MINEDOCSCAN_SITE=/경로/site-packs/<현장>          # 템플릿·현장 옵션·페이지 라벨
-export MINEDOCSCAN_ARCHIVE_ROOT=/경로/mine-docscan        # 스캔 원본 (읽기 전용으로 취급)
+export MINEDOCSCAN_ARCHIVE_ROOT=/경로/mine-docscan        # 스캔 원본 (접수한 파일을 intake/ 아래에만 쓴다 — 그 밖은 읽기만)
+export MINEDOCSCAN_INBOX=/경로/스캐너-저장-폴더          # 접수 폴더 (선택 — watch·serve 가 본다)
 export MINEDOCSCAN_WORK_ROOT=/로컬/작업폴더               # DB·정합 이미지 (로컬 디스크)
 
 minedocscan info                    # 설정과 템플릿 확인
 minedocscan run DB_scans            # 폴더 또는 파일. 같은 파일을 다시 넣어도 행이 늘지 않습니다
 minedocscan report
 minedocscan regress                 # 사이트 팩에 저장한 기준 수치와 비교
+
+minedocscan serve --reviewer me     # 접수 폴더 감시 + 운영 화면 (127.0.0.1:8765): 날짜를 정할 문서, 다시 스캔 의심 쪽, 대기열
+minedocscan doc list                # 문서 목록 (날짜를 정하기·버리기는 doc date|discard 또는 화면에서)
 ```
+
+합성 접수 폴더로 해 보려면 `minedocscan synth out/intake --intake` (돌아간 쪽, 날짜 없는 이름, 빈 뒷면, 다시 스캔, 잘린 PDF …).
 
 환경변수 대신 `minedocscan.toml` 을 써도 됩니다 ([config/minedocscan.example.toml](config/minedocscan.example.toml)).
 
@@ -63,8 +69,9 @@ src/minedocscan/
   correct/     교정 백엔드 (인터페이스 + none)
   handlers/    양식의 의미: 셀 → 업무 테이블 (generic, inspection, haul, usage)
   validate/    양식 간 교차검증, 가동 일보의 계기 검산
-  store/       스키마와 쓰기 도우미
-  pipeline/    실행기
+  store/       스키마와 쓰기 도우미, 문서의 순서
+  intake/      접수 폴더, 결정 기록, 사람이 넣는 날짜, 감시 바퀴
+  pipeline/    실행기, 한 번에 하나만 도는 잠금
   evaluate/    지표, 정답 비교, 실데이터 회귀
   tools/       합성 데이터 생성기, 템플릿 뼈대 도구
   cli.py       minedocscan 명령
