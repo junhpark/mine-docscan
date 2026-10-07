@@ -249,3 +249,35 @@ def test_info_shows_redact_and_haul_table(masked_world, capsys):
     data = json.loads(capsys.readouterr().out)
     assert data["redact"] == {"meta_keys": ["operator", "vehicle_no"], "pad_px": DEFAULT_PAD_PX, "default": True}
     assert data["haul_table"] == {"columns": 0, "slots": 0}
+
+
+def test_table_signatures_inbox_refusal_and_meta_key_typos(masked_world, tmp_path, monkeypatch):
+    """표 안의 서명 칸도 가린다. 접수 폴더·보관 폴더 안의 OUT 은 거절한다 (가린 그림을 스캔으로 접수하게 된다).
+    [redact] meta_keys 에 템플릿에 없는 키(오타)가 있으면 사이트 팩이 열리지 않는다 (조용히 아무것도 가리지 않는 일이 없게)."""
+    from minedocscan.cli import main
+    from minedocscan.config import ConfigError
+
+    tdir = tmp_path / "t"
+    tdir.mkdir()
+    spec = {"name": "t_sig", "reference_image": "reference.png", "handler": "generic",
+            "regions": [{"name": "main", "grid": {"ys": [0, 50, 100], "xs": [0, 100, 200]}, "header_rows": 1,
+                         "columns": [{"idx": 0, "name": "what", "kind": "printed"}, {"idx": 1, "name": "sign", "kind": "signature"}],
+                         "rows": [{"row": 0, "key": "a", "what": "x"}]}], "fields": []}
+    (tdir / "template.yaml").write_text(yaml.safe_dump(spec), encoding="utf-8")
+    boxes = page_boxes(Template(tdir / "template.yaml"), (), 0, keep_text=True)
+    assert ("signature", (100, 50, 200, 100)) in boxes
+    st = masked_world["st"]
+    inbox = tmp_path / "스캐너"
+    monkeypatch.setenv("MINEDOCSCAN_INBOX", str(inbox))
+    common = ["--site", str(st.site), "--archive-root", str(st.archive_root), "--work-root", str(st.work_root)]
+    for out in (inbox / "가린", Path(st.archive_root) / "가린"):
+        with pytest.raises(SystemExit) as e:
+            main(["export", "masked-pages", str(out), "--date", masked_world["day"], *common])
+        assert "안입니다" in str(e.value) and not out.exists()
+    site_dir = tmp_path / "site"
+    shutil.copytree(st.site, site_dir)
+    with open(site_dir / "site.toml", "a", encoding="utf-8") as f:
+        f.write('\n[redact]\nmeta_keys = ["operator", "vehicel_no"]\n')
+    with pytest.raises(ConfigError) as e:
+        SitePack(site_dir)
+    assert "vehicel_no" in str(e.value)

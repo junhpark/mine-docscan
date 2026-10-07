@@ -435,3 +435,16 @@ def test_info_shows_the_export_settings(tmp_path, monkeypatch, capsys):
     cfg.write_text("[export]\nsweep_minutes = -1\n", encoding="utf-8")
     with pytest.raises(SystemExit):
         main(["info", "--config", str(cfg)])
+
+
+def test_a_decision_from_the_screen_marks_its_documents(world, tmp_path):
+    """화면에서 저장한 결정은 그 문서를 건드린 것으로 넘긴다 — 처리가 그 문서를 하지 못해도(원본에 닿지 않는다) 그 날짜의 엑셀이 따라온다."""
+    pipe, site, st = world["pipe"], world["site"], world["st"]
+    out = tmp_path / "out"
+    out.mkdir()
+    x = auto(world, out)
+    x.after_round(pipe.con, Touched())
+    ops = OpsApp(pipe.con, site, st, "jp", excel=x)
+    doc = world["ids"]["d_2030-01-08"]
+    assert ops.post_decision({"items": [{"target": doc, "kind": "discard"}], "confirm": True})["ok"]
+    assert doc in x.box.take().documents

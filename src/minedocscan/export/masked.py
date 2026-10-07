@@ -1,7 +1,7 @@
 """가린 쪽 그림 (tasks/0008 4.9): 정합 그림(템플릿 좌표) 위에서 **템플릿이 아는 자리만** 한 색으로 채운다 — 흐리게 하지 않는다.
 
 가리는 것:
-  signature  표 밖 필드 중 kind: signature
+  signature  kind: signature 인 표 밖 필드와 표의 칸 (표의 칸은 괘선까지)
   meta       표 밖 필드 중 meta_key 가 가릴 목록에 든 것 (기본 operator·vehicle_no, site.toml [redact] meta_keys)
   redact     템플릿의 redact 상자 (결재란, 인쇄된 이름·등록번호 열 — 판마다 따로)
   text       글자 칸 전부: 표의 handwritten_text 열(칸은 괘선까지 — cells(inset=0))과 표 밖의 글자 필드. --keep-text 면 남긴다
@@ -47,8 +47,10 @@ def page_boxes(tpl: Template, meta_keys, pad: int, keep_text: bool = False) -> l
     for r in tpl.redact:
         x0, y0, x1, y1 = (int(v) for v in r["bbox"])
         out.append(("redact", (x0 - pad, y0 - pad, x1 + pad, y1 + pad)))
+    cells = tpl.cells(inset=0)
+    out += [("signature", c.bbox) for c in cells if c.kind == "signature"]      # 표 안의 서명 열 (괘선까지)
     if not keep_text:
-        out += [("text", c.bbox) for c in tpl.cells(inset=0) if c.kind == "handwritten_text"]
+        out += [("text", c.bbox) for c in cells if c.kind == "handwritten_text"]
     return out
 
 

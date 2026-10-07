@@ -44,7 +44,8 @@ class InspectionHandler(FormHandler):
             return f["review_status"] == "pending" and f["reviewed_by"] is None
 
         if all(f["has_value_raw"] is None for f in marks):
-            return {f["field_id"]: "empty" for f in marks if machine_pending(f)}, [NO_MARKS]
+            seen = any(f["reviewed_by"] and f["has_value"] for f in marks)     # 사람이 표시를 확인한 칸이 있다 — 그 줄은 틀린 말이 된다
+            return {f["field_id"]: "empty" for f in marks if machine_pending(f)}, ([] if seen else [NO_MARKS])
         eq_rows = {r["row"] for r in template.region(region)["rows"] if is_equipment_row(r)}
         return {f["field_id"]: "empty" for f in marks
                 if f["row_no"] not in eq_rows and machine_pending(f) and f["has_value_raw"] != 1}, []

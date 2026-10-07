@@ -311,3 +311,13 @@ def test_export_command_month(null_run, tmp_path, capsys):
     assert not (out / monthly_path("2029-12")).exists()
     with pytest.raises(SystemExit):
         main(["export", "excel", str(out), "--month", "2030-13", *args])
+
+
+def test_provisional_mismatches_are_not_flagged_in_the_haul_table(null_run, oracle_run):
+    """운반 표의 불일치 표시는 판정이 확정일 때만 — null 묶음은 운반 칸이 전부 검수 대기라 불일치 판정이 있어도 표시하지 않는다."""
+    con, site = null_run.con, null_run.site
+    assert con.execute("SELECT COUNT(*) FROM xcheck_haul WHERE status = 'mismatch'").fetchone()[0] > 0
+    table, _titles, _ = haul_table(month_book(con, site, "2030-01"))
+    assert not any("mismatch" in style for (_v, style) in table.values())
+    table, _titles, _ = haul_table(month_book(oracle_run.con, oracle_run.site, "2030-01"))
+    assert any("mismatch" in style for (_v, style) in table.values())

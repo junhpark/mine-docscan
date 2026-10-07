@@ -228,6 +228,10 @@ def test_publish_url_only_from_the_environment(tmp_path, monkeypatch):
 def test_describe_and_scrub():
     assert core.describe_url(URL) == "db.example.invalid:5432/site"
     assert core.describe_url("postgresql://u@h/d") == "h/d"
+    assert core.describe_url(f"postgresql://u:{SECRET}@h/d?sslmode=require") == "h/d"
+    kw = f"host=db.example.invalid port=5433 dbname=site user=writer password={SECRET}"      # libpq 의 키워드 꼴
+    assert core.describe_url(kw) == "db.example.invalid:5433/site" and SECRET not in core.describe_url(kw)
+    assert SECRET not in core.describe_url(f"password='{SECRET}' dbname=x")
     text = core.scrub(f"failed: {URL} password={SECRET}", URL)
     assert SECRET not in text and "writer:" not in text
 
@@ -292,3 +296,19 @@ def test_a_conflict_in_a_dirty_publish_falls_back_to_a_full_sweep(monkeypatch):
     with pytest.raises(core.PublishError) as e:
         core.run(None, None, full=False, target=target)
     assert SECRET not in str(e.value) and conn.log[-1] == "rollback"
+
+
+def test_any_failure_keeps_the_dirty_set(world, monkeypatch):
+    """바퀴 끝의 싣기가 무엇으로 실패하든(작업 DB 를 읽다가 …) 건드린 것을 들고 있다가 다음에 같이 싣는다."""
+    calls = []
+    monkeypatch.setattr(core, "connect", lambda url, t: calls.append(1) or (_ for _ in ()).throw(OSError("down")))
+    st = replace(world["st"], publish_url=URL, publish_retry_seconds=0.0)
+    clock = Clock()
+    pub = AutoPublish(st, clock=clock)
+
+    def broken(self, con):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Touched, "all_dates", broken)
+    r = pub.after_round(world["pipe"].con, Touched(documents={"d1"}, dates={"2030-01-07"}))
+    assert r.as_dict()["error"] == "OperationalError" and "d1" in pub.held.documents and "2030-01-07" in pub.held.dates

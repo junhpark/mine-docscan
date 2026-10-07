@@ -8,7 +8,8 @@
   모름 –?      그 날짜·자리의 일보 쪽이 없는데 자리 미정인 일보 쪽이 있다 (그 쪽이 이 자리의 것일 수 있다)
 - 자리 미정인 일보 쪽(운반 행의 slot 이 NULL)은 오른쪽의 "자리 미정 k" 블록 — 그 날짜의 자리 미정 쪽 가운데 쪽의 순서로 k 번째.
   블록의 수 = 그 달에서 하루에 가장 많았던 수. 블록마다 첫 열이 출처(파일명#쪽). 잃지 않는다.
-- 교차검증이 불일치인 날짜·자리·광종·편의 칸은 표시한다 (주·야 두 칸 다). 고치지 않는다 — 일보의 값 그대로 (ADR 0006).
+- 교차검증이 불일치인 날짜·자리·광종·편의 칸은 표시한다 (주·야 두 칸 다 — 그 판정이 확정일 때만, 잠정인 불일치는 교차검증 시트에서
+  "(잠정)"으로 본다). 고치지 않는다 — 일보의 값 그대로 (ADR 0006).
 - 블록의 합계는 그 줄의 칸이 전부 확정(값·빈 칸)일 때만 (값으로 — 수식이 아니다). 줄 끝의 합계(차량을 가로지른 합)는 두지 않는다.
 - 광종·편의 순서와 표시 이름: 일보 템플릿의 행 순서와 행의 display. 자리의 순서: 자리 이름. 사이트 팩 site.toml 의
   [haul_table] columns = ["ORE|L0", …] · slots = ["T01", …] 가 바꾼다 — 거기에 없는 것은 뒤에 붙인다 (빠뜨리지 않는다).
@@ -85,9 +86,13 @@ def haul_table_sheet(ctx: Ctx, days: list[str]) -> dict | None:
     cols = haul_columns(ctx.site, {f"{h['material']}|{h['level']}" for h in logs})
     shifts = sorted({h["shift"] for h in logs}, key=lambda s: SHIFT_ORDER.get(s, 3))
     k_max = max((len(p) for p in unresolved.values()), default=0)
-    mismatch = {(r["work_date"], r["slot"], f"{r['material']}|{r['level']}") for r in ctx.con.execute(
+    # 교차검증이 불일치인 칸 — 그 판정이 확정일 때만 (견준 운반 행이 전부 확정 — 교차검증 시트의 "(잠정)" 과 같은 규칙).
+    # 잠정인 불일치는 표시하지 않는다 (확정되지 않은 판정을 확정처럼 보이지 않게)
+    unsure = {(h["work_date"], h["slot"], f"{h['material']}|{h['level']}") for role in ("log", "matrix")
+              for h in haul_rows(ctx, days, role) if not sure(haul_state(h))}
+    mismatch = {k for k in ((r["work_date"], r["slot"], f"{r['material']}|{r['level']}") for r in ctx.con.execute(
         f"SELECT work_date, slot, material, level FROM xcheck_haul WHERE status = 'mismatch' AND work_date IN "
-        f"({','.join('?' * len(days))})", days)}
+        f"({','.join('?' * len(days))})", days)) if k not in unsure}
 
     top = [cell(), cell()]
     names = head(*L.HAUL_TABLE_HEAD)

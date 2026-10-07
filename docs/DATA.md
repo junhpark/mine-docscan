@@ -14,11 +14,11 @@
 | 정합 이미지, SQLite DB, 리포트 | 각자의 로컬 디스크 (= `WORK_ROOT`) | 아니오 (언제든 다시 만든다) |
 | 숫자 인식기 모델 (`models/<이름>/`) | 사이트 팩 안 (= `SITE/models/`) — 현장 글씨로 학습한 것 | **아니오** (예외: 합성 셀만으로 만든 `tests/fixtures/digits-fixture`) |
 | 메타 필드 모델 (`models/<이름>/`, `classes.json` 에 이름·차량번호) | 사이트 팩 안 (= `SITE/models/`) | **아니오** (예외: 합성 값만으로 만든 `tests/fixtures/meta-digits`, `meta-operator`) |
-| 학습용 크롭(`export-crops`), 틀린 칸 모아 보기(`recognizer eval --errors`) | 저장소 밖 (기본 `WORK_ROOT/recognizer-errors`) | **아니오** — 현장 글씨. git 작업 트리 안이면 도구가 거절한다 |
+| 학습용 크롭(`export-crops`), 틀린 칸 모아 보기(`recognizer eval --errors`) | 저장소 밖 (기본 `WORK_ROOT/recognizer-errors`) | **아니오** — 현장 글씨. git 작업 트리·접수 폴더·보관 폴더 안이면 도구가 거절한다 |
 | 인쇄 층(`print.png` — `template print-layer`), 다른 판의 기준 이미지(`template variant` 가 쓴 `reference.png`) | 사이트 팩 안 (= `SITE/templates/<양식>/`) | **아니오** — 현장 스캔에서 나온 것. 인쇄 층에는 늘 같은 자리에 쓰는 손글씨(이름·서명)의 잔상이 남는다. git 작업 트리 안이면 도구가 거절한다 (`print-layer` 는 합성 사이트 팩이면 `--allow-in-repo`) |
 | 템플릿 미리보기(`template preview`, `--print`), 쪽 미리보기(`pages --thumbs`) | `WORK_ROOT/template-preview`, `WORK_ROOT/thumbs` | **아니오** — 실제 양식과 글씨. `template preview` 는 저장소 안이면 거절한다 |
 | 엑셀 폴더(일별·월별 파일)와 그 기록 파일(`.minedocscan-export.json`), 홈에서 내려받은 엑셀 | `[export] excel_dir` (또는 `MINEDOCSCAN_EXCEL_DIR`) — 현장이 여는 폴더. 내려받은 것은 브라우저의 내려받기 폴더 | **아니오** — 이름·차량번호·값·원래 파일명이 들어 있다. DB 의 사본이라 지워도 다시 만든다. 저장소 안·접수 폴더 안·보관 폴더 안이면 도구가 거절한다. 기록 파일(`.json`)은 `.gitignore` 가 막지 않는다 |
-| 가린 쪽 그림(`export masked-pages`) | 명령에 준 폴더 (저장소 밖) | **아니오** — 템플릿이 아는 자리만 가렸다. 가렸다고 커밋해도 되는 것이 아니다. git 작업 트리 안이면 도구가 거절한다 |
+| 가린 쪽 그림(`export masked-pages`) | 명령에 준 폴더 (저장소 밖) | **아니오** — 템플릿이 아는 자리만 가렸다. 가렸다고 커밋해도 되는 것이 아니다. git 작업 트리·접수 폴더·보관 폴더 안이면 도구가 거절한다 |
 | 통합 DB(PostgreSQL)의 URL·비밀번호 (`MINEDOCSCAN_PUBLISH_URL`) | 그 컴퓨터의 환경변수만 — `minedocscan.toml` 의 `[publish]` 에 `url`·`dsn`·`password` 를 적으면 설정 오류. 실은 표는 현장 서버의 `[publish] schema` | **아니오** — 문서·이슈·로그에도 쓰지 않는다 (예시는 `postgresql://사용자:비밀번호@호스트/DB`) |
 | 그 밖의 모델 가중치 | 로컬 또는 모델 저장소 | 아니오 |
 
@@ -283,12 +283,12 @@ minedocscan export masked-pages OUT --date 2030-01-07 [--keep-text]     # 또는
 - **대상은 환경변수 `MINEDOCSCAN_PUBLISH_URL` 로만 받는다** — `minedocscan.toml` 의 `[publish]` 에 URL·비밀번호를 적으면 설정 오류다. 설정 파일에는
   `schema`(기본 `minedocscan`, 환경변수 `MINEDOCSCAN_PUBLISH_SCHEMA` — 영문 소문자·숫자·밑줄), `enabled`(URL 이 있으면 켜짐), `sweep_minutes`(30),
   `connect_timeout_s`(5), `retry_seconds`(60). URL 은 어디에도 찍히지 않는다 — `info`·`publish`·홈에는 호스트·DB·스키마만.
-- **전용 계정으로 그 스키마에만 쓴다** (관리자 계정을 쓰지 않는다). 처음 싣기(대상에 `pub_meta` 가 없을 때)와 `--rebuild` 는 늘
-  `CREATE SCHEMA IF NOT EXISTS` 를 보낸 뒤 그 안에 표와 상태 표(`pub_state`, `pub_meta`)를 만든다. PostgreSQL 은 스키마가 이미 있어도 이 문장에
-  그 DB 의 `CREATE` 권한을 요구한다 — 스키마를 미리 만들어 두는 것으로는 피하지 못한다. 그래서 전용 계정에는 그 DB 의 `CREATE` 와 그 스키마의
-  소유(또는 모든 권한)를 준다. 그 뒤의 싣기는 그 스키마의 표에만 쓴다. 이 스키마의 표는 이 프로그램이 갈아 끼운다 — 2단계는 읽기만
+- **전용 계정으로 그 스키마에만 쓴다** (관리자 계정을 쓰지 않는다). 관리자가 스키마를 만들어 그 계정에 소유를 주면(`CREATE SCHEMA … AUTHORIZATION
+  <전용 계정>`) 그 계정에는 DB 의 `CREATE` 권한이 필요 없다 — 처음 싣기(대상에 `pub_meta` 가 없을 때)와 `--rebuild` 는 스키마가 **없을 때만**
+  `CREATE SCHEMA` 를 보내고, 그 안에 표와 상태 표(`pub_state`, `pub_meta`)를 만든다. 그 뒤의 싣기는 그 스키마의 표에만 쓴다. 이 스키마의 표는 이 프로그램이 갈아 끼운다 — 2단계는 읽기만
   하고 자기 표·뷰는 따로 둔다. 싣기는 상태 표의 지문과 견주므로 대상에서 고친 행을 알아채지 못한다 (그 범위가 바뀔 때까지 틀린 사본으로 남는다).
-  `--rebuild` 는 이 프로그램이 만든 표만 지우고, 뷰가 걸려 있으면 지우지 않고 멈춘다.
+  `--rebuild` 는 이 프로그램이 만든 표만 지우고 다시 만든 뒤 싣는다 — 한 트랜잭션이라 읽는 쪽은 빈 표를 보지 않고, 실패하면 대상은 그 전 그대로다.
+  뷰가 걸려 있으면 지우지 않고 멈춘다.
 - **이름·차량번호가 간다** — 현장의 서버라는 전제다. 싣는 표 12개(`doc_document`, `doc_page`, `doc_field`, `doc_page_meta`, `eq_equipment`,
   `eq_assignment_obs`, `insp_daily`, `prod_haul`, `prod_tally`, `eq_usage_daily`, `xcheck_haul`, `xcheck_usage`)의 행은 작업 DB 그대로다: 쪽 메타·운반·
   배차·교차검증·가동 기록의 차량번호·작성자, 장비 마스터의 등록번호(`eq_equipment.registration`), 원래 파일명(`source_name`)과
@@ -307,7 +307,7 @@ minedocscan export masked-pages OUT --date 2030-01-07 [--keep-text]     # 또는
 
 **가린 쪽 그림**
 
-- **템플릿이 아는 자리만 가린다.** 정합 그림(템플릿 좌표) 위에서 서명 필드(`kind: signature`), 가릴 메타 키의 필드(기본 `operator`·`vehicle_no` —
+- **템플릿이 아는 자리만 가린다.** 정합 그림(템플릿 좌표) 위에서 서명(`kind: signature` 인 표 밖 필드와 표의 칸), 가릴 메타 키의 필드(기본 `operator`·`vehicle_no` —
   `site.toml` 의 `[redact] meta_keys`), 템플릿의 `redact` 상자(결재란, 행렬 머리의 인쇄된 이름, 점검표의 인쇄된 등록번호 열 — 판마다 따로 적는다,
   [SITE_PACK.md](SITE_PACK.md)), 글자 칸 전부(표의 `handwritten_text` 열은 괘선까지, 표 밖의 글자 필드)를 한 색(검정)으로 채운다 — 흐리게 하지
   않는다. 표 밖 필드와 `redact` 상자는 `[redact] pad_px`(기본 16 px)만큼 넓혀서. 수 칸·✓ 칸·인쇄는 남는다.

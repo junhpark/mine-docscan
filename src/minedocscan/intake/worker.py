@@ -119,9 +119,12 @@ def format_round(r: dict) -> str:
     if x:
         if x["missing_dir"]:
             parts.append("엑셀: 폴더가 없습니다 (만들지 않습니다 — 다음 바퀴에 다시)")
-        elif x["written"] or x["deleted"] or x["failed"]:
+        elif x["written"] or x["deleted"] or x["failed"] or x.get("kept") or x.get("skipped_dates"):
             parts.append(f"엑셀: 쓴 파일 {x['written']}, 지운 파일 {x['deleted']}"
-                         + (f", 쓰지 못함 {x['failed']} (다음 바퀴에 다시)" if x["failed"] else ""))
+                         + (f", 쓰지 못함 {x['failed']} (다음 바퀴에 다시)" if x["failed"] else "")
+                         + (" — 기록 파일을 잃어 전부 다시 훑었다" if x.get("record_lost") else "")
+                         + (f", 기록에 없어 남겨 둔 파일 {x['kept']}" if x.get("kept") else "")
+                         + (f", 날짜가 ISO 가 아니어서 파일로 만들지 않은 날짜 {x['skipped_dates']}" if x.get("skipped_dates") else ""))
     if r.get("excel_error"):
         parts.append(f"엑셀: 내보내지 못함 ({r['excel_error']})")
     p = r.get("publish")

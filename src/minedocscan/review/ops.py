@@ -141,6 +141,12 @@ class OpsApp:
             out = decs.save(self.con, path, body["items"], self.reviewer)
         except decs.DecisionError as e:
             raise ApiError(400, str(e)) from e
+        from ..touched import Touched
+
+        t = Touched(documents=set(out["documents"]))            # 처리가 못 하는 문서(원본에 닿지 않는다)도 엑셀의 대기 수가 바뀐다
+        for job in (self.excel, self.publish):
+            if job is not None:
+                job.mark(t)
         if self.wake is not None:
             self.wake.set()                                     # 작업 스레드를 깨운다 — 다음 바퀴를 기다리지 않게
         return {"ok": True, "saved": [{"decision_id": x.decision_id, "target": x.target, "kind": x.kind, "value": x.value}

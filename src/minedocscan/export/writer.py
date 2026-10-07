@@ -244,7 +244,11 @@ def _apply(out: Path, rel: str, build, record: dict, res: Result, made_at: str) 
         elif path.exists():
             res.kept += 1                                     # 기록에 없다 — 이 프로그램이 쓴 것인지 모른다. 지우지 않고 센다
         return
-    book = build()
+    try:
+        book = build()
+    except Exception:                                         # noqa: BLE001 — 한 파일의 모델이 실패해도(템플릿이 DB 와 어긋났다 …)
+        res.failed.append(rel)                                # 나머지 파일과 기록은 쓴다. "쓰지 못함"으로 세고 다음에 다시
+        return
     sha = book_hash(book)
     rec = record.get(rel)
     if rec and rec.get("sha") == sha and rec.get("model") == MODEL_VERSION and path.is_file():
@@ -252,7 +256,7 @@ def _apply(out: Path, rel: str, build, record: dict, res: Result, made_at: str) 
         return
     try:
         write_atomic(book, out, rel, made_at)
-    except OSError:
+    except Exception:                                         # noqa: BLE001 — 바꾸지 못했다(엑셀이 열고 있다)·쓰지 못했다 — 다음에 다시
         res.failed.append(rel)
         return
     record[rel] = {"sha": sha, "model": MODEL_VERSION, "written_at": made_at}

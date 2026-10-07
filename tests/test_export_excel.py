@@ -853,6 +853,17 @@ def test_inspection_overrides_leave_unsure_marks_visible(null_run):
     assert cells[a] == [L.PENDING_MARK, "pending"]
     assert cells[m] == [L.PENDING_MARK, "pending"]
     assert cells[i] == [L.ILLEGIBLE_MARK, "illegible"]
+    # 점검하지 않은 쪽이어도 사람이 표시를 확인한 칸이 있으면 "점검 표시 없음" 줄을 쓰지 않는다
+    def note_of(pid):
+        b = book(con, site, con.execute("SELECT work_date FROM doc_page WHERE page_id = ?", (pid,)).fetchone()[0])
+        rows = next(blocks(s)[pid] for s in b["sheets"] if pid in blocks(s))
+        return [r[1][0] for r in rows if len(r) == 2 and r[1][1] == "note"]
+
+    assert note_of(idle) == [L_NO_MARKS()]
+    con.execute("UPDATE doc_field SET review_status = 'reviewed', reviewed_by = 'jp', has_value = 1, value_final = '1' "
+                "WHERE field_id = ?", (f"{idle}:{region}:{yes}:{eq_rows[0]}",))
+    con.commit()
+    assert note_of(idle) == []
 
 
 def test_summary_page_counts_with_every_status_and_a_waiting_document(null_run):
@@ -999,3 +1010,59 @@ def test_confirmed_usage_values_after_review(usage_run, usage_synth, tmp_path):
         for r in business_rows(b, "xcheck_usage"):
             filled["xcheck"] += r["값 A"] is not None
     assert filled["hours"] and filled["meter"] and filled["clock"] and filled["xcheck"]
+
+
+def test_one_broken_file_does_not_stop_the_others(null_run, tmp_path, monkeypatch):
+    """한 날짜의 모델이 실패해도(템플릿이 DB 와 어긋났다 …) 다른 파일과 기록은 쓰고, 그 파일은 "쓰지 못함"으로 센다."""
+    import minedocscan.export.writer as w
+
+    con, site = null_run.con, null_run.site
+    out = tmp_path / "out"
+    out.mkdir()
+    days = days_of(con)
+    real = w.daily_book
+
+    def broken(con_, site_, day, *a, **kw):
+        if day == days[1]:
+            raise KeyError("없는 표")
+        return real(con_, site_, day, *a, **kw)
+
+    monkeypatch.setattr(w, "daily_book", broken)
+    r = export_excel(con, site, out, full=True)
+    assert r.failed == [daily_path(days[1])] and daily_path(days[0]) in r.written and daily_path(days[2]) in r.written
+    assert (out / RECORD_NAME).is_file()
+    monkeypatch.setattr(w, "daily_book", real)
+    r = export_excel(con, site, out, full=True)
+    assert daily(r.written) == [daily_path(days[1])] and not r.failed
+
+
+def test_template_drift_in_meter_checks_is_not_confirmed(usage_run, monkeypatch):
+    """계기 검산이 견준 칸을 템플릿에서 찾지 못하면(표 이름이 바뀌었다) 값을 싣지 않는다 — 내보내기가 죽지도 않는다."""
+    import minedocscan.export.business as biz
+
+    con, site = usage_run["pipe"].con, usage_run["pipe"].site
+
+    def gone(*a, **kw):
+        raise KeyError("tally")
+
+    monkeypatch.setattr(biz, "check_cells", gone)
+    for day in days_of(con):
+        for r in business_rows(book(con, site, day), "xcheck_usage"):
+            assert (r["값 A"], r["값 B"], r["차이"]) == (None, None, None)
+
+
+def test_a_machine_meta_value_marked_illegible_is_hidden_in_business_sheets(null_run):
+    con = clone_db(null_run.con)
+    site = null_run.site
+    h = con.execute("SELECT h.page_id, h.work_date, h.vehicle_no FROM prod_haul h JOIN doc_page_meta m ON m.page_id = h.page_id "
+                    "AND m.meta_key = 'vehicle_no' WHERE h.source_role = 'log' AND h.vehicle_no IS NOT NULL LIMIT 1").fetchone()
+    pid, day = h["page_id"], h["work_date"]
+    shown = {r[L.SOURCE] for r in business_rows(book(con, site, day), "haul_log") if r["차량번호"] is not None}
+    tpl = site.templates[con.execute("SELECT template_name FROM doc_page WHERE page_id = ?", (pid,)).fetchone()[0]]
+    name = next(f["name"] for f in tpl.fields if f.get("meta_key") == "vehicle_no")
+    con.execute("UPDATE doc_page_meta SET source = 'machine' WHERE page_id = ? AND meta_key = 'vehicle_no'", (pid,))
+    con.execute("UPDATE doc_field SET review_status = 'pending', reviewed_by = 'jp' WHERE field_id = ?", (f"{pid}:fields:{name}:-1",))
+    con.commit()
+    src = next(r[L.SOURCE] for r in business_rows(book(con, site, day), "haul_log") if r[L.FIELD_ID].startswith(pid))
+    rows = [r for r in business_rows(book(con, site, day), "haul_log") if r[L.SOURCE] == src]
+    assert src in shown and rows and all(r["차량번호"] is None for r in rows)

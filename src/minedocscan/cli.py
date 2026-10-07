@@ -712,6 +712,7 @@ def _worth_showing(out: dict) -> bool:
     x, p = out.get("excel") or {}, out.get("publish") or {}
     return bool(out.get("processed") or out.get("received") or out.get("already") or out.get("moved_failed")
                 or x.get("written") or x.get("deleted") or x.get("failed") or x.get("missing_dir") or out.get("excel_error")
+                or x.get("kept") or x.get("skipped_dates")
                 or p.get("error") or any((p.get("replaced") or {}).values()) or any((p.get("removed") or {}).values())
                 or out.get("publish_error"))
 
@@ -1442,6 +1443,12 @@ def _export_masked(a, s: Settings, site) -> int:
     if inside_git_tree(out):
         raise SystemExit(f"{out} 은 git 작업 트리 안입니다. 가린 그림도 현장 데이터이므로 저장소 밖에 내보내세요 "
                          "(템플릿이 아는 자리만 가렸다 — 가렸다고 저장소·이슈에 넣어도 되는 것이 아니다)")
+    from .export.writer import ExportError, check_out_dir
+
+    try:                                                   # 접수 폴더·보관 폴더 안도 거절 (가린 그림을 스캔으로 접수하게 된다)
+        check_out_dir(out, s)
+    except ExportError as e:
+        raise SystemExit(str(e).replace("엑셀에는", "가린 그림에도")) from None
     if a.date and iso_date(a.date) != a.date:
         raise SystemExit(f"--date 는 YYYY-MM-DD: {a.date!r}")
     try:
@@ -1474,9 +1481,7 @@ def cmd_publish(a) -> int:
         except FileNotFoundError as e:
             raise SystemExit(f"{e} — 먼저 run·watch 로 처리합니다") from None
         try:
-            if a.rebuild:
-                core.rebuild(s)
-            res = core.run(con, s, full=True, check=a.check)
+            res = core.run(con, s, full=True, check=a.check, rebuild=a.rebuild)
         except Orphans as e:
             print(f"싣지 않았습니다: {e} — 작업 DB 를 run --fresh 로 다시 만드십시오", file=sys.stderr)
             return 2

@@ -108,6 +108,7 @@
     if (!p || !p.enabled) return '통합 DB: ' + ({no_driver: '꺼짐 (psycopg 없음)', disabled: '꺼짐 ([publish] enabled = false)', no_watch: '꺼짐 (--no-watch)'}[p && p.reason] || '꺼짐 (MINEDOCSCAN_PUBLISH_URL 없음)');
     let t = '통합 DB ' + esc(p.target) + '/' + esc(p.schema) + ': ' + (p.last_ok_at ? '마지막 ' + esc(p.last_ok_at) : '실은 적 없음');
     if (p.last_error) t += ' · <span class="status-failed">싣지 못함 (' + esc(p.last_error) + ', 밀린 범위 ' + p.behind + ')</span>';
+    if (p.skipped) t += ' · <span class="status-failed">실을 수 없는 값이 있어 건너뛴 범위 ' + p.skipped + '</span>';
     return t;
   }
   function exportText(x) {

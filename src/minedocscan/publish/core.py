@@ -65,16 +65,23 @@ class Result:
 
 # ── 연결 ───────────────────────────────────────────────────────────────────
 def describe_url(url: str | None) -> str:
-    """찍어도 되는 대상의 이름: 호스트(:포트)/DB — 사용자·비밀번호 없이."""
+    """찍어도 되는 대상의 이름: 호스트(:포트)/DB — 사용자·비밀번호 없이. postgresql://… 꼴과 libpq 의 키워드 꼴(host=… dbname=…)
+    둘 다 — 그 밖의 글자는 그대로 내지 않는다."""
     if not url:
         return "(없음)"
+    if "://" not in url:                                     # 키워드 꼴: 아는 키만 고른다 (password 는 보지 않는다)
+        kv = dict(re.findall(r"(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S+)", url))
+        host = kv.get("host", "localhost").strip("'")
+        port = f":{kv['port'].strip(chr(39))}" if kv.get("port") else ""
+        return f"{host}{port}/{kv.get('dbname', '?').strip(chr(39))}" if kv else "(읽을 수 없는 연결 문자열)"
     try:
         u = urlsplit(url)
         host = u.hostname or "localhost"
         port = f":{u.port}" if u.port else ""
     except ValueError:
         return "(읽을 수 없는 URL)"
-    return f"{host}{port}/{(u.path or '/').lstrip('/') or '?'}"
+    db = (u.path or "/").lstrip("/").split("?")[0]
+    return f"{host}{port}/{db or '?'}"
 
 
 def scrub(text: str, url: str | None) -> str:
@@ -130,8 +137,12 @@ class Target:
             return dict(c.fetchall())
 
     def create(self) -> None:
+        """표를 만든다. 스키마는 없을 때만 만든다 — CREATE SCHEMA 는 (IF NOT EXISTS 여도) DB 의 CREATE 권한이 있어야 하므로, 관리자가
+        스키마를 만들어 준 전용 계정은 그 스키마 안에만 쓴다."""
         with self.cur() as c:
-            c.execute(f"CREATE SCHEMA IF NOT EXISTS {self.s}")
+            c.execute("SELECT 1 FROM information_schema.schemata WHERE schema_name = %s", (self.schema,))
+            if c.fetchone() is None:
+                c.execute(f"CREATE SCHEMA {self.s}")
             for stmt in ddl.create_statements(self.schema):
                 c.execute(stmt)
             c.executemany(f"INSERT INTO {self.s}.{q(META_TABLE)} (key, value) VALUES (%s, %s)",
@@ -255,7 +266,7 @@ def publish(con, target: Target, full: bool = True, documents: Iterable[str] = (
                 res.checked += 1
                 old = have.get(sc.id)
                 if sc.key not in local[kind]:
-                    if old is not None or not full:
+                    if old is not None:                      # 대상에 있던 범위만 (실을 수 없어 건너뛴 범위는 행도 상태도 없다)
                         gone.append(sc.id)
                     continue
                 fp = sc.fingerprint()
@@ -318,17 +329,21 @@ def _is_conflict(e: BaseException) -> bool:
 
 
 def run(con, settings, full: bool = True, documents: Iterable[str] = (), dates: Iterable[str] = (), check: bool = False,
-        connect: Callable | None = None, target: Target | None = None, fail_after: int | None = None) -> Result:
+        connect: Callable | None = None, target: Target | None = None, fail_after: int | None = None,
+        rebuild: bool = False) -> Result:
     """연결 → 한 트랜잭션으로 싣기 → 커밋. 더러운 범위만 실은 것이 키 충돌로 실패하면 되돌리고 같은 자리에서 전체 훑기로 다시 한다.
-    실패하면 되돌리고 PublishError (종류와 수만). check=True 면 쓰지 않는다 (되돌린다)."""
+    실패하면 되돌리고 PublishError (종류와 수만). check=True 면 쓰지 않는다 (되돌린다). rebuild=True 면 이 프로그램의 표를 지우고
+    다시 만든 뒤 싣는다 — 같은 트랜잭션이라 읽는 쪽은 빈 표를 보지 않고, 실패하면 대상은 그 전 그대로다."""
     own = target is None
     t = target or open_target(settings, connect)
     try:
+        if rebuild:
+            _drop_and_create(t)
         try:
             res = publish(con, t, full=full, documents=documents, dates=dates, check=check, fail_after=fail_after)
         except Exception as e:
             _rollback(t)
-            if full or check or not _is_conflict(e):
+            if full or check or rebuild or not _is_conflict(e):
                 raise
             res = publish(con, t, full=True, check=False, fail_after=fail_after)
             res.fell_back = True
@@ -352,27 +367,18 @@ def run(con, settings, full: bool = True, documents: Iterable[str] = (), dates: 
                 pass
 
 
-def rebuild(settings, connect: Callable | None = None, target: Target | None = None) -> None:
-    """이 프로그램이 만든 표만 지우고 다시 만든다 (CASCADE 하지 않는다). 뷰가 걸려 있어 지우지 못하면 PublishError (종류 depends)."""
-    own = target is None
-    t = target or open_target(settings, connect)
+def _drop_and_create(t: Target) -> None:
+    """이 프로그램이 만든 표만 지우고 다시 만든다 (CASCADE 하지 않는다 — 부른 쪽의 트랜잭션 안에서, 커밋하지 않는다).
+    뷰가 걸려 있어 지우지 못하면 PublishError (종류 depends)."""
     try:
-        try:
-            t.drop()
-            t.create()
-            t.conn.commit()
-        except Exception as e:                               # noqa: BLE001
-            _rollback(t)
-            if type(e).__name__ == "DependentObjectsStillExist" or getattr(e, "sqlstate", None) == "2BP01":
-                raise PublishError("대상의 표에 다른 것(뷰 등)이 걸려 있어 지우지 않았습니다 — 그것을 먼저 치우십시오", 2,
-                                   "depends") from None
-            raise PublishError(f"다시 만들지 못했습니다 ({type(e).__name__})", 2, type(e).__name__) from None
-    finally:
-        if own:
-            try:
-                t.conn.close()
-            except Exception:                                # noqa: BLE001
-                pass
+        t.drop()
+        t.create()
+    except Exception as e:                                   # noqa: BLE001
+        _rollback(t)
+        if type(e).__name__ == "DependentObjectsStillExist" or getattr(e, "sqlstate", None) == "2BP01":
+            raise PublishError("대상의 표에 다른 것(뷰 등)이 걸려 있어 지우지 않았습니다 — 그것을 먼저 치우십시오", 2,
+                               "depends") from None
+        raise PublishError(f"다시 만들지 못했습니다 ({type(e).__name__})", 2, type(e).__name__) from None
 
 
 def _rollback(t: Target) -> None:

@@ -56,7 +56,7 @@ class AutoPublish:
         self.status: dict = {"enabled": self.enabled, "reason": self.reason,
                              "target": core.describe_url(settings.publish_url) if settings.publish_url else None,
                              "schema": settings.publish_schema, "last_ok_at": None, "behind": 0, "last_error": None,
-                             "replaced": 0, "fell_back": 0}
+                             "replaced": 0, "skipped": 0, "fell_back": 0}
 
     @property
     def enabled(self) -> bool:
@@ -82,17 +82,18 @@ class AutoPublish:
         try:
             res = core.run(con, self.settings, full=full, documents=t.documents | t.removed, dates=t.all_dates(con),
                            connect=self.connect)
-        except (core.PublishError, Orphans) as e:
+        except Exception as e:                                # noqa: BLE001 — 무엇이 실패하든 건드린 것을 들고 있다가 다음에
             self.held, self.last_fail = t, now
-            kind = e.kind if isinstance(e, core.PublishError) else "orphans"
+            kind = e.kind if isinstance(e, core.PublishError) else ("orphans" if isinstance(e, Orphans) else type(e).__name__)
             self.status = dict(self.status, behind=_count(t) or 1, last_error=kind)
-            return Failed(kind, str(e), _count(t))
+            msg = str(e) if isinstance(e, core.PublishError | Orphans) else f"싣지 못했습니다 ({type(e).__name__})"
+            return Failed(kind, msg, _count(t))
         self.held, self.last_fail = Touched(), None
         if full:
             self.last_sweep = now
         self.fell_back += res.fell_back
         self.status = dict(self.status, last_ok_at=self.now(), behind=0, last_error=None, replaced=res.changed,
-                           fell_back=self.fell_back)
+                           skipped=res.skipped, fell_back=self.fell_back)
         return res
 
 

@@ -50,6 +50,14 @@ class SitePack:
         self.equipment_aliases: dict[str, str] = _equipment_aliases(self.config, self.templates)
         self.haul_table: dict[str, list[str]] = _haul_table(self.config)
         self.redact: dict = _redact(self.config)
+        if self.redact["meta_keys"] is not None:            # 틀린 키(오타)는 아무것도 가리지 않는다 — 조용히 넘기지 않는다
+            known = {f.get("meta_key") for t in self.templates.values() for f in t.fields if f.get("meta_key")}
+            unknown = sorted(set(self.redact["meta_keys"]) - known)
+            if unknown:
+                from ..config import ConfigError
+
+                raise ConfigError(f"site.toml 의 [redact] meta_keys 에 템플릿에 없는 메타 키가 있습니다: {', '.join(unknown)} "
+                                  f"(있는 키: {', '.join(sorted(known)) or '없음'})")
         self._labels: dict | None = None
         pat = self.config.get("ingest", {}).get("date_from_filename")
         self._date_re = re.compile(pat) if pat else None

@@ -78,6 +78,8 @@ def test_invariant_and_only_the_changed_scopes(world, pg):
     assert fks == [(0,)]
     r = publish(world, pg)
     assert r.changed == 0 and r.rows == 0                                      # 바로 다시 — 갈아 끼운 범위 0
+    r = publish(world, pg, full=False, documents={"0000000000000000"}, dates={"2031-01-01"})
+    assert r.changed == 0                                                     # 대상에 없던 범위는 "지운 범위"로 세지 않는다
     # 운반 횟수 칸 하나를 검수하고 (더러운 범위만) 싣는다 — 그 문서와 그 날짜만
     fid, day, doc = con.execute("SELECT h.source_field_id, h.work_date, p.document_id FROM prod_haul h JOIN doc_page p "
                                 "ON h.page_id = p.page_id WHERE h.source_role = 'log' AND h.review_status = 'pending' "
@@ -176,15 +178,43 @@ def test_versions_rebuild_and_views(world, pg):
     with pytest.raises(core.NeedRebuild) as e:
         publish(world, pg)
     assert "--rebuild" in str(e.value)
-    core.rebuild(pg)
-    publish(world, pg)
+    before = remote(pg, f'SELECT COUNT(*) FROM "{pg.publish_schema}".doc_field')
+    with pytest.raises(core.PublishError):                                # 다시 만들고 싣는 가운데 실패 — 한 트랜잭션이라 그 전 그대로
+        publish(world, pg, rebuild=True, fail_after=1)
+    assert remote(pg, f'SELECT COUNT(*) FROM "{pg.publish_schema}".doc_field') == before
+    assert remote(pg, f'SELECT value FROM "{pg.publish_schema}".pub_meta WHERE key = %s', ("publish_version",)) == [("999",)]
+    publish(world, pg, rebuild=True)
     assert_same(world["pipe"].con, pg)
     with psycopg.connect(PG, autocommit=True) as c:                           # 2단계의 뷰가 걸려 있다
         c.execute(f'CREATE VIEW "{pg.publish_schema}".v_haul AS SELECT * FROM "{pg.publish_schema}".prod_haul')
     with pytest.raises(core.PublishError) as e:
-        core.rebuild(pg)
+        publish(world, pg, rebuild=True)
     assert e.value.kind == "depends"
     assert remote(pg, f'SELECT COUNT(*) FROM "{pg.publish_schema}".prod_haul')[0][0] > 0       # 지우지 않았다
+
+
+def test_a_schema_only_account_can_publish(world, pg):
+    """관리자가 스키마를 만들어 준 전용 계정(DB 의 CREATE 권한 없이)으로도 싣는다 — 스키마가 있으면 CREATE SCHEMA 를 하지 않는다."""
+    import psycopg
+
+    role = f"r_{uuid.uuid4().hex[:8]}"
+    with psycopg.connect(PG, autocommit=True) as c:
+        c.execute(f"CREATE ROLE \"{role}\" LOGIN PASSWORD 'pw-only-for-this-test'")       # DDL 은 자리표시자를 받지 않는다
+        c.execute(f'CREATE SCHEMA "{pg.publish_schema}" AUTHORIZATION "{role}"')
+        db = c.execute("SELECT current_database()").fetchone()[0]
+        c.execute(f'REVOKE CREATE ON DATABASE "{db}" FROM PUBLIC')
+    try:
+        from urllib.parse import urlsplit
+
+        u = urlsplit(PG)
+        url = f"postgresql://{role}:pw-only-for-this-test@{u.hostname}:{u.port or 5432}{u.path}"
+        r = core.run(world["pipe"].con, replace(pg, publish_url=url))
+        assert r.created and r.replaced["document"]
+        assert_same(world["pipe"].con, pg)
+    finally:
+        with psycopg.connect(PG, autocommit=True) as c:
+            c.execute(f'DROP SCHEMA IF EXISTS "{pg.publish_schema}" CASCADE')
+            c.execute(f'DROP ROLE IF EXISTS "{role}"')
 
 
 def test_check_writes_nothing_and_the_lock(world, pg, capsys, monkeypatch):

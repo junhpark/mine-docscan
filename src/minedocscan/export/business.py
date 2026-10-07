@@ -59,6 +59,30 @@ class Ctx:
         f = self.field(fid)
         return "pending" if f is None else row_state(f)
 
+    def meta_hidden(self, page_id: str | None, key: str) -> bool:
+        """그 쪽의 메타 값(차량번호·작성자·장비)이 기계가 자동 적재한 것인데 사람이 그 칸을 "읽을 수 없음"으로 검수했다 — 업무 시트에도
+        싣지 않는다 (양식 시트의 model.page_block 과 같은 규칙, 4.2). 쪽 메타·템플릿을 모르면 숨기지 않는다 (DB 의 값 그대로)."""
+        if not page_id:
+            return False
+        ck = (page_id, key)
+        if ck in self._extra:
+            return self._extra[ck]
+        src = (self.pages.meta_source.get(page_id) or {}).get(key)
+        if src is None and page_id not in self.pages.meta_source:
+            r = self.con.execute("SELECT source FROM doc_page_meta WHERE page_id = ? AND meta_key = ?", (page_id, key)).fetchone()
+            src = r[0] if r else None
+        hidden = False
+        if src == "machine":
+            tpl = self.site.templates.get(template_of(self, page_id) or "")
+            name = next((f["name"] for f in (tpl.fields if tpl else []) if f.get("meta_key") == key), None)
+            f = self.field(f"{page_id}:fields:{name}:-1") if name else None
+            hidden = bool(f and f["review_status"] == "pending" and f["reviewed_by"])
+        self._extra[ck] = hidden
+        return hidden
+
+    def meta(self, page_id: str | None, key: str, value):
+        return None if value is None or self.meta_hidden(page_id, key) else value
+
     def source(self, page_id: str | None) -> str:
         if not page_id:
             return ""
@@ -131,7 +155,8 @@ def haul_log_sheet(ctx: Ctx, days: list[str]) -> dict | None:
     out = []
     for h in haul_rows(ctx, days, "log"):
         st = haul_state(h)
-        out.append([cell(h["work_date"]), cell(h["slot"] or L.UNRESOLVED_SLOT), cell(h["vehicle_no"]), cell(h["operator"]),
+        out.append([cell(h["work_date"]), cell(h["slot"] or L.UNRESOLVED_SLOT), cell(ctx.meta(h["page_id"], "vehicle_no", h["vehicle_no"])),
+                    cell(ctx.meta(h["page_id"], "operator", h["operator"])),
                     cell(h["material"]), cell(h["level"]), cell(L.SHIFT.get(h["shift"], h["shift"])),
                     value_cell(h["trips"], st), *tail(ctx, st, h["trips_raw"], ctx.source(h["page_id"]), h["source_field_id"])])
     return table("haul_log", ctx, out)
@@ -153,8 +178,11 @@ def haul_long_sheet(ctx: Ctx, days: list[str]) -> dict | None:
     for role in ("log", "matrix"):
         for h in haul_rows(ctx, days, role, only_marked=True):
             st = haul_state(h)
-            out.append([cell(h["work_date"]), cell(L.ROLE[role]), cell(h["slot"] or L.UNRESOLVED_SLOT), cell(h["vehicle_no"]),
-                        cell(h["operator"]), cell(h["material"]), cell(h["level"]), cell(L.SHIFT.get(h["shift"], h["shift"])),
+            hide = role == "log"                                # 행렬의 차량번호·작성자는 인쇄된 머리글 — 쪽 메타가 아니다
+            out.append([cell(h["work_date"]), cell(L.ROLE[role]), cell(h["slot"] or L.UNRESOLVED_SLOT),
+                        cell(ctx.meta(h["page_id"], "vehicle_no", h["vehicle_no"]) if hide else h["vehicle_no"]),
+                        cell(ctx.meta(h["page_id"], "operator", h["operator"]) if hide else h["operator"]),
+                        cell(h["material"]), cell(h["level"]), cell(L.SHIFT.get(h["shift"], h["shift"])),
                         value_cell(h["trips"], st),
                         *tail(ctx, st, h["trips_raw"], ctx.source(h["page_id"]), h["source_field_id"])])
     if not out:
@@ -215,8 +243,10 @@ def xcheck_haul_sheet(ctx: Ctx, days: list[str]) -> dict | None:
             verdict = L.XCHECK_STATUS.get(x["status"], x["status"]) + ("" if ok else L.PROVISIONAL)
             unresolved = x["slot"] in unres
             machine = None if ok else machine_text(("일보", x["log_trips_raw"]), ("행렬", x["matrix_trips_raw"]))
+            hid = {k: any(ctx.meta_hidden(p, k) for p in pids) for k in ("vehicle_no", "operator")}
             out.append([cell(day), cell(L.UNRESOLVED_SLOT if unresolved else x["slot"]),
-                        cell(None if unresolved else x["vehicle_no"]), cell(None if unresolved else x["operator"]),
+                        cell(None if unresolved or hid["vehicle_no"] else x["vehicle_no"]),
+                        cell(None if unresolved or hid["operator"] else x["operator"]),
                         cell(x["material"]), cell(x["level"]),
                         value_cell(x["log_trips"], st), value_cell(x["matrix_trips"], st),
                         cell(verdict, "mismatch" if x["status"] == "mismatch" else ""),
@@ -230,7 +260,9 @@ def assignment_sheet(ctx: Ctx, days: list[str]) -> dict | None:
                     key=lambda x: (x["work_date"], x["slot"])):
         pids = [r["page_id"] for r in ctx.con.execute(
             "SELECT DISTINCT page_id FROM prod_haul WHERE work_date = ? AND source_role = 'log' AND slot = ?", (x["work_date"], x["slot"]))]
-        out.append([cell(x["work_date"]), cell(x["slot"]), cell(x["vehicle_no"]), cell(x["operator"]), cell(x["header_vehicle_no"]),
+        hid = {k: any(ctx.meta_hidden(p, k) for p in pids) for k in ("vehicle_no", "operator")}
+        out.append([cell(x["work_date"]), cell(x["slot"]), cell(None if hid["vehicle_no"] else x["vehicle_no"]),
+                    cell(None if hid["operator"] else x["operator"]), cell(x["header_vehicle_no"]),
                     cell(x["header_operator"]), cell(L.MATCHED_BY.get(x["matched_by"], x["matched_by"])),
                     cell(L.YES if x["header_mismatch"] else None, "mismatch" if x["header_mismatch"] else ""),
                     *tail(ctx, "value", None, ", ".join(ctx.source(p) for p in sorted(pids, key=ctx.order)), None)])
@@ -274,7 +306,8 @@ def usage_sheet(ctx: Ctx, days: list[str]) -> dict | None:
         raw = " · ".join(f"{n} {u[f'meter_{k}_raw']}" for k, n in (("start", "시작"), ("end", "종료"), ("total", "총"))
                          if u[f"meter_{k}_raw"] not in (None, "") and not sure(sf[k]))
         fids = " ".join(x for x in (u["start_field_id"], u["end_field_id"], u["total_field_id"]) if x)
-        out.append([cell(u["work_date"]), cell(u["source_form"]), cell(u["equipment"]), cell(u["operator"]),
+        out.append([cell(u["work_date"]), cell(u["source_form"]), cell(ctx.meta(u["page_id"], "equipment", u["equipment"])),
+                    cell(ctx.meta(u["page_id"], "operator", u["operator"])),
                     cell(L.READING_KIND.get(u["reading_kind"], u["reading_kind"])),
                     value_cell(u["meter_start"], sf["start"]), value_cell(u["meter_end"], sf["end"]),
                     value_cell(u["meter_total"], sf["total"]),
@@ -295,7 +328,8 @@ def tally_sheet(ctx: Ctx, days: list[str], only_marked: bool = False) -> dict | 
     out = []
     for t in rows:
         st = row_state({"review_status": t["review_status"], "reviewed_by": t["reviewed_by"], "has_value": t["has_value"]})
-        out.append([cell(t["work_date"]), cell(t["source_form"]), cell(t["equipment"]), cell(t["item"]), cell(t["place"]),
+        out.append([cell(t["work_date"]), cell(t["source_form"]), cell(ctx.meta(t["page_id"], "equipment", t["equipment"])),
+                    cell(t["item"]), cell(t["place"]),
                     cell(t["column_name"]), cell(L.SHIFT.get(t["shift"], t["shift"])),
                     cell(L.SUBTOTAL_MARK if t["is_subtotal"] else None),
                     value_cell(t["count"], st), *tail(ctx, st, t["count_raw"], ctx.source(t["page_id"]), t["source_field_id"])])
@@ -308,14 +342,19 @@ def xcheck_usage_sheet(ctx: Ctx, days: list[str]) -> dict | None:
     rows = in_days(ctx.con, "SELECT x.*, u.equipment FROM xcheck_usage x LEFT JOIN eq_usage_daily u ON u.page_id = x.page_id "
                    "WHERE x.work_date IN ({})", days)
     for x in sorted(rows, key=lambda x: (x["work_date"], ctx.order(x["page_id"]), kinds.get(x["check_kind"], 9), x["item"])):
-        st = worst(ctx.state(fid) for fid in check_cells(ctx.con, ctx.site, x))
-        if x["check_kind"] == "subtotal" and ctx.site.templates.get(template_of(ctx, x["page_id"])) is None:
-            st = "pending"                                  # 더한 칸을 모른다 (템플릿이 사이트 팩에 없다) — 닫힌 쪽으로
+        try:
+            cells = check_cells(ctx.con, ctx.site, x)
+        except KeyError:                                    # 템플릿에서 그 표가 없어졌다 (고친 뒤 다시 돌리지 않았다)
+            cells = None
+        st = worst(ctx.state(fid) for fid in cells) if cells else "pending"
+        if x["check_kind"] == "subtotal" and (ctx.site.templates.get(template_of(ctx, x["page_id"])) is None or len(cells or ()) < 2):
+            st = "pending"                                  # 더한 칸을 모른다 (템플릿이 없거나 소계의 모양이 바뀌었다) — 닫힌 쪽으로
         ok = sure(st)
         # 견준 값에 기대는 결과에만 "(잠정)" — 첫 기록·모름(장비를 모른다)은 값과 상관없다
         provisional = not ok and x["result"] not in ("first", "unknown")
         result = L.CHECK_RESULT.get(x["result"], x["result"]) + (L.PROVISIONAL if provisional else "")
-        out.append([cell(x["work_date"]), cell(L.CHECK_KIND.get(x["check_kind"], x["check_kind"])), cell(x["equipment"]),
+        out.append([cell(x["work_date"]), cell(L.CHECK_KIND.get(x["check_kind"], x["check_kind"])),
+                    cell(ctx.meta(x["page_id"], "equipment", x["equipment"])),
                     value_cell(x["value_a"], st), value_cell(x["value_b"], st), value_cell(x["diff"], st),
                     cell(x["days_between"]),
                     cell(result, "mismatch" if x["result"] in ("mismatch", "gap", "overlap") and ok else ""),
