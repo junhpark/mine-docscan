@@ -28,17 +28,22 @@ class OracleRecognizer:
       · "<파일명>#<페이지>"  — 같은 날 같은 양식이 여러 장일 때 (차량별 일보)
       · "YYYY-MM-DD"         — 그날 그 양식이 한 장뿐일 때 (점검표)
     페이지 출처를 먼저 찾고, 없으면 날짜로 찾는다.
+    site 를 주면 양식을 site.answer_key 로 맞춘다 (tasks/0006 4.6): 같은 날 섞여 쓰이는 판(동시 판)의 정답은 계열로 묶여,
+    판 A 로 적힌 정답이 판 B 로 적재된 쪽에도 붙는다. 없으면 템플릿 이름 그대로 (지금과 같다).
     """
 
     name = "oracle"
 
-    def __init__(self, answers: dict[AnswerKey, str] | None = None):
+    def __init__(self, answers: dict[AnswerKey, str] | None = None, site=None):
         self.answers = answers or {}
+        self._key = (lambda name: name) if site is None else site.answer_key
+        if site is not None:
+            self.answers = {(o, self._key(t), *rest): v for (o, t, *rest), v in self.answers.items()}
 
     def recognize(self, crops, contexts: list[CellContext]) -> list[Recognition]:
         out = []
         for c in contexts:
-            tail = (c.template, c.region, c.field_name, c.row_key)
+            tail = (self._key(c.template), c.region, c.field_name, c.row_key)
             text = self.answers.get((c.source, *tail))
             if text is None and c.work_date:
                 text = self.answers.get((c.work_date, *tail))

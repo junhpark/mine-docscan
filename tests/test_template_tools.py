@@ -48,6 +48,36 @@ def test_preview_refuses_the_repository(pack):
     assert not (Path(__file__).parent / "template-preview-should-not-exist").exists()
 
 
+def test_preview_command_refuses_the_repository_in_one_line(pack, tmp_path, capsys):
+    """저장소 안의 --out: 거절 한 줄뿐 — "template check" 안내는 템플릿 오류일 때만 (tasks/0006 단계 1)."""
+    out = Path(__file__).parent / "template-preview-should-not-exist"
+    with pytest.raises(SystemExit) as e:
+        main(["template", "preview", str(pack / "templates" / synth_usage.T_USAGE), "--out", str(out)])
+    msg = str(e.value.code)
+    assert "git 작업 트리" in msg and "\n" not in msg and "template check" not in msg
+    cap = capsys.readouterr()
+    assert cap.out == "" and cap.err == "" and not out.exists()
+    # 템플릿 오류면 안내가 붙는다
+    with pytest.raises(SystemExit) as e:
+        main(["template", "preview", str(_broken(pack, tmp_path)), "--out", str(tmp_path / "prev")])
+    assert "minedocscan template check" in str(e.value.code)
+    # 기준 이미지가 없으면 템플릿 폴더의 오류다 — 안내가 붙는다 (template check 가 "기준 이미지가 없습니다" 로 알린다)
+    noref = tmp_path / "noref"
+    noref.mkdir()
+    src = pack / "templates" / synth_usage.T_USAGE
+    (noref / "template.yaml").write_bytes((src / "template.yaml").read_bytes())
+    with pytest.raises(SystemExit) as e:
+        main(["template", "preview", str(noref), "--out", str(tmp_path / "prev2")])
+    assert "기준 이미지를 읽을 수 없습니다" in str(e.value.code) and "minedocscan template check" in str(e.value.code)
+    assert any(x.startswith("기준 이미지가 없습니다") for x in check_template(noref))
+    # 없는 쪽(--scan) 은 템플릿 오류가 아니다 — 한 줄뿐
+    scan = tmp_path / "one.png"
+    scan.write_bytes((src / "reference.png").read_bytes())
+    with pytest.raises(SystemExit) as e:
+        main(["template", "preview", str(src), "--scan", str(scan), "--page", "3", "--out", str(tmp_path / "prev3")])
+    assert "3 쪽이 없습니다" in str(e.value.code) and "\n" not in str(e.value.code)
+
+
 def _broken(pack, tmp_path) -> Path:
     """일부러 망가뜨린 가동 일보 템플릿 — 오류 여덟 가지."""
     src = pack / "templates" / synth_usage.T_LOADER
@@ -100,6 +130,59 @@ def test_check_lists_every_problem_of_a_broken_template(pack, tmp_path, capsys):
     assert "오류 2개" in out and out.count("\n- ") + out.startswith("- ") == 2
     (d / "template.yaml").write_text("name: [broken\n", encoding="utf-8")
     assert check_template(d)[0].startswith("YAML 을 읽을 수 없습니다")
+    with pytest.raises(TemplateError, match="YAML 을 읽을 수 없습니다"):
+        Template(d / "template.yaml")
+
+
+def test_yaml_constructor_errors_are_template_errors(pack, tmp_path, capsys):
+    """따옴표 없는 없는 날짜(valid_to: 2030-02-30)는 YAML 생성자가 date 로 만들다 ValueError — Template 은 TemplateError 한 줄
+    ('<파일>: YAML 을 읽을 수 없습니다: …'), template check 는 같은 글의 오류 하나, 사이트 팩도 TemplateError. traceback 이 아니다."""
+    import shutil
+
+    from minedocscan.forms.sitepack import SitePack
+
+    site = shutil.copytree(pack, tmp_path / "site")                       # 모듈 공용 팩은 그대로 둔다
+    p = site / "templates" / synth_usage.T_LOADER / "template.yaml"
+    p.write_text(p.read_text(encoding="utf-8") + "valid_to: 2030-02-30\n", encoding="utf-8")
+    with pytest.raises(TemplateError) as e:
+        Template(p)
+    msg = str(e.value)
+    assert msg.startswith(f"{p}: YAML 을 읽을 수 없습니다: ") and "\n" not in msg and "day" in msg, msg
+    assert not isinstance(e.value.__cause__, TemplateError)
+    errs = check_template(p.parent)
+    assert len(errs) == 1 and errs[0].startswith("YAML 을 읽을 수 없습니다: "), errs
+    with pytest.raises(TemplateError, match="YAML 을 읽을 수 없습니다"):
+        SitePack(site)
+    assert main(["template", "check", str(p.parent)]) == 1
+    assert "YAML 을 읽을 수 없습니다" in capsys.readouterr().out
+
+
+def test_check_says_which_tables_were_left_out_of_the_geometry_checks(pack, tmp_path):
+    """행·열이 괘선 범위를 벗어나 칸을 만들 수 없는 표: 기하 검사를 건너뛰었다고 한 줄 (조용히 건너뛰지 않는다 — tasks/0006 단계 1).
+    나머지 표·필드의 기하 검사는 한다. 행 키는 찍지 않는다."""
+    src = pack / "templates" / synth_usage.T_LOADER
+    d = tmp_path / "t"
+    d.mkdir()
+    (d / "reference.png").write_bytes((src / "reference.png").read_bytes())
+    spec = yaml.safe_load((src / "template.yaml").read_text(encoding="utf-8"))
+    regs = {r["name"]: r for r in spec["regions"]}
+    regs["tally"]["rows"].append({"row": 40, "key": "EQ-0101"})
+    regs["meter"]["columns"].append({"idx": 9, "name": "extra", "kind": "handwritten_text"})
+    fields = {f["name"]: f for f in spec["fields"]}
+    fields["fuel"]["bbox"] = [2200, 855, 2500, 915]                                         # 쪽 밖 (폭 2339)
+    fields["check"]["bbox"] = [1210, 365, 1390, 475]                  # 칸을 만들 수 있는 표(shifts)의 칸과 겹친다
+    (d / "template.yaml").write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    errs = check_template(d)
+    skipped = [e for e in errs if "건너뛰었습니다" in e]
+    assert len(skipped) == 1, errs
+    assert skipped[0].startswith(f"{synth_usage.T_LOADER}/tally, {synth_usage.T_LOADER}/meter: 칸을 만들 수 없어")  # 파일의 순서
+    assert "기하 검사(겹침·쪽 밖·좁은 칸)" in skipped[0] and "표 2개" in skipped[0]
+    assert "shifts" not in skipped[0]
+    assert any("행 40 가 괘선 범위를 벗어납니다" in e for e in errs) and any("idx 9 가 괘선 범위를 벗어납니다" in e for e in errs)
+    # 나머지 표·필드는 검사한다: 쪽 밖의 필드, 칸을 만들 수 있는 표(shifts)와 필드의 겹침
+    assert any("fields/fuel: 쪽 밖" in e for e in errs)
+    assert any(e.startswith("칸이 겹칩니다: shifts/") and e.endswith("↔ fields/check") for e in errs), errs
+    assert not any("EQ-0101" in e for e in errs)
 
 
 def test_check_does_not_print_row_keys(tmp_path):

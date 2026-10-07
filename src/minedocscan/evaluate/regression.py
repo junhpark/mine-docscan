@@ -82,7 +82,7 @@ def run_regression(settings: Settings, site: SitePack | None = None, update: boo
         # 메타 필드 모델([recognize.meta])도 쓰지 않는다 — 기준은 인식기 하나(recognizer)로만 정해진다
         pipe = Pipeline(s, site=site, recognizer=get_recognizer(recognizer), load_reviews=False, meta_readers={})
         pipe.run([settings.archive_root / i for i in inputs])
-        actual = build_report(pipe.con)
+        actual = build_report(pipe.con, site.variant_families())
         pipe.con.close()
     diffs = diff_reports(spec.get("report", {}), actual) if spec.get("report") else []
     added = new_keys(spec.get("report", {}), actual) if spec.get("report") else []

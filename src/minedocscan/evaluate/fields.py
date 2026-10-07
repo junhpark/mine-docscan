@@ -31,12 +31,17 @@ TARGETS = ("final", "raw")
 
 def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final", only_listed: bool = False,
                     split: str = "all", site=None) -> dict:
-    """split: all | test | train — 쪽의 날짜가 그 분할인 셀만 센다 (site 의 소금값으로 정한다, ADR 0009)."""
+    """split: all | test | train — 쪽의 날짜가 그 분할인 셀만 센다 (site 의 소금값으로 정한다, ADR 0009).
+    site 가 있으면 정답과 쪽의 양식을 site.answer_key 로 맞춘다 — 동시 판의 정답은 계열로 (묶음 이름은 쪽의 판 이름 그대로)."""
     if target not in TARGETS:
         raise ValueError(f"target 은 {TARGETS} 중 하나: {target}")
     if split != "all" and site is None:
         raise ValueError("split 에는 사이트 팩이 필요합니다")
     col = "f.value_final" if target == "final" else "f.value_raw"
+    # 양식의 키: 사이트 팩이 있으면 동시 판(concurrent)은 계열로 맞춘다 (site.answer_key — tasks/0006 4.6). 없으면 이름 그대로
+    tkey = (lambda name: name) if site is None else site.answer_key
+    if site is not None:
+        answers = {(o, tkey(t), *rest): v for (o, t, *rest), v in answers.items()}
     tables = {(k[0], k[1], k[2]) for k in answers}          # (출처, template, region) 에 정답이 있는가
     groups: dict[str, dict] = {}
     seen: set = set()
@@ -45,7 +50,7 @@ def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final
             f"f.kind, {col}, f.review_status, f.status_raw, f.backend, f.has_value_raw, f.value_raw, f.format "
             "FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id "
             "JOIN doc_document d ON p.document_id = d.document_id WHERE f.kind LIKE 'handwritten%'"):
-        source, work_date, template, region = f"{r[0]}#{r[1]}", r[2], r[3], r[4]
+        source, work_date, template, region = f"{r[0]}#{r[1]}", r[2], tkey(r[3]), r[4]
         if split != "all" and site.split_of(work_date) != split:
             continue
         origin = source if (source, template, region) in tables else work_date
@@ -58,7 +63,7 @@ def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final
             continue
         fmt = r[14] or default_format(r[7])               # 형식이 비어 있으면 칸 종류의 기본 형식
         # 칸 종류의 기본 형식이면 묶음 이름은 예전과 같다 ("<양식>/<종류>"). 다른 형식이면 "/<형식>" 을 붙인다
-        gkey = f"{template}/{r[7]}" + ("" if fmt == default_format(r[7]) else f"/{fmt}")
+        gkey = f"{r[3]}/{r[7]}" + ("" if fmt == default_format(r[7]) else f"/{fmt}")
         g = groups.setdefault(gkey, {"pairs": [], "statuses": [], "machine": []})
         truth = try_normalize(fmt, answers.get(key, "")) or ""   # 정규화한 표기로 비교한다 (8:00 = 08:00, 01234.5 = 1234.5)
         g["pairs"].append((try_normalize(fmt, r[8] or "") or "", truth))

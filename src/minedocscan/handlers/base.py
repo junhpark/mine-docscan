@@ -40,6 +40,7 @@ class PageContext:
     corrector: Corrector
     notes: dict = field(default_factory=dict)
     images: PageImages | None = None    # 이 쪽의 그림(정합 이미지·원본). 인식기에 넘길 크롭을 규격대로 뜨는 데 쓴다
+    print_mask: np.ndarray | None = None  # 인쇄 마스크 (Template.print_mask, 인쇄 층이 없으면 None) — 값 유무에만 쓴다 (tasks/0006 4.3)
 
     @property
     def work_date(self) -> str | None:
@@ -213,7 +214,7 @@ class FormHandler:
 
 def readable(cell) -> bool:
     """인식기에 보내는 칸인가: 형식이 없거나(글자) integer 인 칸만. 소수·시각·계기 칸은 지금의 숫자 모델이 읽지 못한다 —
-    보내지 않고, 잉크가 있으면 검수 대기다 (tasks/0005 4.1. 소수·시각을 읽는 것은 0006)."""
+    보내지 않고, 잉크가 있으면 검수 대기다 (tasks/0005 4.1. 소수·시각을 읽는 것은 미룸 — tasks/0006 1절)."""
     return cell.fmt in (None, "integer")
 
 

@@ -13,6 +13,8 @@
 | 숫자 인식기 모델 (`models/<이름>/`) | 사이트 팩 안 (= `SITE/models/`) — 현장 글씨로 학습한 것 | **아니오** (예외: 합성 셀만으로 만든 `tests/fixtures/digits-fixture`) |
 | 메타 필드 모델 (`models/<이름>/`, `classes.json` 에 이름·차량번호) | 사이트 팩 안 (= `SITE/models/`) | **아니오** (예외: 합성 값만으로 만든 `tests/fixtures/meta-digits`, `meta-operator`) |
 | 학습용 크롭(`export-crops`), 틀린 칸 모아 보기(`recognizer eval --errors`) | 저장소 밖 (기본 `WORK_ROOT/recognizer-errors`) | **아니오** — 현장 글씨. git 작업 트리 안이면 도구가 거절한다 |
+| 인쇄 층(`print.png` — `template print-layer`), 다른 판의 기준 이미지(`template variant` 가 쓴 `reference.png`) | 사이트 팩 안 (= `SITE/templates/<양식>/`) | **아니오** — 현장 스캔에서 나온 것. 인쇄 층에는 늘 같은 자리에 쓰는 손글씨(이름·서명)의 잔상이 남는다. git 작업 트리 안이면 도구가 거절한다 (`print-layer` 는 합성 사이트 팩이면 `--allow-in-repo`) |
+| 템플릿 미리보기(`template preview`, `--print`), 쪽 미리보기(`pages --thumbs`) | `WORK_ROOT/template-preview`, `WORK_ROOT/thumbs` | **아니오** — 실제 양식과 글씨. `template preview` 는 저장소 안이면 거절한다 |
 | 그 밖의 모델 가중치 | 로컬 또는 모델 저장소 | 아니오 |
 
 공유 드라이브의 현재 배치:
@@ -70,6 +72,9 @@ mine-docscan/                 ← MINEDOCSCAN_ARCHIVE_ROOT
 - 페이지 라벨, 정답 CSV·엑셀, 검수 기록(`reviews.jsonl` — 적힌 값과 출처가 들어 있다)
 - 학습한 모델(`models/`), 내보낸 크롭, 틀린 칸 모아 보기 — 현장의 글씨에서 나온 것. 문서·PR·이슈에도 붙이지 않는다 (수치만 옮긴다).
   메타 필드 모델의 `classes.json` 은 이름·차량번호의 목록 그 자체다
+- 인쇄 층(`print.png`)과 그것을 그린 미리보기(`template preview --print`) — 빈 양식처럼 보이지만 쪽들을 겹쳐 만든 것이라, 날마다 같은 자리에
+  같은 글씨로 쓰는 칸(작성자 이름, 서명, 늘 같은 점검란)은 쪽이 많아도 잔상이 남는다. 같은 자리에 쓰는 계기 값도 쪽이 적으면 남는다.
+  다른 판의 기준 이미지(`template variant`)는 현장 스캔 그 자체다. 예외는 합성 양식으로 만든 것뿐이다 (시험은 시험 중에 만든다)
 - 실제 이름·차량번호를 예시로 쓴 문서·주석·테스트·커밋 메시지
 - API 키와 비밀값 (`.env`, `minedocscan.toml`)
 
@@ -78,6 +83,7 @@ mine-docscan/                 ← MINEDOCSCAN_ARCHIVE_ROOT
 | 파일 | 위치 | 무엇이 |
 |---|---|---|
 | 템플릿 YAML, 기준 이미지 | `SITE/templates/<양식>/` | 행렬 머리글의 인쇄된 이름·차량번호(`header_operator`, `header_vehicle_no`) |
+| 인쇄 층 | `SITE/templates/<양식>/print.png` | 늘 같은 자리에 쓰는 이름·서명의 잔상 (흐리게라도) |
 | 페이지 라벨 | `SITE/labels/pages.json` | 쪽마다 차량번호·작성자 |
 | 검수 기록 | `SITE/reviews/reviews.jsonl` | 입력한 차량번호·작성자 (`page-fields`, `meta-check`) |
 | 메타 필드 모델의 종류 목록 | `SITE/models/<이름>/classes.json` | 고를 수 있는 이름·차량번호 (카드·학습 로그에는 없다 — 종류의 수와 분포만) |
@@ -86,6 +92,8 @@ mine-docscan/                 ← MINEDOCSCAN_ARCHIVE_ROOT
 | DB | `WORK_ROOT/minedocscan.db` | `doc_page_meta`, `prod_haul`, `eq_assignment_obs` 의 값 |
 
 `pages --meta-mismatch`, `eval --meta`, `report`, `info`, `recognizer list`·`eval` 의 출력에는 값을 찍지 않는다 (수만). 값은 검수 화면(127.0.0.1)에서만 본다.
+`template print-layer`·`variant`·`add-region`·`check` 의 요약과 오류에는 칸 이름(`<표>/<열>/행 N`, `fields/<이름>`)과 수만 나온다 — 행 키는
+장비 번호일 수 있어 찍지 않는다. `info` 는 장비명 대응표를 이름 대신 해시로 보여 준다.
 
 `.gitignore` 가 이미지·PDF·엑셀·CSV·DB·`sites/`·`work/` 를 기본으로 막는다(`tests/fixtures/` 만 예외).
 테스트에 이미지가 필요하면 `tools/synth.py` 로 만든다. 문서의 예시는 합성 데이터의 값(`T01`, `V-101`, `ALPHA`)을 쓴다.
@@ -106,7 +114,23 @@ mine-docscan/                 ← MINEDOCSCAN_ARCHIVE_ROOT
 
 `--usage-logs` 는 날마다 묶음 끝에 장비 가동 일보 두 종(세로: 작업 표 + 계기, 가로: 작업량 표 + 근무 시각 + 계기)을 붙인다
 (`--usage-only` 면 가동 일보만). 계기가 이어지는 장비, 하루 두 장, 며칠 빠진 장비, 시작을 잘못 적은 날, 총 ≠ 종료 − 시작, 계기 대신 시각
-(점으로 쓴 08.00 포함), 계기가 빈 장비, 대응표에 없는 장비명, 작업량 표 위의 메모가 들어 있다. 기본 합성 데이터는 그대로다.
+(점으로 쓴 08.00 포함), 계기가 빈 장비, 대응표에 없는 장비명, 작업량 표 위의 메모가 들어 있다. 로우더 일보의 근무 시각 칸에는 "~" 가,
+작업량 표의 첫 구분(두 줄)의 근무 칸에는 실제 양식의 "하단: _ 대" 처럼 라벨과 단위가 칸 안에 인쇄되어 있다 (그 칸의 값은 두 자리).
+기본 합성 데이터는 그대로다.
+두 선택 기능이 tasks/0006 을 시험한다 (`--usage-logs`/`--usage-only` 와 같이 쓴다):
+
+- `--print-layers` — 가동 일보 두 종의 인쇄 층(`print.png` + `print_image`)을 넣는다. 생성기의 빈 그림이 아니라 **합성 쪽에서 추정한 것**이다
+  (스캔한 쪽을 알고 있는 기하로 템플릿 좌표에 되돌려 `template print-layer` 와 같은 계산 — 날짜별로 고르게 최대 40장, 75 백분위).
+  스캔과 `answers.json` 은 켜든 끄든 바이트까지 같다. 달라지는 것은 두 템플릿(`print.png`, `print_image`)과 `truth.json` 의
+  `print_layers` = {양식: print_sha} 뿐이다.
+- `--usage-variants` — 운행일보에 같은 날 섞여 쓰이는 판 B(`synth_usage_log_b` — 작업 표·계기 표만 10 px 아래, 줄 간격 +1 %, 머리·필드는
+  판 A 와 같은 자리)를 더한다. 두 판에 `family: synth_usage_log`·`concurrent: true`, 날마다 두 판이 섞이고, 정답·truth 의 `template` 은 그 쪽의
+  판 이름이다. 인쇄 층은 판마다 따로. 쪽의 내용은 판을 섞지 않은 것과 같다.
+
+합성 팩은 `out/` 처럼 저장소 안에 만들어도 되지만(`.gitignore` 가 막는다), 템플릿 도구는 git 작업 트리 안에 쓰지 않는다:
+`template print-layer`·`add-region` 은 저장소 안의 템플릿을 거절하고(합성 팩이면 `--allow-in-repo`), `template variant` 는 저장소 안의 출력
+폴더를, `template preview` 는 저장소 안의 출력 폴더(기본 `WORK_ROOT/template-preview`)를 거절한다 — 이 둘에는 `--allow-in-repo` 가 없다.
+이 명령들을 합성 양식으로 해 보려면 합성 팩과 WORK_ROOT 를 저장소 밖 경로에 만든다.
 
 한계: 글자가 영문 내장 글꼴이거나 자체 획(`tools/handfont.py` — 숫자 칸)이다. 이 데이터로 **한글 손글씨 인식률을 말할 수 없다.** 잴 수 있는 것은 기하와 논리다.
 나중에 양식을 다양하게 늘리는 작업(유류일지, 환경일지 등의 가상 양식)도 이 생성기를 확장하는 방식으로 한다.
@@ -255,31 +279,138 @@ minedocscan pages --meta-mismatch --meta-key date.day          # (월·일 필�
 
 ### 장비 가동 일보: 템플릿에서 계기 검산까지
 
-가동 일보(중기운행일보·점보·로우더 작업일보)의 템플릿을 만드는 순서와 입력 (tasks/0005, ADR 0015·0016).
+가동 일보(중기운행일보·점보·로우더 작업일보)의 템플릿을 만드는 순서와 입력 (tasks/0005·0006, ADR 0015–0018).
+칸을 정하기 전에 **분류 전용으로 먼저 돌려 인쇄 층을 만들고**, 그 위에서 표를 잡는다. 템플릿 형식의 자세한 것과 합성 양식으로 해 보는 예는
+[SITE_PACK.md](SITE_PACK.md) 에 있다.
 
 ```bash
-minedocscan template init <빈 양식 PDF> --name <이름> --roi …    # 뼈대 → 표마다 role, 칸마다 format, 장비명·운전자 필드에 meta_key
-minedocscan template check   <site>/templates/<이름>            # 오류를 전부 (역할에 필요한 칸, 형식과 종류, 겹치는 칸, 쪽 밖 …)
-minedocscan template preview <site>/templates/<이름> --scan <PDF> --page N   # 칸이 실제 글씨에 맞는지 (WORK_ROOT/template-preview)
-# site.toml [equipment.aliases]: 일보에 적는 이름 → 점검표의 장비 키 (모르는 것은 비워 둔다)
-minedocscan run DB_scans --fresh                                # 스키마 6
+# 1. 분류 전용 템플릿으로 전체 묶음을 돌린다 — 쪽은 classified_only (정합도 칸도 없다)
+minedocscan template init <깨끗한 쪽 PDF> --name <양식> --handler usage   # 그 뒤 template.yaml 을 regions: [] , fields: [] 로
+minedocscan run DB_scans --fresh
+
+# 2. 인쇄 층 — 분류 전용 쪽은 명령이 직접 정합한다
+minedocscan template print-layer <site>/templates/<양식>                 # 판이 섞였을 수 있는 양식이면 --percentile 50 (괘선을 잡는 데만)
+#    template.yaml 에 print_image: print.png 를 적는다 (명령은 template.yaml 을 고치지 않는다).
+#    50 의 층이면 3 을 마친 뒤 그 줄을 지우고 돌리고, 판을 나눈 뒤 판마다 75 로 다시 만들어 다시 적는다
+minedocscan template preview <site>/templates/<양식> --print             # 층 그대로의 템플릿 좌표 — 표마다 --roi 를 여기서 읽는다
+
+# 3. 표를 더하고 채운다
+minedocscan template add-region <site>/templates/<양식> --roi x0,y0,x1,y1 --name meter --role meter   # 표마다 한 번
+#    열 이름·kind·format, 행 키·메타, 필드(장비명·운전자에 meta_key)를 채운다. 인쇄가 든 칸은 떼어 내지 않고 그대로 둔다
+minedocscan template check   <site>/templates/<양식>                     # 통과할 때까지 이 사이트 팩으로 run 하지 않는다
+minedocscan template preview <site>/templates/<양식> --print
+minedocscan run DB_scans --fresh                                        # 스키마 7
+
+# 4. 같은 날 섞여 쓰이는 다른 판이 있으면
+minedocscan pages --status align_failed --template <양식> --thumbs      # 실패한 쪽과 미리보기 (WORK_ROOT/thumbs)
+minedocscan template variant <site>/templates/<양식> --scan <PDF> --page N --name <양식>_b
+#    기존 판의 template.yaml 에 family 와 concurrent: true (새 판에는 명령이 적었다 — 기존 판에 적을 줄을 안내한다.
+#    적기 전에는 사이트 팩이 읽히지 않는다: 계열에 동시 판이 하나뿐)
+minedocscan template preview <site>/templates/<양식>_b --scan <PDF> --page N   # 표 밖 필드의 bbox 는 기존 판 그대로다 — 맞는지 본다
+minedocscan run DB_scans --fresh
+minedocscan template print-layer <site>/templates/<양식>_b               # B 로 적재된 쪽으로 → B 의 template.yaml 에 print_image
+minedocscan template print-layer <site>/templates/<양식>                 # A 도 A 로 적재된 쪽만으로 다시 (기본 백분위)
+minedocscan run DB_scans --fresh
+minedocscan report                                                     # 동시 판: 판마다 고른 쪽, 정합 실패, 고른 쪽 중 오차 차이 1 px 미만인 쪽
+minedocscan pages --variants                                           # 가르기 어려웠던 쪽과 판마다의 괘선 오차
+
+# 5. 기준을 갱신한다
+minedocscan regress --update                                           # 가동 일보 양식의 항목만 달라져야 한다
+
+# 6. 입력
+# site.toml [equipment.aliases]: 일보에 적는 이름 → 점검표의 장비 키 (모르는 것은 비워 둔다). 고친 뒤에는 다시 돌린다 (아래)
 minedocscan review serve --queue page-fields --reviewer jp      # 장비명·운전자 (후보 = 대응표의 이름 + 라벨·검수에 나온 값)
-minedocscan review serve --queue readings --reviewer jp         # 계기 칸: 쪽마다 시작·종료·총을 한 번에
+minedocscan review serve --queue readings --reviewer jp         # 가동 시간 칸: 쪽마다 계기(시작·종료·총) + 근무 시각을 한 번에
 minedocscan report                                              # 가동 기록: 계기 칸의 종류별, 가동 시간의 근거별, 검산(이어짐 / 어긋남 …)
 minedocscan review serve --queue usage-check --reviewer jp      # 계기가 이어지지 않는 곳: 어제의 종료 칸과 오늘의 시작 칸을 같이
 minedocscan review stats                                        # 형식별·대기열별
 ```
 
+**인쇄 층** (ADR 0017 — 무엇에 쓰고 무엇에 쓰지 않는지는 [ARCHITECTURE.md](ARCHITECTURE.md) §5)
+
+- **5장 이상으로 만든다.** 명령은 5장 미만이면 경고하고 만든다 (3장 미만은 거절). 쪽이 적으면 여러 쪽의 같은 자리에 쓴 값(계기 값, 작업량)이
+  층에 잔상으로 남고, 그 자리에 쓴 값까지 지워 빈 칸으로 자동 적재될 수 있다 — 합성에서 2장으로 만든 로우더 층이 값이 적힌 작업량 칸 3칸을
+  잃었다 (백분위를 보간 없이 잡아 3–5장은 잃지 않았다). 잔상은 `add-region` 에서 없는 세로 괘선으로도 잡힌다. 쪽이 모자란 판에는 키를 아직 적지 않고, 쪽이 쌓인 뒤
+  만든다 — 인쇄 층이 없어도 값은 사라지지 않는다 (인쇄가 든 칸이 검수로 갈 뿐이다).
+- **판이 섞였을 수 있는 양식의 첫 층은 `--percentile 50` — 괘선을 잡는 데만 쓴다.** 판을 나누기 전에는 두 판의 쪽이 한 층에 들어간다.
+  75 백분위는 쪽의 75 % 넘게 어두운 화소만 남기므로, 소수 판의 몫이 25 % 를 넘으면 다수 판의 표 괘선이 층에서 빠지고 `add-region` 이 괘선을
+  못 잡는다. **값 유무에 쓰는 층(`print_image` 를 적고 `run`)은 판을 나눈 뒤 판마다 75 로**, 그 판으로 적재된 쪽만으로 다시 만든다 — 낮은
+  백분위의 층에는 같은 자리에 쓴 값의 잔상이 더 남고, 첫 층에는 다른 판의 쪽이 섞여 있었다. 75 미만이면 요약이 그렇게 경고한다.
+  50 의 층은 한 판이 쪽의 절반을 넘을 때만 그 판의 괘선을 남긴다 (보간하지 않는다 — 두 판이 꼭 반씩이면 `--max-pages` 를 홀수로).
+- **요약과 `preview --print` 를 본다.** 요약의 "인쇄에 덮인 손글씨 칸"은 칸 안의 인쇄이거나 잔상이다. 표 칸에 잔상이 없어야 한다 — 필드의
+  잔상은 상관없다 (필드는 인쇄 층을 쓰지 않는다). `template check` 는 표의 손으로 쓰는 칸 중 인쇄 마스크가 절반 넘게 덮은 칸을 오류로 알린다
+  (값이 들어갈 자리가 없다).
+- `print_image` 키는 파일을 만든 뒤에 사람이 적는다 — 키가 먼저 있으면 템플릿 오류로 사이트 팩 전체가 읽히지 않는다. 층을 다시 만들면
+  해시(`print_sha`)가 바뀐다 → `run --fresh` (`--skip-existing` 은 안 된다). `info` 가 템플릿마다 인쇄 층과 해시, 쓰이는지를 보여 준다.
+
+**표 더하기와 다른 판**
+
+- `add-region --roi` 는 템플릿 좌표(기준 이미지 픽셀)다. 표 둘레를 조금 넉넉히, 이웃 표까지의 간격보다는 좁게 잡는다 (합성 두 양식은 표 둘레
+  20 px 에서 맞는다. 표 사이가 50 px 인 합성 운행일보에서는 60 px 이면 이웃 표의 괘선이 들어온다). 요약의 괘선 수를 인쇄된 표와 맞춰 본다 — 많으면 잔상이다
+  (쪽이 쌓인 뒤 층을 다시 만들거나 그 괘선을 지운다). 인쇄 층이 없으면 기준 이미지에서 잡는데, 채워진 스캔이면 손글씨의 세로획이 괘선으로 섞인다.
+- `--role` 의 자리표시(meter: `start`·`end`·`total`, shifts: `range`, tally: 정수 열)가 맞는 열에 붙었는지는 `template check` 가 보지 않는다 —
+  요약의 자리표시 목록을 `preview --print` 의 머리글과 맞춰 본다. 인쇄되지 않은 나눔 선(`split_ys`)은 잡지 않는다 — 사람이 적는다.
+- 다른 판(`template variant`)은 `align_failed` 쪽 가운데 머리·제목이 잘 보이는 깨끗한 쪽으로 만든다. 새 판에는 `family`(기존 판의 것, 없으면
+  기존 판의 이름)와 `concurrent: true` 가 적히고 `print_image` 는 없다. 명령은 기존 판의 파일을 고치지 않고 거기 적을 줄을 안내한다 —
+  적기 전에는 사이트 팩이 읽히지 않는다 (계열에 동시 판이 하나뿐 — 오류가 적을 판을 말한다).
+  짝이 없는 괘선이 있는 표, 인쇄되지 않은 나눔 선이 있는 표는 기존 괘선 그대로이고 "사람이 고칠 것"으로 나온다.
+- 동시 판끼리는 기하(괘선·필드의 bbox) 밖의 전부 — handler·handler_options, 표·`header_rows`·열·행(메타까지)·필드 — 가 같아야 사이트 팩이
+  읽힌다. 나중에 한 판에 표를 더하거나 메타를 고치면 다른 판도 같이 고친다
+  (`add-region` 이 알린다). 다른 양식에도 섞인 판이 있는지는 `report` 의 양식별 괘선 오차와 `pages --template <양식>` 의 쪽마다 괘선 오차로
+  본다 — 몇 쪽만 크게 떨어져 있으면 다른 판이다.
+
+**입력**
+
+- **`readings` 는 가동 시간을 정하는 칸의 대기열이다.** 항목 = 쪽 하나: 계기 칸(시작·종료·총) 다음에 근무 시각 칸(`shifts` 표의 `time_range` 칸,
+  행 순서 — 라벨은 행에 인쇄된 근무 구분). 그중 하나라도 기계가 잉크를 본 쪽이 올라온다 — 계기가 비고 근무 시각만 적힌 쪽(로우더)도
+  한 번의 저장으로 가동 시간이 근무 시각 근거(`shifts`)로 정해진다. 항목의 칸이 전부 검수되어야 끝난다 — 계기 칸만 검수한 쪽은 근무 시각
+  칸 때문에 다시 올라온다. `--audit N` 은 잉크와 상관없이 날짜별로 고르게 N 쪽 — 빈 칸으로 넘어간 칸을 잴 정답.
+- 작업량 칸의 검수 대기는 지금처럼 `pending`(`--template`, `--kind` 로 좁힌다)이다. 계기·근무 시각 칸도 같은 `handwritten_number` 라 거기
+  같이 나오지만 그 칸은 `readings` 에서 넣는 것이 빠르다.
 - **계기 칸의 규칙**: 계기 값은 숫자 그대로(1234.5), 시각은 콜론으로(08:00) — 점으로 쓴 시각(08.00)도 콜론으로 입력. 숫자인지 시각인지는 사람이 정한다
-  (코드는 콜론만 본다). 빈 칸은 비워 두고 `Enter`. 형식에 맞지 않는 값(12:75, 1234,5)은 화면과 서버가 거절하고 검수 파일에 남지 않는다.
+  (코드는 콜론만 본다). 근무 시각 칸은 범위로("8-17", "08:00~17:00"). 빈 칸은 비워 두고 `Enter`. 형식에 맞지 않는 값(12:75, 1234,5)은 화면과
+  서버가 거절하고 검수 파일에 남지 않는다.
+- **점으로 쓴 시각은 화면이 묻는다.** 적힌 대로 08.00 을 넣으면 계기 값 8.00 이 되고, 첫날에는 검산에도 걸리지 않는다. 그래서 계기 표의
+  시작·종료 칸(`reading` 형식)에 소수 두 자리이고 24:00 이하이며 소수부가 00–59 인 값(08.00, 17.30)을 넣으면 저장 전에 묻는다 —
+  `1` 시각(`08:00` 으로 저장), `2` 계기 값(그대로 저장), `Esc` 돌아가서 고쳐 쓰기. `readings`·`usage-check`·`pending` 어디서든 같다.
+  `1234.5`, `8.5`, `25.30`, `08.75` 와 총 칸·근무 시각 칸은 묻지 않고(총은 가동 시간 — 길이다), 이미 정한 값(전의 검수, `usage-check` 의
+  저장된 값)을 그대로 저장할 때도 묻지 않는다. `pending` 이 미리 채운 기계 값은 정한 값이 아니라서 묻는다.
+  물었다는 것은 검수 파일에 남지 않는다 — 아래 "돌려줄 수치"의 물은 횟수는 검수자가 센다.
 - `readings` 는 **기계 값도 앞날의 값도 보여 주지 않는다** — 보여 주면 그 값을 따라 적는다. 어제와 오늘을 같이 보는 것은 `usage-check` 에서만.
-  `--audit N` 은 잉크와 상관없이 날짜별로 고르게 N 쪽 — 빈 칸으로 넘어간 계기 칸을 잴 정답.
 - `usage-check`: 종이와 다르게 입력된 칸만 고치고 `Enter` — 검산이 맞게 되면 빠진다. 한 칸을 고쳐도 여전히 어긋나면 남는다.
   아무것도 고치지 않고 `Enter` 하면 "종이에 적힌 대로"를 확인한 것이고 끝난다 — 어긋남은 `xcheck_usage` 와 리포트에 그대로 남는다
   (값을 맞춰 넣지 않는다, ADR 0006). 빠진 날이 있는 장비의 `gap` 은 확인하고 넘어가는 것이 맞다.
 - 장비명을 고치면 예전 장비와 새 장비 양쪽의 계기 검산이 바로 다시 계산된다.
-- **돌려줄 수치**(이름·번호 없이): 양식별 쪽 수와 정합 통과율, 계기 칸이 있는 쪽 / 시각 / 빈 쪽, 장비 수, 연속성 검산의 결과별 수와 어긋난 것의 원인
-  (빠진 날 / 잘못 적음 / 다른 장비), 한 시간에 입력한 쪽 수, 작업량 표에 값이 있는 칸의 비율 (tasks/0005 8절).
+- **`[equipment.aliases]` 를 고친 뒤**: `info` 의 대응표 해시가 바뀐다. 장비 ID 는 쪽을 적재할 때(와 그 쪽의 칸을 검수해 쪽의 행을 다시 만들
+  때) 정해지므로 다시 돌리기 전에는 예전 ID 가 남는다 — `report` 가 지금의 대응표와 다른 행의 수를 한 줄로 알린다. `run --fresh` 또는 그 문서를
+  다시 돌리면 사라진다.
+
+**리포트의 줄** (값·이름 없이 수만)
+
+| 줄 | JSON 키 | 뜻 |
+|---|---|---|
+| `인쇄 층으로 값 유무를 잰 쪽: <양식> N …` | `report.print_layer` | 양식별로 인쇄 층으로 잰 적재된 쪽 |
+| `동시 판 <계열>: 고른 쪽 …, 정합 실패 N, 고른 쪽 중 두 판의 괘선 오차 차이가 1 px 미만인 쪽 N` | `report.variants` | 판마다 고른 쪽, 통과한 판이 없던 쪽, 고른 쪽 중 가르기 어려웠던 쪽 (`pages --variants` — 정합 실패 쪽도 상태와 함께) |
+| `계기 값의 시작·종료가 둘 다 24 이하인 쪽 N …, 계기 값과 시각이 섞인 쪽(mixed) N` | `report.usage_dotted_suspect` | 시각을 숫자로 넣었을 수 있는 쪽 (세기만 한다 — 종이와 대 본다) |
+| `장비 ID 가 지금의 대응표([equipment.aliases])와 다른 행: …` | `stale_equipment_ids` (`report` 밖) | 대응표를 고친 뒤 다시 돌리지 않은 가동 기록·작업량의 행, 그 쪽·문서 수 (사이트 팩이 있고 가동 기록·작업량 행이 있을 때만) |
+
+- 앞의 둘은 해당하는 쪽이 있을 때만, 셋째는 가동 기록이 있으면(0 이어도) 생긴다. 셋 다 리포트 묶음 안이라 `regress` 가 비교한다 — 처음 생긴
+  사이트는 `regress` 에 새 항목으로 나오므로 확인하고 `regress --update`. 인쇄 층·동시 판·가동 기록이 없는 사이트의 리포트와 기준은
+  예전과 같다. 마지막 줄은 사이트 팩에 따라 달라지는 수라 비교하지 않는다.
+
+**돌려줄 수치** (이름·번호 없이 수치만)
+
+- tasks/0005 8절: 양식별 쪽 수와 정합 통과율, 계기 칸이 있는 쪽 / 시각 / 빈 쪽, 장비 수, 연속성 검산의 결과별 수와 어긋난 것의 원인
+  (빠진 날 / 잘못 적음 / 다른 장비), 한 시간에 입력한 쪽 수, 작업량 표에 값이 있는 칸의 비율.
+- tasks/0006 8절: 양식별로 인쇄 층을 만든 쪽 수(요약의 "쪽 N장"), 인쇄 층을 켜기 전과 뒤의 검수 대기 칸 수(계기·근무 시각·작업량),
+  `readings` 에 값 없이 올라온 쪽 수(올라왔는데 칸을 전부 빈 칸으로 넣은 쪽), 판마다 고른 쪽 수와 `align_failed` 의 수, 두 판의 오차 차이가
+  1 px 미만인 쪽 수 (`report` 의 동시 판 줄), 섞인 판이 더 발견된 양식, 점으로 쓴 시각을 물은 횟수 (검수자가 센 것 — 세지 못했으면 "재지 않음").
+- 켜기 전과 뒤의 검수 대기 칸은 예를 들어 표를 채운 뒤 `print_image` 줄을 잠시 막고 `run --fresh` 한 번, 되돌리고 `run --fresh` 한 번으로 잰다.
+  기계가 정한 상태(`status_raw` — 검수해도 바뀌지 않는다)로 세면 검수가 섞이지 않는다 (WORK_ROOT 의 SQLite DB):
+  ```sql
+  SELECT p.template_name, f.region, COUNT(*) FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id
+  WHERE f.status_raw = 'pending' AND f.region <> 'fields' GROUP BY p.template_name, f.region;
+  ```
 
 ### ✓ 판정의 정답
 

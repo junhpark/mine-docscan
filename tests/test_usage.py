@@ -8,13 +8,14 @@ from dataclasses import replace
 import pytest
 import yaml
 
-from conftest import clone_db, review_usage, usage_fields
+from conftest import clone_db, replay_classify, review_usage, usage_fields
 from minedocscan.config import ConfigError
 from minedocscan.evaluate.meta import _changed_pages
 from minedocscan.forms.equipment import equipment_id
 from minedocscan.forms.sitepack import SitePack
 from minedocscan.forms.template import Template, TemplateError
-from minedocscan.handlers.usage import UsageHandler
+from minedocscan.handlers.usage import presence
+from minedocscan.imaging.cells import observe_cells
 from minedocscan.pipeline import Pipeline
 from minedocscan.recognize.builtin import OracleRecognizer
 from minedocscan.report import build_report
@@ -22,7 +23,7 @@ from minedocscan.review.queue import build_queue
 from minedocscan.review.server import ReviewApp
 from minedocscan.review.store import Review, load, save
 from minedocscan.tools import synth_meta, synth_usage
-from minedocscan.tools.synth_usage import PRINTED_ITEMS, T_LOADER, T_USAGE
+from minedocscan.tools.synth_usage import PRINTED_ITEMS, T_LOADER, T_USAGE, T_USAGE_B
 from minedocscan.validate.usage import TOLERANCE, check_usage
 from test_review_store import TABLES, _dump
 
@@ -65,19 +66,24 @@ def reviewed(usage_run, usage_synth, tmp_path_factory) -> dict:
     cell = con.execute("SELECT * FROM prod_tally WHERE page_id = ? AND count IS NOT NULL ORDER BY tally_id", (pid,)).fetchone()
     save(con, site, settings, Review(cell["tally_id"], "value", str(cell["count"] + 10), "jp"))
     states["tally"] = dict(con.execute("SELECT * FROM prod_tally WHERE tally_id = ?", (cell["tally_id"],)).fetchone())
-    # 계기 칸은 readings 대기열로: 쪽마다 세 칸을 한 번에 (검수 화면이 보내는 것과 같은 /api/reviews)
+    # 가동 시간 칸(계기 + 근무 시각)은 readings 대기열로: 쪽마다 한 번에 (검수 화면이 보내는 것과 같은 /api/reviews).
+    # 저장 직후 그 쪽의 가동 기록을 적어 둔다 (한 번의 저장으로 가동 시간이 정해지는지 — tasks/0006 단계 5)
     app = ReviewApp(con, site, settings, "jp", "readings")
     key = {f["field_id"]: (f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"]) for f in usage_fields(con)}
     q = app.queue_json({})
-    states["readings"] = [q]
-    n = 0
+    states["readings"], states["readings_rows"] = [q], {}
+    n, done = 0, set()
     for it in q["items"]:
         items = [{"field_id": c["field_id"], "verdict": "value" if answers.get(key[c["field_id"]]) else "empty",
                   "value": answers.get(key[c["field_id"]], "")} for c in it["cells"]]
         states["readings"].append(app.post_reviews({"items": items}))
+        pid = it["item_id"].split(":", 1)[1]
+        states["readings_rows"][pid] = dict(con.execute("SELECT * FROM eq_usage_daily WHERE page_id = ?", (pid,)).fetchone())
+        done |= {x["field_id"] for x in items}
         n += len(items)
     states["readings"].append(app.queue_json({}))
-    n += review_usage(con, site, settings, answers, regions=("shifts", "fields"))
+    # 나머지(readings 에 오지 않은 쪽의 근무 시각 칸, 필드)는 칸마다
+    n += review_usage(con, site, settings, answers, regions=("shifts", "fields"), skip=done)
     n += _review_pending_tally(con, site, settings, answers)          # 잉크는 있는데 답이 없는 작업량 칸 (메모, 칸 안의 인쇄)
     f = con.execute("SELECT f.*, d.source_name || '#' || p.page_no AS source, p.template_name FROM doc_field f "
                     "JOIN doc_page p ON f.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
@@ -175,6 +181,7 @@ def test_machine_run_reads_integers_and_leaves_meters_to_people(usage_run, usage
         # 소수·시각은 읽지 않는다: 계기 칸에 잉크가 있으면 모르는 칸(pending), 가동 시간은 아직 모른다
         assert u["reading_kind"] == ("empty" if t["reading_kind"] == "empty" else "pending"), t["source"]
         assert u["hours"] is None and u["meter_start"] is None and u["meter_start_raw"] is None
+        # 아무것도 쓰지 않은 쪽은 자동 — 근무 시각 칸의 인쇄된 "~" 는 인쇄 층이 지운다 (끄면 pending — test_print_presence.py)
         assert u["review_status"] == ("auto" if t["reading_kind"] == "empty" and not t["shifts"] else "pending")
         # 잉크로 정하는 것은 검수 없이도 맞다: 작업 표의 글씨 있는 줄, 서명
         assert (u["activity_rows"], u["signed"]) == (t["activity_rows"], t["signed"]), t["source"]
@@ -204,35 +211,54 @@ def _printed_cells(con) -> dict:
         if r["row_key"].split("|")[0] in PRINTED_ITEMS}
 
 
-def test_digits_between_printed_labels_are_never_auto_emptied(usage_run, usage_synth, tmp_path, monkeypatch):
+def test_digits_between_printed_labels_are_never_auto_emptied(usage_run, usage_synth, usage_pages):
     """작업량 칸 안에 라벨·단위가 인쇄된 행 (실제 로우더 작업일보의 "하단: _ 대"): 그 사이에 쓴 두 자리 숫자는 양옆의 인쇄와,
     인쇄는 이웃 칸의 인쇄와 이어져 덩어리 배정에서는 줄 전체가 메모가 된다. 잉크 비율로도 보므로(둘 중 하나라도 "있음")
-    그 칸은 빈 칸으로 자동 적재되지 않고 인식기에 간다. 인쇄만 있는 칸은 답이 없으면 검수 대기."""
+    그 칸은 빈 칸으로 자동 적재되지 않고 인식기에 간다. 인쇄만 있는 칸은 인쇄 층(usage_synth 는 켰다 — tasks/0006 단계 3)이
+    빈 칸으로 자동 적재한다 (끈 것은 검수 대기 — test_print_presence.py).
+    덩어리 배정만의 실패는 파이프라인을 다시 돌리지 않고 같은 쪽을 다시 편 그림(usage_pages)에서 핸들러의 값 유무 함수
+    (handlers/usage.presence)로 잰다 — 잉크 비율을 끄고(text_ink_min = inf), 인쇄 층 없이."""
     truth = {(t["source"], c["row_key"], c["column"]): c["count"] for t in usage_synth.truth["usage"] for c in t["tally"]}
     written = {k: v for k, v in truth.items() if k[1].split("|")[0] in PRINTED_ITEMS}
     two = {k: v for k, v in written.items() if v >= 10}
     assert len(two) >= 6                                                     # 합성 묶음에 두 자리 값이 있다
     cells = _printed_cells(usage_run["pipe"].con)
     assert cells and set(written) <= set(cells)
-    assert not [k for k, f in cells.items() if not f["has_value_raw"] and f["status_raw"] == "auto"]   # 빈 칸 자동 적재 없음
+    assert not [k for k in written if not cells[k]["has_value_raw"] and cells[k]["status_raw"] == "auto"]   # 빈 칸 자동 적재 없음
     assert {k: (f["value_raw"], f["status_raw"]) for k, f in cells.items() if k in written} == \
         {k: (str(v), "auto") for k, v in written.items()}                    # 쓴 값은 인식기가 읽는다 (oracle)
-    assert all(f["status_raw"] == "pending" and f["value_final"] is None for k, f in cells.items() if k not in written)
+    printed = [f for k, f in cells.items() if k not in written]
+    assert printed and all(not f["has_value_raw"] and f["status_raw"] == "auto" and f["value_final"] is None for f in printed)
 
-    # 덩어리 배정만으로 보면(잉크 비율을 끄면) 두 자리 값 일부가 빈 칸으로 자동 적재된다 — 이 시험이 막는 실패가 합성 양식에 있다
-    monkeypatch.setattr(UsageHandler, "text_ink_min", float("inf"))
-    settings = replace(usage_run["settings"], work_root=tmp_path / "work", reviews=tmp_path / "reviews.jsonl")
-    pipe = Pipeline(settings, recognizer=OracleRecognizer(usage_run["answers"]))
-    pipe.run([usage_synth.scans])
-    old = _printed_cells(pipe.con)
-    lost = [k for k in two if not old[k]["has_value_raw"] and old[k]["status_raw"] == "auto"]
-    assert lost, "덩어리 배정만으로도 다 잡힌다 — 합성 양식이 실제의 실패를 재현하지 못한다"
+    # 덩어리 배정만으로 보면(잉크 비율을 끄면) 인쇄 층 없이는 두 자리 값 일부가 빈 칸으로 자동 적재된다 — 이 시험이 막는 실패가
+    # 합성 양식에 있다. 지금의 규칙(둘 중 하나라도)은 하나도 잃지 않고, 인쇄 층을 켜면 덩어리 배정만으로도 다 잡는다
+    lost: dict[str, list] = {"blob_only": [], "rule": [], "blob_only_print_layer": []}
+    loader = [pg for pg in usage_pages if pg["tpl"].name == T_LOADER]
+    assert loader
+    for pg in loader:
+        tpl, img = pg["tpl"], pg["aligned"]
+        obs = observe_cells(img, tpl, None)
+        obs_on = observe_cells(img, tpl, tpl.print_mask)
+        runs = {"blob_only": presence(img, tpl, obs, None, text_ink_min=float("inf"))[0],
+                "rule": presence(img, tpl, obs, None)[0],
+                "blob_only_print_layer": presence(img, tpl, obs_on, tpl.print_mask, text_ink_min=float("inf"))[0]}
+        for name, pres in runs.items():
+            for o, pr in zip(obs, pres, strict=True):
+                key = (pg["source"], o.cell.row_key, o.cell.name)
+                if key in written and not pr.has_ink:
+                    lost[name].append(key)
+    assert [k for k in lost["blob_only"] if k in two], "덩어리 배정만으로도 다 잡힌다 — 합성 양식이 실제의 실패를 재현하지 못한다"
+    assert lost["rule"] == [] and lost["blob_only_print_layer"] == [], lost
 
 
 # ── 검수로 정답을 넣으면 ───────────────────────────────────────────────────
 def test_review_makes_usage_and_tally_equal_the_truth(reviewed, usage_synth):
+    """정답대로 검수하면 업무 테이블이 합성 정답과 같다 — 운행일보의 판 B 로 적재된 쪽도 (tasks/0006 단계 4: field_id 에 판 이름이
+    없고 키가 같으므로 같은 검수가 붙는다)."""
     con = reviewed["con"]
     rows, tally = _by_source(con), _tally(con)
+    assert {t["template"] for t in usage_synth.truth["usage"]} == {T_LOADER, T_USAGE, T_USAGE_B}
+    assert {u["source_form"] for u in rows.values()} == {T_LOADER, T_USAGE, T_USAGE_B}
     for t in usage_synth.truth["usage"]:
         u = rows[t["source"]]
         want_id = equipment_id(t["alias_key"]) if t["alias_key"] else None
@@ -286,14 +312,24 @@ def test_clock_pages_nothing_written_two_sheets_and_unknown_names(reviewed, usag
                                                             for k in {t["reading_kind"] for t in truth}}
 
 
-def test_review_file_rebuilds_the_same_db(reviewed, usage_run, usage_synth, tmp_path):
-    """불변식: 검수를 저장한 직후의 DB = 같은 검수 파일로 새로 돌린 DB (새 테이블 포함). 같은 칸의 여러 검수, 장비명 바꾸기 포함."""
+def test_review_file_rebuilds_the_same_db(reviewed, usage_run, usage_synth, tmp_path, monkeypatch):
+    """불변식: 검수를 저장한 직후의 DB = 같은 검수 파일로 새로 돌린 DB (새 테이블 포함). 같은 칸의 여러 검수, 장비명 바꾸기 포함.
+    인쇄 층을 켠 가동 일보다 (tasks/0006 6절) — 모든 쪽이 합성이 넣은 인쇄 층으로 쟀다 (doc_page.print_sha). 운행일보는 두 판이
+    섞였고(판마다 정합해 고른 쪽 — doc_page 의 template_name·variant_errs 까지 같다), 판 B 의 쪽에도 검수가 있다.
+    새 실행의 분류만 세션 실행의 결과를 되쓴다 (replay_classify — 분류는 검수와 상관없고 결정적이다). 정합·판 고르기·칸·핸들러·검수
+    적용은 새로 한다."""
     fresh = Pipeline(replace(reviewed["settings"], work_root=tmp_path / "w"), recognizer=usage_run["pipe"].recognizer)
+    replay_classify(fresh, usage_run, monkeypatch)              # 분류만 usage_run 의 결과로 (시간 — 검수와 상관없다)
     fresh.run([usage_synth.scans])
     assert fresh.summary["reviews"]["imported"] == reviewed["n"]
     assert build_report(fresh.con) == build_report(reviewed["con"])
-    for t in USAGE_TABLES:
+    for t in (*USAGE_TABLES, "doc_page"):
         assert _dump(fresh.con, t) == _dump(reviewed["con"], t), t
+    sha = usage_synth.truth["print_layers"]
+    pages = reviewed["con"].execute("SELECT template_name, print_sha FROM doc_page").fetchall()
+    assert len(pages) == len(usage_synth.truth["usage"]) and all(p[1] == sha[p[0]] for p in pages)
+    assert reviewed["con"].execute("SELECT COUNT(DISTINCT r.field_id) FROM doc_review r JOIN doc_field f ON r.field_id = f.field_id "
+                                   "JOIN doc_page p ON f.page_id = p.page_id WHERE p.template_name = ?", (T_USAGE_B,)).fetchone()[0] > 20
 
 
 def test_bad_meter_input_is_refused_before_the_file(reviewed, tmp_path):
@@ -371,7 +407,169 @@ def test_equipment_aliases_must_point_into_the_master(usage_synth, tmp_path):
         assert "GHOST" not in str(e.value) and "EQ-9999" not in str(e.value)         # 이름·장비 키를 찍지 않는다
 
 
+def test_equipment_alias_hash_is_canonical(usage_synth, tmp_path):
+    """info 의 대응표 해시: sha256(정렬한 (이름, 장비 키) 쌍의 JSON, 구분자 "," ":")의 앞 16자. 항목의 순서·주석에는 그대로,
+    한 이름을 다른 장비 키로 바꾸면 달라진다 (이름만·개수만 보는 해시가 아니다)."""
+    import hashlib
+
+    site = SitePack(usage_synth.site)
+    pairs = sorted(site.equipment_aliases.items())
+    canon = json.dumps(pairs, ensure_ascii=False, separators=(",", ":"))
+    assert site.equipment_aliases_sha == hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
+    toml = (usage_synth.site / "site.toml").read_text(encoding="utf-8")
+    block = toml[toml.index("[equipment.aliases]"):]
+    lines = [x for x in block.splitlines()[1:] if x.startswith('"')]
+    assert len(lines) == 4
+    d = tmp_path / "reordered"                                      # 순서를 뒤집고 주석을 더한다
+    shutil.copytree(usage_synth.site, d)
+    (d / "site.toml").write_text(toml.replace(block, "[equipment.aliases]\n# 다른 주석\n" + "\n".join(reversed(lines)) + "\n"),
+                                 encoding="utf-8")
+    assert SitePack(d).equipment_aliases_sha == site.equipment_aliases_sha
+    d2 = tmp_path / "remapped"                                      # 같은 이름, 다른 장비 키
+    shutil.copytree(usage_synth.site, d2)
+    (d2 / "site.toml").write_text(toml.replace('"LOADER" = "EQ-0301"', '"LOADER" = "EQ-0401"'), encoding="utf-8")
+    assert SitePack(d2).equipment_aliases_sha != site.equipment_aliases_sha
+
+
+def test_report_flags_equipment_ids_left_stale_by_an_alias_change(usage_synth, usage_run, reviewed, tmp_path, capsys,
+                                                                    monkeypatch):
+    """[equipment.aliases] 를 고친 뒤 (tasks/0006 단계 1): info 의 대응표 해시가 바뀌고, report 가 지금의 대응표와 장비 ID 가 다른
+    행을 한 줄로 센다 (이름·장비 키 없이). 다시 돌린 문서의 것은 사라진다 (두 문서 중 하나만 — 시간). 세는 수는 build_report 의 dict 밖이다 (regress).
+    장비명은 검수로 정해지므로(합성에는 라벨이 없다) 검수까지 한 DB(reviewed)에서 시작하고, 다시 돌릴 때도 같은 검수 파일을 쓴다."""
+    import sqlite3
+
+    from minedocscan.cli import main
+    from minedocscan.report import stale_equipment_ids
+
+    site, work = tmp_path / "site", tmp_path / "w"
+    shutil.copytree(usage_synth.site, site)
+    work.mkdir()
+    out = sqlite3.connect(work / "minedocscan.db")                 # 픽스처의 DB 를 파일로 복사 — report 가 연다
+    reviewed["con"].backup(out)
+    out.close()
+    common = ["--site", str(site), "--work-root", str(work)]
+
+    def report() -> tuple[dict, str]:
+        assert main(["report", "--json", *common]) == 0
+        js = json.loads(capsys.readouterr().out)
+        assert main(["report", *common]) == 0
+        return js, capsys.readouterr().out
+
+    def info() -> tuple[dict, str]:
+        assert main(["info", "--json", *common]) == 0
+        js = json.loads(capsys.readouterr().out)["site"]
+        assert main(["info", *common]) == 0
+        return js, capsys.readouterr().out
+
+    zero = {"eq_usage_daily": 0, "prod_tally": 0, "pages": 0, "documents": 0}
+    js, text = report()
+    assert js["stale_equipment_ids"] == zero and "stale_equipment_ids" not in js["report"]
+    assert "[equipment.aliases]" not in text
+    i0, _ = info()
+    assert i0["equipment_aliases"] == 4 and len(i0["equipment_aliases_sha"]) == 16
+    # 대응표에서 DRILL 을 뺀다 — DRILL 은 첫날·셋째 날 문서에만 있다
+    toml = (site / "site.toml").read_text(encoding="utf-8")
+    assert '"DRILL" = "EQ-0201"\n' in toml
+    (site / "site.toml").write_text(toml.replace('"DRILL" = "EQ-0201"\n', ""), encoding="utf-8")
+    i1, itext = info()
+    assert i1["equipment_aliases"] == 3 and i1["equipment_aliases_sha"] != i0["equipment_aliases_sha"]
+    assert f"해시 {i1['equipment_aliases_sha']}" in itext
+    docs = sorted(d for d, pages in usage_synth.truth["documents"].items() if any(p["equipment"] == "DRILL" for p in pages))
+    assert len(docs) == 2
+    js, text = report()
+    st = js["stale_equipment_ids"]
+    assert st == {"eq_usage_daily": 2, "prod_tally": 0, "pages": 2, "documents": 2}, st
+    lines = [x for x in text.splitlines() if "[equipment.aliases]" in x]
+    assert len(lines) == 1 and "가동 기록 2행" in lines[0] and "문서 2건" in lines[0] and "--fresh" in lines[0]
+    for name in ("DRILL", "EQ-0201", "LOADER", "EQ-0301"):          # 이름·장비 키를 찍지 않는다
+        assert name not in text and name not in itext and name not in json.dumps(js["stale_equipment_ids"])
+    # 작업량(prod_tally)도 센다: LOADER 를 다른 장비 키로 바꾼 사이트 팩 (다시 돌리지 않고 세기만)
+    site2 = tmp_path / "site2"
+    shutil.copytree(site, site2)
+    (site2 / "site.toml").write_text((site2 / "site.toml").read_text(encoding="utf-8").replace(
+        '"LOADER" = "EQ-0301"', '"LOADER" = "EQ-0401"'), encoding="utf-8")
+    con = sqlite3.connect(work / "minedocscan.db")
+    st2 = stale_equipment_ids(con, SitePack(site2))
+    con.close()
+    n_loader = len(usage_synth.truth["documents"])                  # LOADER 는 날마다 한 쪽
+    assert st2["eq_usage_daily"] == 2 + n_loader and st2["prod_tally"] > 0 and st2["documents"] == n_loader
+    # 사이트 팩을 읽을 수 없으면 이 검사만 건너뛴다 (report 는 나온다): 마스터 밖의 장비 키, 깨진 파일명 정규식, dict 가 아닌 필드
+    toml = (site / "site.toml").read_text(encoding="utf-8")
+    broken = {"ConfigError": lambda d: (d / "site.toml").write_text(toml + '"GHOST" = "EQ-9999"\n', encoding="utf-8"),
+              "error": lambda d: (d / "site.toml").write_text(toml.replace(
+                  "date_from_filename = '", "date_from_filename = '(?P<yyyy"), encoding="utf-8")}
+
+    def non_dict_field(d):
+        p = d / "templates" / T_LOADER / "template.yaml"
+        spec = yaml.safe_load(p.read_text(encoding="utf-8"))
+        spec["fields"].append("oops")
+        p.write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    broken["AttributeError"] = non_dict_field
+    for exc, breaker in broken.items():
+        bad = tmp_path / f"bad-{exc}"
+        shutil.copytree(site, bad)
+        breaker(bad)
+        args = ["--site", str(bad), "--work-root", str(work)]
+        assert main(["report", "--json", *args]) == 0
+        out = capsys.readouterr().out
+        assert "stale_equipment_ids" not in json.loads(out) and "GHOST" not in out, exc
+        assert main(["report", *args]) == 0
+        text = capsys.readouterr().out
+        notes = [x for x in text.splitlines() if "장비 ID 검사를 건너뛰었습니다" in x]
+        assert len(notes) == 1 and notes[0].endswith(f": {exc})") and "GHOST" not in text and "EQ-9999" not in text, exc
+        assert "[equipment.aliases]" not in text, exc
+    # 사이트 팩이 없으면 이 검사만 건너뛴다 (환경변수·현재 폴더의 설정 파일이 사이트 팩을 대지 않게)
+    monkeypatch.delenv("MINEDOCSCAN_SITE", raising=False)
+    monkeypatch.delenv("MINEDOCSCAN_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert main(["report", "--json", "--work-root", str(work)]) == 0
+    assert "stale_equipment_ids" not in json.loads(capsys.readouterr().out)
+    assert main(["report", "--work-root", str(work)]) == 0
+    assert "장비 ID 검사" not in (t := capsys.readouterr().out) and "[equipment.aliases]" not in t
+    con = sqlite3.connect(work / "minedocscan.db")
+    before = con.execute("SELECT COUNT(*), COUNT(equipment), COUNT(equipment_id) FROM eq_usage_daily").fetchone()
+    con.close()
+    # 그 문서를 다시 돌리면 그 문서의 것이 사라진다 — 두 문서 중 하나만 다시 돌린다 (시간): 다시 돌린 문서의 행은 사라지고
+    # 다시 돌리지 않은 문서의 행은 남는다 (둘 다 다시 돌리면 0 — 같은 경로다)
+    settings = replace(reviewed["settings"], site=site, work_root=work)
+    pipe = Pipeline(settings, recognizer=OracleRecognizer(usage_run["answers"]))
+    replay_classify(pipe, usage_run, monkeypatch)               # 분류만 usage_run 의 결과로 (시간 — 대응표와 상관없다)
+    pipe.process_file(usage_synth.scans / f"{docs[0]}.pdf")
+    pipe.finalize()
+    pipe.con.close()
+    js, text = report()
+    assert js["stale_equipment_ids"] == {"eq_usage_daily": 1, "prod_tally": 0, "pages": 1, "documents": 1}
+    lines = [x for x in text.splitlines() if "[equipment.aliases]" in x]
+    assert len(lines) == 1 and "가동 기록 1행" in lines[0] and "문서 1건" in lines[0]
+    # 장비 ID 를 다시 정했을 뿐 검수로 정한 장비명은 그대로다 (이름을 잃어 None == None 이 된 것이 아니다): 행 수·이름 수는 같고,
+    # 대응표에서 뺀 장비의 다시 돌린 쪽만 ID 가 NULL 이 되었다
+    con = sqlite3.connect(work / "minedocscan.db")
+    after = con.execute("SELECT COUNT(*), COUNT(equipment), COUNT(equipment_id) FROM eq_usage_daily").fetchone()
+    n_drill = con.execute("SELECT COUNT(*) FROM eq_usage_daily WHERE equipment = 'DRILL' AND equipment_id IS NULL").fetchone()[0]
+    con.close()
+    assert after[:2] == before[:2] and after[2] == before[2] - 1 and n_drill == 1, (before, after, n_drill)
+
+
 # ── equipment 는 새 키일 뿐이다 ────────────────────────────────────────────
+def test_report_has_no_stale_key_without_usage_rows(synth, null_run, tmp_path, capsys):
+    """가동 기록(eq_usage_daily·prod_tally)이 없는 사이트(운반·점검표)는 사이트 팩이 있어도 report --json 에 stale_equipment_ids 가
+    없다 — JSON 이 예전(tasks/0006 전)과 같다. 가동 기록이 있으면 0 이어도 키가 있다 (위 시험)."""
+    import sqlite3
+
+    from minedocscan.cli import main
+
+    out = sqlite3.connect(tmp_path / "minedocscan.db")
+    null_run.con.backup(out)
+    out.close()
+    args = ["--site", str(synth.site), "--work-root", str(tmp_path)]
+    assert main(["report", "--json", *args]) == 0
+    assert set(json.loads(capsys.readouterr().out)) == {"report", "xcheck_by_date", "xcheck_usage_by_date"}
+    assert main(["report", *args]) == 0
+    text = capsys.readouterr().out
+    assert "[equipment.aliases]" not in text and "장비 ID 검사" not in text
+
+
 def test_equipment_key_goes_through_page_fields_and_exports(usage_run, tmp_path):
     from minedocscan.review.export import export_meta_crops
 
@@ -498,28 +696,182 @@ def test_renaming_moves_the_record_between_both_equipments(reviewed, usage_synth
 
 # ── 단계 5: 검수 대기열 ─────────────────────────────────────────────────────
 def test_readings_queue_shows_one_page_at_a_time_without_machine_or_other_pages(reviewed, usage_synth):
+    """readings 의 항목 = 쪽 하나: 계기 칸(시작·종료·총) 다음에 근무 시각 칸 (tasks/0006 4.7). 그중 하나라도 잉크가 있는 쪽이 오고,
+    기계 값·다른 쪽의 값은 응답에 없다 (근무 시각 칸까지)."""
     q0, *saves, q1 = reviewed["states"]["readings"]
     truth = usage_synth.truth["usage"]
-    inked = [t for t in truth if t["reading_kind"] != "empty"]
+    inked = [t for t in truth if t["reading_kind"] != "empty" or t["shift_minutes"] is not None]
+    assert any(t["reading_kind"] == "empty" for t in inked)               # 계기가 비고 근무 시각만 적힌 쪽도 온다
     assert (q0["total"], q0["done"], len(q0["items"])) == (len(inked), 0, len(inked))
     assert (q1["total"], q1["done"], q1["items"]) == (len(inked), len(inked), [])
+    meter = ["계기 시작", "계기 종료", "총"]
     for it in q0["items"]:
         pid = it["item_id"].split(":", 1)[1]
-        assert [c["label"] for c in it["cells"]] == ["계기 시작", "계기 종료", "총"]
-        assert all(c["field_id"].startswith(pid + ":meter:") for c in it["cells"])        # 다른 쪽(앞날)의 칸이 없다
+        loader = it["title"].split(" · ")[1] == T_LOADER
+        assert [c["label"] for c in it["cells"]] == meter + (["근무 시각 AM", "근무 시각 PM", "근무 시각 OT"] if loader else [])
+        assert all(c["field_id"].startswith((pid + ":meter:", pid + ":shifts:")) for c in it["cells"])   # 다른 쪽(앞날)의 칸이 없다
         assert all(c["machine"] is None and c["human"] is None and c["current"] is None for c in it["cells"])
-        assert {c["format"] for c in it["cells"]} == {"reading"}
+        assert [c["format"] for c in it["cells"]] == ["reading"] * 3 + (["time_range"] * 3 if loader else [])
+        # 점으로 쓴 시각을 묻는 칸: 계기의 시작·종료만 (총은 길이, 근무 시각은 범위)
+        assert [c["ask_dotted"] for c in it["cells"]] == [True, True, False] + ([False] * 3 if loader else [])
     blob = json.dumps(q0, ensure_ascii=False)
-    for t in truth:                                                    # 응답 어디에도 계기 값(정답)이 없다
-        for v in (t["meter_start"], t["meter_end"], t["clock_start"]):
+    for t in truth:                                                    # 응답 어디에도 계기 값·근무 시각(정답)이 없다
+        for v in (t["meter_start"], t["meter_end"], t["clock_start"], *(t["shifts"] or {}).values()):
             assert v is None or (f"{v:.1f}" if isinstance(v, float) else v) not in blob
-    # 한 쪽의 세 칸이 한 번의 저장으로 남는다 (같은 시각)
-    assert all(len(s["saved"]) == 3 and s["reviewed_at"] for s in saves)
-    recs = [rv for _seq, rv in load(reviewed["settings"].reviews)[0] if rv.region == "meter"]
+    # 한 쪽의 칸이 한 번의 저장으로 남는다 (같은 시각)
+    assert [len(s["saved"]) for s in saves] == [len(it["cells"]) for it in q0["items"]] and all(s["reviewed_at"] for s in saves)
+    recs = [rv for _seq, rv in load(reviewed["settings"].reviews)[0] if rv.region in ("meter", "shifts")]
     by_page: dict = {}
-    for rv in recs[: 3 * len(saves)]:
+    for rv in recs[: sum(len(s["saved"]) for s in saves)]:
         by_page.setdefault(rv.page_id, set()).add(rv.reviewed_at)
     assert len(by_page) == len(saves) and all(len(v) == 1 for v in by_page.values())
+
+
+def test_shift_only_page_gets_its_hours_from_one_save(reviewed, usage_run, usage_synth):
+    """계기가 비고 근무 시각만 적힌 쪽(SHOVEL_shifts_only)이 readings 에 올라오고, 그 항목의 한 번의 저장으로 가동 시간이
+    shifts 근거로 정해진다 (tasks/0006 단계 5). 저장 전에는 근무 시각 칸이 검수 대기라 가동 시간이 NULL 이다."""
+    q0 = reviewed["states"]["readings"][0]
+    before = _by_source(usage_run["pipe"].con)
+    shifts_only = [t for t in usage_synth.truth["usage"] if "SHOVEL_shifts_only" in t["scenarios"]]
+    assert shifts_only
+    for t in shifts_only:
+        pid = before[t["source"]]["page_id"]
+        it = next(it for it in q0["items"] if it["item_id"] == f"readings:{pid}")
+        assert sum(c["field_id"].startswith(pid + ":shifts:") for c in it["cells"]) == 3
+        assert before[t["source"]]["hours"] is None and before[t["source"]]["reading_kind"] == "empty"
+        row = reviewed["states"]["readings_rows"][pid]                  # 그 항목을 저장한 직후
+        assert (row["hours_basis"], row["shift_minutes"]) == ("shifts", t["shift_minutes"])
+        assert row["hours"] == pytest.approx(t["hours"]) and t["hours_basis"] == "shifts"
+        assert json.loads(row["shifts"]) == t["shifts"]
+
+
+def test_readings_with_a_shifts_only_template(usage_run):
+    """근무 시각 표만 있는 양식(계기 표 없음)도 readings 에 쪽마다 한 항목으로 온다 — 로우더 템플릿에서 계기 표를 뺀 사이트로
+    같은 DB 의 대기열을 만든다 (칸의 역할은 템플릿에서 읽는다). 근무 시각 표에 time_range 열이 둘 이상이면 라벨에 열 이름이 붙는다
+    (그 표에 열 하나를 더 적은 템플릿 — 라벨은 템플릿의 열만 본다)."""
+    from types import SimpleNamespace
+
+    con, site = usage_run["pipe"].con, usage_run["pipe"].site
+
+    def without_meter(t, extra_range=False):
+        regs = [r for r in t.regions if r.get("role") != "meter"] if t.name == T_LOADER else t.regions
+        if extra_range and t.name == T_LOADER:
+            regs = [{**r, "columns": [*r["columns"], {"idx": 9, "name": "extra", "format": "time_range"}]}
+                    if r.get("role") == "shifts" else r for r in regs]
+        return SimpleNamespace(name=t.name, handler=t.handler, regions=regs,
+                               region=lambda n, regs=regs: next(r for r in regs if r["name"] == n))
+
+    fake = SimpleNamespace(templates={n: without_meter(t) for n, t in site.templates.items()})
+    q = build_queue(con, "readings", site=fake)
+    loader = [it for it in q["items"] if it["title"].split(" · ")[1] == T_LOADER]
+    assert loader and all([c["label"] for c in it["cells"]] == ["근무 시각 AM", "근무 시각 PM", "근무 시각 OT"]
+                          and it["title"].endswith(" · 근무 시각") and not any(c["ask_dotted"] for c in it["cells"])
+                          for it in loader)
+    two = build_queue(con, "readings", site=SimpleNamespace(
+        templates={n: without_meter(t, extra_range=True) for n, t in site.templates.items()}))
+    assert [[c["label"] for c in it["cells"]] for it in two["items"] if it["title"].split(" · ")[1] == T_LOADER] == \
+        [["근무 시각 AM · range", "근무 시각 PM · range", "근무 시각 OT · range"]] * len(loader)
+    full = build_queue(con, "readings", site=site)
+    assert len(q["items"]) == len(full["items"])            # 합성 로우더 쪽은 계기를 적었으면 근무 시각도 적었다
+    assert [it for it in q["items"] if it not in loader] == [it for it in full["items"]
+                                                             if it["title"].split(" · ")[1] != T_LOADER]
+
+
+# 점으로 쓴 시각 (tasks/0006 4.8): 화면이 묻는 조건. 화면의 스크립트(static/index.html 의 dottedClock)가 같은 규칙이다 —
+# 정규식과 상한은 서버가 보낸다(dotted_clock_rule). 같은 벡터로 그 함수를 node 에서 돌려 견준다 (node 가 있을 때)
+DOTTED_ASKED = {"08.00": ("08:00", "8.00"), "17.30": ("17:30", "17.30"), "8.00": ("08:00", "8.00"), "24.00": ("24:00", "24.00"),
+                "00.00": ("00:00", "0.00"), " 9.59 ": ("09:59", "9.59")}     # 입력 → (콜론을 고르면, 그대로를 고르면 남는 값)
+DOTTED_NOT_ASKED = ("1234.5", "8.5", "25.30", "08.75", "24.30", "123.45", "08:00", "800", "8", "8.0", "08.000", ".00", "", None)
+
+
+def test_dotted_clock_asks_only_for_two_digit_fractions_up_to_24():
+    from minedocscan.forms.formats import DOTTED_CLOCK, dotted_clock, normalize
+
+    for text, (clock, as_is) in DOTTED_ASKED.items():
+        assert dotted_clock(text) == clock, text
+        assert (normalize("reading", clock), normalize("reading", text)) == (clock, as_is)   # 코드는 여전히 콜론만 시각으로 본다
+    for text in DOTTED_NOT_ASKED:
+        assert dotted_clock(text) is None, text
+    assert DOTTED_CLOCK.pattern == r"^([0-9]{1,2})\.([0-9]{2})$"        # 화면이 RegExp 로 그대로 쓴다 (JavaScript 문법)
+
+
+def _dotted_clock_js() -> tuple[str, str]:
+    """static/index.html 의 (대기열 JSON 에서 규칙을 받는 줄, dottedClock 함수) 원문."""
+    import re
+    from pathlib import Path
+
+    import minedocscan.review as review
+
+    html = (Path(review.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    m = re.search(r"\n  function dottedClock\(v\) \{\n.*?\n  \}\n", html, re.S)
+    a = re.search(r"state\.dotted = q\.dotted_clock \?.*?: null;", html, re.S)
+    assert m and a, "index.html 에 dottedClock 이나 state.dotted 가 없다"
+    return a.group(0), m.group(0)
+
+
+def test_screen_dotted_clock_takes_its_limits_from_the_server():
+    """화면의 dottedClock 에는 상한의 수가 없다 — 서버가 보낸 dotted_clock_rule() 만 쓴다 (규칙의 자리는 forms/formats 하나).
+    node 가 있으면 그 함수를 서버가 보내는 규칙으로 돌려 Python 의 dotted_clock 과 같은 벡터에서 같은 답인지 본다."""
+    import re
+    import subprocess
+
+    from minedocscan.forms.formats import dotted_clock, dotted_clock_rule
+
+    assign, fn = _dotted_clock_js()
+    assert set(re.findall(r"\b\d+\b", assign + fn)) <= {"0", "1", "2", "10", "60"}, fn   # 59·24·1440 따위를 적지 않는다
+    assert "maxMinute" in fn and "maxDay" in fn
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node 가 없다 — 수가 없다는 것만 보았다")
+    rule = dotted_clock_rule()
+    vectors = [*DOTTED_ASKED, *(v for v in DOTTED_NOT_ASKED if v is not None), "23.59", "24.01", "00.60", "9.60", "0.59"]
+    script = ("const q = {dotted_clock: " + json.dumps(rule) + "};\nconst state = {};\n" + assign + "\n" + fn
+              + "console.log(JSON.stringify(" + json.dumps(vectors) + ".map(dottedClock)));\n")
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=60, check=True).stdout
+    assert json.loads(out) == [dotted_clock(v) for v in vectors]
+
+
+def test_dotted_clock_cells_both_answers_and_the_report_counts(reviewed, tmp_path):
+    """묻는 칸 = 계기의 시작·종료 (readings 와 usage-check 모두 — 총·근무 시각·작업량 칸은 아니다). 두 답이 서버에서 어떻게
+    남는지: 콜론을 고르면 시각 08:00, 그대로를 고르면 계기 값 8.00. 리포트는 그런 쪽을 센다 — 값은 고치지 않는다."""
+    for it in reviewed["states"]["uc"][0]["items"]:                     # usage-check: 계기 칸이면 같은 표시
+        for c in it["cells"]:
+            assert c["ask_dotted"] == (c["format"] == "reading" and not c["label"].startswith("총")), c["label"]
+    assert any(c["ask_dotted"] for it in reviewed["states"]["uc"][0]["items"] for c in it["cells"])
+    con, site = clone_db(reviewed["con"]), reviewed["site"]
+    settings = replace(reviewed["settings"], reviews=tmp_path / "r.jsonl")
+    shutil.copy(reviewed["settings"].reviews, settings.reviews)        # 검수 파일을 이어서 (같은 초의 앞 검수보다 뒤 줄이 이긴다)
+    app = ReviewApp(con, site, settings, "jp", "readings")
+    from minedocscan.forms.formats import dotted_clock_rule
+
+    assert app.queue_json({})["dotted_clock"] == dotted_clock_rule()      # 화면이 같은 규칙으로 묻는다
+    rows = _by_source(con)
+    rep = build_report(con)
+    assert (rep["usage_dotted_suspect"], rep["usage"]["reading"].get("mixed", 0)) == (0, 0)
+    a, b = sorted((u for u in rows.values() if u["equipment"] == "DRILL"), key=lambda u: u["work_date"])[:2]
+    c = next(u for u in rows.values() if u["reading_kind"] == "meter" and u["meter_end"] > 24 and u["equipment"] != "DRILL")
+    # a: 시작·종료를 점으로 쓴 시각 그대로(계기 값으로) — 묻는 칸에서 "그대로"를 고른 것
+    out = app.post_reviews({"items": [{"field_id": a["start_field_id"], "verdict": "value", "value": "08.00"},
+                                      {"field_id": a["end_field_id"], "verdict": "value", "value": "17.30"}]})
+    assert [x["value"] for x in out["saved"]] == ["8.00", "17.30"]
+    # b: 시작만 콜론을 골랐다 (08.00 → 08:00) — 종료는 계기 값 그대로
+    out = app.post_reviews({"items": [{"field_id": b["start_field_id"], "verdict": "value", "value": "08:00"}]})
+    assert [x["value"] for x in out["saved"]] == ["08:00"]
+    # c: 시작만 점으로 쓴 시각 그대로, 종료는 진짜 계기 값 — 둘 다 24 이하가 아니므로 세지 않는다
+    app.post_reviews({"items": [{"field_id": c["start_field_id"], "verdict": "value", "value": "08.00"}]})
+    rows = {u["page_id"]: u for u in _by_source(con).values()}
+    ua, ub, uc = rows[a["page_id"]], rows[b["page_id"]], rows[c["page_id"]]
+    assert (ua["reading_kind"], ua["meter_start"], ua["meter_end"], ua["hours_basis"]) == ("meter", 8.0, 17.3, "meter")
+    assert (ub["reading_kind"], ub["clock_start"], ub["hours"]) == ("mixed", "08:00", None)
+    assert (uc["reading_kind"], uc["meter_start"]) == ("meter", 8.0) and uc["meter_end"] > 24
+    rep = build_report(con)
+    assert (rep["usage_dotted_suspect"], rep["usage"]["reading"]["mixed"]) == (1, 1)
+    from minedocscan.report import dotted_suspect, format_report
+
+    line = next(x for x in format_report(rep).splitlines() if "24 이하" in x)
+    assert "24 이하인 쪽 1" in line and "(mixed) 1" in line
+    con.execute("UPDATE eq_usage_daily SET reading_kind = 'pending' WHERE page_id = ?", (a["page_id"],))
+    assert dotted_suspect(con) == 0                                     # 계기 값(meter)으로 적재된 쪽만 센다
 
 
 def test_readings_audit_samples_pages_whatever_the_ink(usage_run):
@@ -528,6 +880,13 @@ def test_readings_audit_samples_pages_whatever_the_ink(usage_run):
     dates = {it["work_date"] for it in q["items"]}
     assert q["total"] == 6 and len(dates) == 3                          # 날짜별로 고르게
     assert build_queue(con, "readings", site=site, audit=6, seed=1)["items"] == q["items"]
+    # pending 에도 계기 칸이 나온다 (같은 handwritten_number) — 묻는 칸의 표시는 대기열이 아니라 칸에 붙는다 (tasks/0006 4.8)
+    cells = [c for it in build_queue(con, "pending", site=site)["items"] for c in it["cells"]]
+    asked = [c["ask_dotted"] for c in cells]
+    assert asked == [":meter:" in c["field_id"] and c["label"] in ("start", "end") for c in cells] and any(asked)
+    assert any(":meter:" in c["field_id"] and c["label"] == "total" for c in cells)
+    assert any(":shifts:" in c["field_id"] for c in cells) and any(":tally:" in c["field_id"] for c in cells)
+    assert not any(c["ask_dotted"] for it in build_queue(con, "pending")["items"] for c in it["cells"])   # 사이트 팩 없이
 
 
 def test_usage_check_fix_leaves_still_wrong_stays_confirm_finishes(reviewed):
@@ -635,25 +994,48 @@ def test_illegible_tally_cell_makes_the_subtotal_unknown():
 
 
 def test_readings_never_carry_machine_or_earlier_values(usage_run, usage_synth, tmp_path):
-    """readings 의 응답에는 기계 값도 앞날의 값도 없다 — 기계가 계기를 읽었고(0006 을 흉내 낸다) 앞날의 계기를 검수한 뒤에도."""
+    """readings 의 응답에는 기계 값도 앞날의 값도 없다 — 기계가 계기와 근무 시각을 읽었고(소수·시각을 읽는 모델을 흉내 낸다 — 미룸,
+    tasks/0006 1절) 앞날의 계기·근무 시각을 검수한 뒤에도 (tasks/0006 4.7)."""
     con, site = clone_db(usage_run["pipe"].con), usage_run["pipe"].site
     settings = replace(usage_run["settings"], reviews=tmp_path / "r.jsonl")
     con.execute("UPDATE doc_field SET value_raw = '9999.9' WHERE region = 'meter' AND has_value_raw = 1")
+    con.execute("UPDATE doc_field SET value_raw = '01:23~04:56' WHERE region = 'shifts' AND has_value_raw = 1")
     day0 = min(t["date"] for t in usage_synth.truth["usage"])
     first = {t["source"] for t in usage_synth.truth["usage"] if t["date"] == day0}
-    rows = [f for f in usage_fields(con) if f["source"] in first and f["region"] == "meter"]
-    for f in rows:                                                       # 첫날의 계기 칸만 정답대로
-        text = usage_run["answers"].get((f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"]))
-        save(con, site, settings, Review(f["field_id"], "value", text, "jp") if text else Review(f["field_id"], "empty",
-                                                                                                reviewer="jp"))
+    rows = [f for f in usage_fields(con) if f["source"] in first and f["region"] in ("meter", "shifts")]
+
+    def review(region):                                                  # 첫날의 그 표의 칸만 정답대로
+        for f in rows:
+            if f["region"] == region:
+                text = usage_run["answers"].get((f["source"], f["template_name"], f["region"], f["field_name"], f["row_key"]))
+                save(con, site, settings, Review(f["field_id"], "value", text, "jp") if text
+                     else Review(f["field_id"], "empty", reviewer="jp"))
+
+    inked = lambda t: t["reading_kind"] != "empty" or t["shift_minutes"] is not None      # noqa: E731
+    later = [t for t in usage_synth.truth["usage"] if t["date"] != day0 and inked(t)]
+    page = lambda f: f["field_id"].split(":", 1)[0]                                       # noqa: E731
+    pid_of = {f["source"]: page(f) for f in rows}
+    inked0 = {pid_of[t["source"]] for t in usage_synth.truth["usage"] if t["date"] == day0 and inked(t)}
+    waiting = inked0 & {page(f) for f in rows if f["region"] == "shifts"}
+    # 계기 칸만 검수한 쪽은 끝나지 않았다 — 근무 시각 칸이 남은 첫날 쪽은 그대로 있고, 계기 칸에는 그 칸의 검수만 실린다
+    review("meter")
+    qp = build_queue(con, "readings", site=site)
+    got = {it["item_id"].split(":", 1)[1]: it for it in qp["items"]}
+    assert waiting and waiting < inked0 and len(got) == len(later) + len(waiting) and waiting <= set(got)
+    assert (qp["total"], qp["done"]) == (len(later) + len(inked0), len(inked0) - len(waiting))
+    for pid in waiting:
+        assert all((c["review"] is not None) == (":meter:" in c["field_id"]) for c in got[pid]["cells"])
+    review("shifts")
     q = build_queue(con, "readings", site=site)
     blob = json.dumps(q, ensure_ascii=False)
-    later = [t for t in usage_synth.truth["usage"] if t["date"] != day0 and t["reading_kind"] != "empty"]
-    assert q["items"] and len(q["items"]) == len(later) and rows
-    assert "9999.9" not in blob
+    assert q["items"] and len(q["items"]) == len(later) and {f["region"] for f in rows} == {"meter", "shifts"}
+    assert (q["total"], q["done"]) == (qp["total"], len(inked0)) and not waiting & {it["item_id"].split(":", 1)[1]
+                                                                                    for it in q["items"]}
+    assert any(":shifts:" in c["field_id"] for it in q["items"] for c in it["cells"])
+    assert "9999.9" not in blob and "01:23" not in blob
     for t in usage_synth.truth["usage"]:
         if t["date"] == day0:
-            for v in (t["meter_end"], t["clock_end"]):
+            for v in (t["meter_end"], t["clock_end"], *(t["shifts"] or {}).values()):
                 assert v is None or (f"{v:.1f}" if isinstance(v, float) else v) not in blob
 
 

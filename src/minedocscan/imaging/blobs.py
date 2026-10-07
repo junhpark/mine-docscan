@@ -45,16 +45,21 @@ def erase_rules(binary: np.ndarray, ys: list[int], xs: list[int], band: int = 3)
 
 
 def assign_blobs(aligned_gray: np.ndarray, cells: list[Cell], grid_ys: list[int], grid_xs: list[int],
-                 min_area: int = 40, note_span: float = 1.6) -> tuple[dict[int, int], list[Blob]]:
+                 min_area: int = 40, note_span: float = 1.6,
+                 print_mask: np.ndarray | None = None) -> tuple[dict[int, int], list[Blob]]:
     """표 하나 안의 글씨 덩어리를 셀에 배정한다.
 
     반환: ({셀 인덱스: 배정된 잉크 면적}, [덩어리 목록]).
     메모로 판정된 덩어리는 어느 셀에도 면적을 더하지 않는다.
+    print_mask (쪽 전체의 인쇄 마스크, bool): 표 영역을 이진화한 직후 그 화소를 0 으로 한다 — 인쇄를 뺀 그림으로 덩어리를 묶는다
+    (tasks/0006 4.3). 괘선 재검출은 회색 그림 그대로. None 이면 예전과 같다.
     """
     x0, y0, x1, y1 = min(grid_xs), min(grid_ys), max(grid_xs), max(grid_ys)
     raw = binarize(aligned_gray[y0:y1, x0:x1])
     if raw.size == 0 or not cells:
         return {}, []
+    if print_mask is not None:
+        raw[print_mask[y0:y1, x0:x1]] = 0
     # 정합 뒤에도 괘선은 몇 px 어긋날 수 있으므로 템플릿 위치와 실제 재검출 위치를 모두 지운다
     fys, fxs = detect_grid_roi(aligned_gray, (max(0, x0 - 8), max(0, y0 - 8), x1 + 8, y1 + 8), 0.3, 0.25)
     b = erase_rules(raw, [y - y0 for y in list(grid_ys) + fys], [x - x0 for x in list(grid_xs) + fxs], band=4)

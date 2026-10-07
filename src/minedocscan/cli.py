@@ -6,7 +6,8 @@
   pages      쪽 목록 (상태·양식·분류 여유로 거름). --thumbs 는 원본 쪽의 미리보기 PNG
   eval       정답과 비교 (CER, 필드 정확도, 자동 적재율)
   regress    사이트 팩의 기준 수치와 비교하는 실데이터 회귀 검사
-  template   새 양식의 템플릿 뼈대 만들기
+  template   템플릿 도구: init(뼈대), check(오류 전부), preview(칸을 그린 그림, --print), print-layer(인쇄 층),
+             variant(같은 날 섞여 쓰이는 판 — 괘선만 다시 잡는다), add-region(표 하나를 더한다)
   synth      개인정보 없는 합성 사이트 팩과 스캔 문서 만들기
   review     검수: serve(로컬 화면), stats(진행 현황), export-answers(검수값 → 정답 파일), export-crops(학습용 크롭)
   recognizer 숫자 인식기: train(학습, torch 필요), list(사이트 팩의 모델), eval(크롭에서 바로 평가)
@@ -71,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--meta-mismatch", action="store_true",
                    help="기계가 읽은 메타 값이 사람·파일명의 값과 다른 쪽 (날짜 포함). 값은 찍지 않는다 — 검수 화면 meta-check 에서 본다")
     p.add_argument("--meta-key", help="--meta-mismatch: 이 키만 (vehicle_no, operator, date.day …)")
+    p.add_argument("--variants", action="store_true",
+                   help="같은 날 섞여 쓰이는 판(concurrent)마다 정합한 쪽 중 두 판의 괘선 오차 차이가 1 px 미만인 쪽 "
+                        "(판마다의 오차를 같이 낸다. 두 판 모두 정합에 실패한 쪽도 상태 align_failed 로 나온다)")
 
     p = sub.add_parser("eval", parents=[common], help="정답과 비교")
     g = p.add_mutually_exclusive_group(required=True)
@@ -108,6 +112,33 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--scan", help="이 스캔의 쪽을 정합해서 그 위에 그린다 (칸이 실제 글씨에 맞는지)")
     t.add_argument("--page", type=int, default=1, help="--scan 의 쪽 번호 (1부터)")
     t.add_argument("--out", help="출력 폴더 (기본 WORK_ROOT/template-preview). 저장소 안은 거절한다")
+    t.add_argument("--print", dest="print_layer", action="store_true",
+                   help="인쇄 층(print_image) 위에 그린다 — 인쇄 화소에 색. 값 자리가 인쇄에 덮이지 않았나 (tasks/0006)")
+    t = tsub.add_parser("print-layer", parents=[common],
+                        help="그 양식으로 분류된 쪽들에서 인쇄 층(손글씨가 빠진 빈 양식)을 만든다 → <템플릿 폴더>/print.png + 요약")
+    t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
+    t.add_argument("--max-pages", type=int, default=40, help="쓸 쪽의 최대 수 — 날짜별로 고르게 (기본 40, 3장 미만이면 거절)")
+    t.add_argument("--percentile", type=_number, default=75,
+                   help="화소마다 밝기의 백분위 (기본 75). 판이 섞였을 수 있는 양식의 첫 층은 50 — 괘선을 잡는 데(add-region)만 쓰고, "
+                        "값 유무에 쓰는 층은 판을 나눈 뒤 75 로 다시 만든다 (75 미만이면 요약이 경고한다)")
+    t.add_argument("--out", help="출력 PNG 파일 (기본 <템플릿 폴더>/print.png). git 작업 트리 안은 거절한다")
+    t.add_argument("--allow-in-repo", action="store_true", help="저장소 안에도 쓴다 (합성 사이트 팩만)")
+    t = tsub.add_parser("variant", parents=[common],
+                        help="같은 날 섞여 쓰이는 다른 인쇄 판의 템플릿: 열·행·필드는 그대로, 표마다 괘선만 새 스캔에서 다시 잡는다")
+    t.add_argument("template_dir", help="기존 판의 템플릿 폴더 (<site>/templates/<양식>) — 고치지 않는다")
+    t.add_argument("--scan", required=True, help="새 판의 깨끗한 쪽이 든 스캔 (이미지·PDF)")
+    t.add_argument("--page", type=int, default=1, help="--scan 의 쪽 번호 (1부터)")
+    t.add_argument("--name", required=True, help="새 판의 템플릿 이름 (예: <양식>_b)")
+    t.add_argument("--out-dir", help="새 판의 폴더 (기본: 기존 판 옆의 <NAME>). git 작업 트리 안이거나 이미 있으면 거절한다")
+    t = tsub.add_parser("add-region", parents=[common],
+                        help="그 영역의 괘선을 잡아 표 하나의 뼈대를 template.yaml 의 regions 끝에 더한다 (인쇄 층이 있으면 그것에서)")
+    t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
+    t.add_argument("--roi", required=True, help="표 영역 x0,y0,x1,y1 (템플릿 좌표 — 기준 이미지 픽셀). 표 둘레를 조금 넉넉히, "
+                   "이웃 표까지의 간격보다는 좁게")
+    t.add_argument("--name", required=True, help="표 이름 (영문·숫자·밑줄) — 같은 이름의 표가 있으면 거절한다")
+    t.add_argument("--role", help="usage 핸들러의 표의 역할 meter | shifts | tally | activities — 그 역할이 요구하는 열의 자리표시로")
+    t.add_argument("--header-rows", type=int, default=1, help="머리 행의 수 (기본 1)")
+    t.add_argument("--allow-in-repo", action="store_true", help="저장소 안의 템플릿도 고친다 (합성 사이트 팩만)")
     t = tsub.add_parser("check", parents=[common],
                         help="템플릿의 오류를 전부: 읽기 오류, 겹치는 칸, 쪽 밖의 칸, 역할에 필요한 칸, 형식과 종류의 불일치 …")
     t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
@@ -124,6 +155,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--usage-logs", action="store_true",
                    help="장비 가동 일보 두 종(작업 표 + 계기 / 작업량 표 + 근무 시각 + 계기)을 날마다 묶음 끝에 붙인다")
     p.add_argument("--usage-only", action="store_true", help="가동 일보만 (점검표·운반 쪽 없이)")
+    p.add_argument("--print-layers", action="store_true",
+                   help="--usage-logs/--usage-only 와 함께: 가동 일보 두 종의 인쇄 층(print.png)을 합성 쪽에서 추정해 템플릿에 넣는다 "
+                        "(print_image)")
+    p.add_argument("--usage-variants", action="store_true",
+                   help="--usage-logs/--usage-only 와 함께: 운행일보에 같은 날 섞여 쓰이는 판 B(표만 아래로 옮긴 판)를 더한다 — "
+                        "두 판에 family·concurrent: true (tasks/0006)")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
@@ -203,6 +240,12 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _number(text: str) -> int | float:
+    """정수면 정수로 (요약에 75 로 찍히게), 아니면 실수."""
+    v = float(text)
+    return int(v) if v.is_integer() else v
+
+
 def _settings(a: argparse.Namespace, **extra) -> Settings:
     return load_settings(a.config, site=a.site, archive_root=a.archive_root, work_root=a.work_root,
                          db_url=a.db_url, **extra)
@@ -266,23 +309,38 @@ def cmd_info(a) -> int:
     if site is not None:
         tpls = [{"name": t.name, "title": t.title, "handler": t.handler, "regions": len(t.regions),
                  "cells": len(t.cells()) + len(t.fields), "status": "cells" if t.has_cells else "classify_only",
-                 "family": t.family, "valid_from": t.valid_from, "valid_to": t.valid_to}
+                 "family": t.family, "valid_from": t.valid_from, "valid_to": t.valid_to, "concurrent": t.concurrent,
+                 "print_image": t.spec.get("print_image"), "print_sha": _print_sha(t),
+                 "print_used": t.uses_print_layer}          # 인쇄 층으로 재는 칸이 있는가 (role meter·shifts·tally — 4.3)
                 for t in site.templates.values()]
         from .forms.equipment import master_keys
 
         n_master = len(master_keys(site.templates.values()))
         data["site"] = {"name": site.name, "templates": tpls, "labels": len(site.labels),
-                        "equipment_aliases": len(site.equipment_aliases), "equipment_master": n_master}
+                        "equipment_aliases": len(site.equipment_aliases),
+                        "equipment_aliases_sha": site.equipment_aliases_sha, "equipment_master": n_master}
         lines.append(f"사이트 팩: {site.name} — 템플릿 {len(tpls)}종, 페이지 라벨 {len(site.labels)}개, "
-                     f"장비명 대응표 {len(site.equipment_aliases)}개 (마스터 {n_master}대)")
+                     f"장비명 대응표 {len(site.equipment_aliases)}개 (해시 {site.equipment_aliases_sha}, 마스터 {n_master}대)")
         for t in tpls:
-            valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}" if t["family"] else "")
+            valid = (f"  계열 {t['family']} {t['valid_from'] or '…'}~{t['valid_to'] or '…'}"
+                     + (" (같은 날 섞여 쓰이는 판)" if t["concurrent"] else "") if t["family"] else "")
+            printed = (f"  인쇄 층 {t['print_image']} ({t['print_sha'] or '읽을 수 없음'})"
+                       + ("" if t["print_used"] else " — 인쇄 층으로 재는 칸(role meter·shifts·tally)이 없어 쓰지 않음")
+                       if t["print_image"] else "")
             lines.append(f"  {t['name']:<24} handler={t['handler']:<11} 표 {t['regions']}개, 셀 {t['cells']}개"
-                         + ("" if t["status"] == "cells" else "  (분류 전용 — 셀 정의 없음)") + valid)
+                         + ("" if t["status"] == "cells" else "  (분류 전용 — 셀 정의 없음)") + valid + printed)
     else:
         lines.append("사이트 팩: 지정되지 않았거나 폴더가 없습니다")
     _emit(a, data, "\n".join(lines))
     return 0
+
+
+def _print_sha(t) -> str | None:
+    """info: 템플릿의 인쇄 층 해시 (print_image 가 없으면 None, 읽을 수 없으면 None — 글에는 "읽을 수 없음")."""
+    try:
+        return t.print_sha
+    except (OSError, ValueError):
+        return None
 
 
 def _describe_recognizer(s: Settings, site) -> dict:
@@ -331,7 +389,7 @@ def cmd_run(a) -> int:
             from .evaluate.inspection_csv import load_answers
 
             answers |= load_answers(a.inspection_csv, site.templates[_only_inspection_template(site)])
-        recognizer = OracleRecognizer(answers)
+        recognizer = OracleRecognizer(answers, site=site)       # 동시 판의 정답은 계열로 (tasks/0006 4.6)
     elif s.recognizer == "oracle":
         raise SystemExit("oracle 백엔드는 --answers 또는 --inspection-csv 가 필요합니다")
     else:
@@ -361,7 +419,7 @@ def cmd_run(a) -> int:
                     + (f" · 경고: {r['warning']}" if r.get("warning") else ""))
             print(f"[{i}/{len(files)}] {f.name} · {what} · 지난 {_hms(el)} · 남은 약 {_hms(eta)}", file=sys.stderr)
     summary = pipe.finalize()
-    rep = build_report(pipe.con)
+    rep = build_report(pipe.con, pipe.site.variant_families())
     text = (f"이번 실행: 문서 {summary['documents']}건, 페이지 {summary['pages']}장, 건너뜀 {summary['skipped']}건, "
             f"실패 {len(summary['failed'])}건 (인식 백엔드: {recognizer.name})\n"
             f"분류 여유가 낮은 페이지: {len(summary['low_margin'])}장, 오류 난 쪽: {len(summary['page_errors'])}장\n"
@@ -387,6 +445,8 @@ def cmd_report(a) -> int:
         by_month,
         format_by_month,
         format_report,
+        format_stale_equipment_ids,
+        stale_equipment_ids,
         xcheck_by_date,
         xcheck_usage_by_date,
     )
@@ -398,13 +458,42 @@ def cmd_report(a) -> int:
         rows = by_month(con, s.classify_min_margin)
         _emit(a, {"by_month": rows}, format_by_month(rows))
         return 0
-    rep, by_date, usage_by_date = build_report(con), xcheck_by_date(con), xcheck_usage_by_date(con)
+    site, note = _load_site(s)
+    rep = build_report(con, site.variant_families() if site is not None else None)
+    by_date, usage_by_date = xcheck_by_date(con), xcheck_usage_by_date(con)
     text = format_report(rep, by_date)
     if usage_by_date:
         text += "\n날짜별 가동 일보 검산:\n" + "\n".join(
             f"  {d['work_date']}: " + ", ".join(f"{k} {v}" for k, v in d.items() if k != "work_date") for d in usage_by_date)
-    _emit(a, {"report": rep, "xcheck_by_date": by_date, "xcheck_usage_by_date": usage_by_date}, text)
+    data = {"report": rep, "xcheck_by_date": by_date, "xcheck_usage_by_date": usage_by_date}
+    if site is not None and _has_usage_rows(con):           # report 의 dict 밖에 둔다 — regress 가 비교하지 않는다
+        stale = stale_equipment_ids(con, site)              # 가동 기록이 없는 사이트(운반·점검표)는 키가 없다 — JSON 이 예전과 같다
+        data["stale_equipment_ids"] = stale
+        line = format_stale_equipment_ids(stale)
+        text += f"\n{line}" if line else ""
+    elif note:
+        text += f"\n{note}"
+    _emit(a, data, text)
     return 0
+
+
+def _has_usage_rows(con) -> bool:
+    """eq_usage_daily 나 prod_tally 에 행이 있나 — 낡은 장비 ID 를 셀 것이 있는 DB."""
+    return any(con.execute(f"SELECT 1 FROM {t} LIMIT 1").fetchone() for t in ("eq_usage_daily", "prod_tally"))
+
+
+def _load_site(s: Settings) -> tuple:
+    """report 가 쓰는 사이트 팩: 대응표를 고친 뒤 낡은 장비 ID 의 수(report.stale_equipment_ids)와 동시 판의 계열
+    (report.variant_summary). 사이트 팩이 없으면 (None, None), 읽을 수 없으면 (None, 한 줄 안내) — 그 검사만 건너뛰고
+    동시 판은 판 이름으로 묶는다."""
+    from .forms.sitepack import SitePack
+
+    if s.site is None or not Path(s.site).is_dir():
+        return None, None
+    try:
+        return SitePack(s.site), None
+    except Exception as e:                                  # 망가진 팩(re.error·AttributeError …)이 report 전체를 막지 않게
+        return None, f"(사이트 팩을 읽을 수 없어 장비 ID 검사를 건너뛰었습니다: {type(e).__name__})"   # 종류 이름만 (값 없이)
 
 
 def cmd_pages(a) -> int:
@@ -421,7 +510,7 @@ def cmd_pages(a) -> int:
               "검수 화면: minedocscan review serve --queue meta-check")
         return 0
     rows = list_pages(con, status=a.status, template=a.template,
-                      low_margin=s.classify_min_margin if a.low_margin else None)
+                      low_margin=s.classify_min_margin if a.low_margin else None, variants=a.variants)
     written = []
     if a.thumbs is not None:
         from .tools.thumbs import write_thumbs
@@ -530,37 +619,83 @@ def cmd_template(a) -> int:
     from .tools.mktemplate import init_template
 
     if a.template_command == "check":
-        from .tools.tpltools import check_template
+        from .tools.tpltools import check_notes, check_template
 
         errs = check_template(a.template_dir)
-        _emit(a, {"template": a.template_dir, "problems": errs},
-              "\n".join(f"- {e}" for e in errs) + f"\n오류 {len(errs)}개" if errs else "오류 없음")
+        notes = check_notes(a.template_dir)                    # 오류가 아닌 참고 (쓰이지 않는 인쇄 층) — 종료 코드에 세지 않는다
+        _emit(a, {"template": a.template_dir, "problems": errs, "notes": notes},
+              ("\n".join(f"- {e}" for e in errs) + f"\n오류 {len(errs)}개" if errs else "오류 없음")
+              + "".join(f"\n참고: {n}" for n in notes))
         return 1 if errs else 0
     if a.template_command == "preview":
+        from .forms.template import TemplateError
         from .tools.tpltools import preview
 
         s = _settings(a)
         out = Path(a.out) if a.out else s.work_root / "template-preview"
         try:
-            r = preview(a.template_dir, out, scan=a.scan, page=a.page, dpi=s.dpi)
-        except (ValueError, OSError) as e:                     # TemplateError 는 ValueError — 오류 목록은 template check 로
+            r = preview(a.template_dir, out, scan=a.scan, page=a.page, dpi=s.dpi, print_layer=a.print_layer)
+        except TemplateError as e:                             # 템플릿 오류만 — 오류 목록은 template check 로
             raise SystemExit(f"{e}\n(오류를 전부 보려면: minedocscan template check {a.template_dir})") from e
+        except (ValueError, OSError) as e:                     # 저장소 안이라 거절, 없는 쪽 … — 안내 없이 한 줄
+            raise SystemExit(str(e)) from e
         al = r["aligned"]
         _emit(a, r, f"그렸습니다: {r['out']} — 테두리 {r['boxes']}개 (칸 + 필드)"
               + ("" if al is None else f"\n정합: {'통과' if al['ok'] else '실패'}, 인라이어 {al['inliers']}, "
                  f"괘선 오차 {al['grid_err']} px")
               + "\n저장소에 넣지 마세요 — 실제 양식의 이름·차량번호가 보입니다.")
         return 0
+    if a.template_command == "variant":
+        from .tools.variant import VariantError, format_summary, make_variant
+
+        s = _settings(a)
+        try:
+            r = make_variant(a.template_dir, a.scan, a.page, a.name, out_dir=a.out_dir, dpi=s.dpi, damaged=s.damaged_pdf)
+        except VariantError as e:                               # 거절은 한 줄
+            raise SystemExit(str(e).splitlines()[0]) from e
+        _emit(a, r, format_summary(r))
+        return 0
+    if a.template_command == "print-layer":
+        import yaml
+
+        from .tools.printlayer import PrintLayerError, build, format_summary
+
+        s = _settings(a)
+        try:
+            r = build(a.template_dir, s, max_pages=a.max_pages, percentile=a.percentile, out=a.out,
+                      allow_in_repo=a.allow_in_repo)
+        except (PrintLayerError, OSError, NotImplementedError, yaml.YAMLError) as e:   # 거절은 한 줄
+            raise SystemExit(str(e).splitlines()[0] if str(e) else type(e).__name__) from e
+        _emit(a, r, format_summary(r))
+        return 0
+    if a.template_command == "add-region":
+        from .tools.mktemplate import AddRegionError, add_region, format_summary
+
+        try:
+            r = add_region(a.template_dir, _roi(a.roi), a.name, role=a.role, header_rows=a.header_rows,
+                           allow_in_repo=a.allow_in_repo)
+        except (AddRegionError, OSError) as e:                  # 거절은 한 줄
+            raise SystemExit(str(e).splitlines()[0] if str(e) else type(e).__name__) from e
+        _emit(a, r, format_summary(r))
+        return 0
     s = _settings(a)
     if s.site is None:
         raise SystemExit("사이트 팩이 지정되지 않았습니다: --site 또는 MINEDOCSCAN_SITE")
-    roi = tuple(int(v) for v in a.roi.split(",")) if a.roi else None
-    if roi and len(roi) != 4:
-        raise SystemExit("--roi 는 x0,y0,x1,y1 네 숫자입니다")
+    roi = _roi(a.roi) if a.roi else None
     path = init_template(a.image, a.name, Path(s.site) / "templates", roi=roi, header_rows=a.header_rows,
                          page=a.page, dpi=s.dpi, handler=a.handler, overwrite=a.overwrite)
     _emit(a, {"template": str(path)}, f"템플릿 뼈대를 만들었습니다: {path}\n열 이름·kind·행 키를 채우세요 (docs/SITE_PACK.md).")
     return 0
+
+
+def _roi(text: str) -> tuple[int, int, int, int]:
+    try:
+        roi = tuple(int(v) for v in text.split(","))
+    except ValueError:
+        roi = ()
+    if len(roi) != 4:
+        raise SystemExit("--roi 는 x0,y0,x1,y1 네 정수입니다")
+    return roi
 
 
 def cmd_synth(a) -> int:
@@ -568,8 +703,13 @@ def cmd_synth(a) -> int:
 
     if a.mix_pages and not a.meta_fields:
         raise SystemExit("--mix-pages 는 --meta-fields 와 같이 씁니다")
+    if a.print_layers and not (a.usage_logs or a.usage_only):
+        raise SystemExit("--print-layers 는 --usage-logs 또는 --usage-only 와 같이 씁니다")
+    if a.usage_variants and not (a.usage_logs or a.usage_only):
+        raise SystemExit("--usage-variants 는 --usage-logs 또는 --usage-only 와 같이 씁니다")
     r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
-                 usage_logs=a.usage_logs, usage_only=a.usage_only)
+                 usage_logs=a.usage_logs, usage_only=a.usage_only, print_layers=a.print_layers,
+                 usage_variants=a.usage_variants)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")

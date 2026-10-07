@@ -20,7 +20,8 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 # 4: 숫자 인식기(doc_document.warning, doc_field.status_raw) — docs/tasks/0003-digit-recognizer.md
 # 5: 쪽 메타의 출처(doc_page_meta) — docs/tasks/0004-page-fields-and-checks.md
 # 6: 값의 형식(doc_field.format), 장비 가동 일보(eq_usage_daily, prod_tally, xcheck_usage) — docs/tasks/0005-usage-logs.md
-SCHEMA_VERSION = 6
+# 7: 인쇄 층·동시 판(doc_page.print_sha, doc_page.variant_errs) — docs/tasks/0006-print-layer-and-variants.md
+SCHEMA_VERSION = 7
 
 # 테이블별 기본 키 (upsert 의 충돌 대상)
 PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
@@ -59,6 +60,20 @@ def open_db(url: str) -> sqlite3.Connection:
     con.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     upsert(con, "meta_schema", {"key": "schema_version", "value": str(SCHEMA_VERSION)})
     con.commit()
+    return con
+
+
+def open_db_readonly(url: str) -> sqlite3.Connection:
+    """있는 DB 를 읽기 전용으로 연다 (만들지도, 스키마를 쓰지도 않는다) — DB 에 쓰지 않는 도구용 (template print-layer).
+    파일이 없으면 FileNotFoundError, 버전이 다르면 SchemaVersionError."""
+    if not url.startswith("sqlite:///"):
+        raise NotImplementedError(f"아직 SQLite 만 지원합니다 (docs/ROADMAP.md): {url}")
+    path = Path(url[len("sqlite:///"):])
+    if not path.is_file():
+        raise FileNotFoundError(f"DB 가 없습니다: {path}")
+    con = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False)
+    con.row_factory = sqlite3.Row
+    _check_version(con, str(path))
     return con
 
 

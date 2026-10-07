@@ -18,13 +18,17 @@
   · 작업량 칸 안에 인쇄된 라벨·단위 (실제의 "하단: _ 대") — 그 구분(PRINTED_ITEMS)의 값은 두 자리. 쓴 숫자가 양옆의 인쇄와,
     인쇄가 이웃 칸의 인쇄와 이어져 덩어리 배정에서는 줄 전체가 메모가 된다
   · 시각 범위를 8-12 처럼 줄여 쓴 칸 (정답은 08:00~12:00)
+  · 근무 시각 칸 가운데에 인쇄된 "~" (실제 로우더 작업일보처럼) — 손으로는 그 양옆에 시작·끝을 쓴다 (8-12 는 8 과 12).
+    아무것도 쓰지 않은 칸도 인쇄로는 잉크가 있다 (tasks/0006 단계 3)
 
 글씨는 전부 자체 획(tools/handfont.py — 숫자·소수점·콜론·물결표·붙임표·영문 소문자)으로 그린다 — OpenCV 판과 무관하다.
-인쇄된 글자(양식)만 OpenCV 내장 글꼴이다 (기준 이미지와 같은 판으로 그리므로 정합에는 상관없다).
+인쇄된 글자(양식)만 OpenCV 내장 글꼴이다 (기준 이미지와 같은 판으로 그리므로 정합에는 상관없다). 근무 시각 칸의 "~" 는
+값 유무를 가르는 인쇄라 판과 무관한 선으로 그린다 (_tilde).
 난수는 따로 쓴다 (default_rng([seed, 5005])) — 기본 합성 데이터의 난수 흐름을 건드리지 않는다.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 import cv2
@@ -82,7 +86,40 @@ def _grid(img, ys, xs, thick: int = 2) -> None:
         cv2.line(img, (x, ys[0]), (x, ys[-1]), 0, thick)
 
 
-def build_usage_log() -> tuple[np.ndarray, dict]:
+TILDE_W, TILDE_A, TILDE_T = 32, 5, 3            # 근무 시각 칸에 인쇄된 "~": 폭, 진폭, 굵기 (px)
+
+
+def _tilde(img, cx: float, cy: float) -> None:
+    """인쇄된 물결표 (실제 로우더 작업일보의 근무 시각 칸 "~"). OpenCV 내장 글꼴의 "~" 는 판마다 크기가 크게 다르다
+    (배율 1.5·굵기 3 에서 잉크 102 px(5.0) ↔ 276 px(4.9)) — 칸 하나의 값 유무를 가르는 인쇄라 판과 무관한 선으로 그린다.
+    스캔한 쪽에서 잉크는 약 300 px (칸의 비율 약 0.014) — 덩어리 배정의 기준 면적(40)과 잉크 비율의 기준(0.008)을 둘 다 넘는다:
+    실제처럼 인쇄 층이 없으면 아무것도 쓰지 않은 칸이 "있음"(검수 대기)이다."""
+    t = np.linspace(0.0, 2 * np.pi, 25)
+    pts = np.stack([cx - TILDE_W / 2 + t / (2 * np.pi) * TILDE_W, cy - TILDE_A * np.sin(t)], 1)
+    cv2.polylines(img, [np.round(pts).astype(np.int32)], False, 0, TILDE_T, cv2.LINE_AA)
+
+
+# 판 B (tasks/0006 4.6, 단계 4): 같은 날 섞여 쓰이는 다른 인쇄 판. 작업 표와 계기 표 두 개만 10 px 아래, 줄 간격 +1 % (정수 좌표).
+# 머리 상자·제목·장비명/운전자 필드·서명 상자, 표 아래의 비고 상자·꼬리 문구는 판 A 와 같은 자리 — 표 아래까지 같이 내리면 판 A 만으로도
+# 작은 오차로 통과하고 칸도 맞아, 막으려는 실패(판 A 에 정합해 칸이 어긋난 채 적재, 또는 align_failed)가 합성에 없다
+T_USAGE_B = "synth_usage_log_b"
+B_SHIFT, B_SCALE = 10, 1.01
+USAGE_LOGS = (T_USAGE, T_USAGE_B)                 # 운행일보의 판들 (판 B 는 usage_variants 일 때만 사이트 팩에 있다)
+
+
+def _table_y(top: int, variant: str):
+    """표 하나의 y 좌표 변환 (그 표의 위 괘선 기준). 판 A 는 그대로, 판 B 는 B_SHIFT 아래·간격 B_SCALE 배 (반올림한 정수)."""
+    if variant == "a":
+        return lambda y: y
+    return lambda y: top + B_SHIFT + int(round((y - top) * B_SCALE))
+
+
+def build_usage_log(variant: str = "a", joined: bool = False) -> tuple[np.ndarray, dict]:
+    """variant: "a" (기본 — 지금까지의 판, 바이트까지 그대로) | "b" (판 B: 작업 표·계기 표만 옮긴 판, 이름 T_USAGE_B).
+    joined: 계기 표를 작업 표 바로 아래에 붙인다 — 작업 표의 아래 괘선이 계기 표의 위 괘선이다 (실제 양식처럼, template variant 의
+    시험만. 판 B 에서도 붙어 있게 두 표를 한 덩어리로 옮긴다). 기본 합성 데이터는 쓰지 않는다 (두 표 사이 50 px)."""
+    if variant not in ("a", "b"):
+        raise ValueError(f"variant 는 a | b: {variant!r}")
     img = _canvas(PORTRAIT)
     _label(img, "EQUIPMENT DAILY OPERATION LOG", 100, 170, 1.4, 3)
     _label(img, "Site: SYNTHETIC MINE  (generated test data - not a real site)", 100, 225, 0.7)
@@ -92,8 +129,9 @@ def build_usage_log() -> tuple[np.ndarray, dict]:
     cv2.rectangle(img, sig[:2], sig[2:], 0, 2)
     _label(img, "Signature", 980, 445, 0.8)
 
+    wy = _table_y(520, variant)
     xs = [100, 200, 520, 960, 1180, 1554]                   # No / Location / Work / Hours / Remarks
-    ys = [520, 580] + [580 + 70 * (i + 1) for i in range(6)]
+    ys = [wy(y) for y in [520, 580] + [580 + 70 * (i + 1) for i in range(6)]]
     _grid(img, ys, xs)
     for ci, s in enumerate(("No", "Location", "Work", "Hours", "Remarks")):
         _label(img, s, xs[ci] + 14, ys[0] + 40, 0.7)
@@ -103,9 +141,11 @@ def build_usage_log() -> tuple[np.ndarray, dict]:
         _label(img, no, xs[0] + 12, ys[i + 1] + 45, 0.55 if i == 5 else 0.7)
         rows.append({"row": i, "key": "total" if i == 5 else f"r{i + 1}", "no": no, **({"subtotal": True} if i == 5 else {})})
 
+    my = wy if joined else _table_y(1050, variant)
     mxs = [100, 400, 818, 1236, 1554]                        # 계기: (인쇄된 이름) / 시작 / 종료 / 총 — 낮은 칸
-    mys = [1050, 1092, 1138]
-    _label(img, "Hour meter", 100, 1035, 0.8)
+    mys = [my(y) for y in ((1000, 1042, 1088) if joined else (1050, 1092, 1138))]
+    if not joined:                                            # 붙인 표에서는 이름표 자리가 작업 표의 마지막 행이다
+        _label(img, "Hour meter", 100, mys[0] - 15, 0.8)
     _grid(img, mys, mxs)
     for ci, s in enumerate(("", "Start", "End", "Total")):
         if s:
@@ -117,7 +157,9 @@ def build_usage_log() -> tuple[np.ndarray, dict]:
     _label(img, "Form SYN-USE-01 rev.1", 100, 1520, 0.6)
 
     spec = {
-        "name": T_USAGE, "title": "Equipment daily operation log (synthetic)", "reference_image": "reference.png",
+        "name": T_USAGE if variant == "a" else T_USAGE_B,
+        "title": "Equipment daily operation log (synthetic)" + ("" if variant == "a" else " - print variant B"),
+        "reference_image": "reference.png",
         "dpi": DPI, "page_size": list(PORTRAIT), "handler": "usage", "handler_options": {},
         "regions": [
             {"name": "work", "role": "activities", "grid": {"ys": ys, "xs": xs}, "header_rows": 1,
@@ -141,6 +183,26 @@ def build_usage_log() -> tuple[np.ndarray, dict]:
         ],
     }
     return img, spec
+
+
+def build_usage_log_b() -> tuple[np.ndarray, dict]:
+    return build_usage_log("b")
+
+
+def concurrent_specs(built: dict) -> None:
+    """판 A·B 의 spec 에 같은 family 와 concurrent: true 를 적는다 (usage_variants 일 때만 — 아니면 템플릿은 그대로)."""
+    for name in USAGE_LOGS:
+        built[name][1].update(family=T_USAGE, concurrent=True)
+
+
+def assign_variants(plans: list[list], rng) -> None:
+    """날마다 운행일보(T_USAGE) 쪽에 판 A·B 를 번갈아 준다 (시작하는 판은 rng 로) — 쪽이 둘 이상인 날은 두 판이 섞인다.
+    rng 는 따로 쓴다: 쪽의 내용(계획·글씨)의 난수 흐름은 판을 섞지 않은 것과 같다."""
+    for day in plans:
+        start = int(rng.integers(2))
+        for i, p in enumerate(q for q in day if q.template == T_USAGE):
+            if (i + start) % 2:
+                p.template = T_USAGE_B
 
 
 def build_loader_log() -> tuple[np.ndarray, dict]:
@@ -181,6 +243,7 @@ def build_loader_log() -> tuple[np.ndarray, dict]:
     _label(img, "From ~ to", sxs[1] + 14, sys_[0] + 40, 0.7)
     for i, (_k, lab) in enumerate(SHIFTS):
         _label(img, lab, sxs[0] + 14, sys_[i + 1] + 40, 0.7)
+        _tilde(img, (sxs[1] + sxs[2]) / 2, (sys_[i + 1] + sys_[i + 2]) / 2)     # 칸 안의 인쇄: "__ ~ __" (tasks/0006 단계 3)
 
     mxs = [1200, 1570, 1940, 2310]                            # 계기 칸: 긴 값(1234.5)이 이웃 칸의 값과 한 덩어리가 되지 않을 만큼 넓게
     mys = [700, 742, 788]
@@ -228,6 +291,7 @@ def build_loader_log() -> tuple[np.ndarray, dict]:
 
 
 BUILDERS = {T_USAGE: build_usage_log, T_LOADER: build_loader_log}
+VARIANT_BUILDERS = {T_USAGE_B: build_usage_log_b}           # usage_variants 일 때 더한다 (tasks/0006 단계 4)
 
 
 # ── 계획: 날마다 쪽마다 무엇을 적는가 (정답) ─────────────────────────────────
@@ -457,8 +521,12 @@ def fill_page(blank: np.ndarray, spec: dict, p: PagePlan, rng) -> np.ndarray:
         _write_in_cell(img, text, _cell_box(regs["meter"], 0, slot), rng, style, (0.6, 0.75))
     if "shifts" in regs:
         rows = {r["key"]: r["row"] for r in regs["shifts"]["rows"]}
-        for k, (text, _truth) in p.shifts.items():
-            _write_in_cell(img, text, _cell_box(regs["shifts"], rows[k], "range"), rng, style, (0.5, 0.65))
+        for k, (text, _truth) in p.shifts.items():                 # 인쇄된 "~" 의 양옆에: 시작은 왼쪽, 끝은 오른쪽 (8-12 → 8, 12)
+            x0, y0, x1, y1 = _cell_box(regs["shifts"], rows[k], "range")
+            cx, gap = (x0 + x1) / 2, TILDE_W / 2 + 14
+            a, b = re.split("[~-]", text)
+            _write_in_cell(img, a, (x0, y0, int(cx - gap), y1), rng, style, (0.5, 0.65))
+            _write_in_cell(img, b, (int(cx + gap), y0, x1, y1), rng, style, (0.5, 0.65))
     if "tally" in regs:
         reg = regs["tally"]
         rows = {r["key"]: r["row"] for r in reg["rows"]}
@@ -514,7 +582,7 @@ def truth_of(source: str, day: str, p: PagePlan) -> dict:
            "clock_end": tm.get("end") if clock else None,
            "reading_kind": "clock" if clock else ("meter" if num else "empty"),
            "shifts": {k: truth for k, (_t, truth) in p.shifts.items()} if p.template == T_LOADER else None,
-           "activity_rows": len(p.activities) if p.template == T_USAGE else None, "signed": int(p.signed),
+           "activity_rows": len(p.activities) if p.template != T_LOADER else None, "signed": int(p.signed),
            "tally": [{"row_key": rk, "column": col, "count": v} for (rk, col), v in sorted(p.tally.items())],
            "scenarios": p.scenarios}
     mins = None

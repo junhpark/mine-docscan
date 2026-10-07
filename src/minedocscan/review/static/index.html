@@ -38,6 +38,7 @@
   .choices { display:flex; gap:10px; flex-wrap:wrap; margin-top:8px; }
   .choices button { font-size:18px; padding:8px 16px; }
   .choices button.on { border-color:var(--accent); background:#e8f0fc; font-weight:600; }
+  .ask { border:2px solid var(--accent); border-radius:6px; background:#eef4fd; padding:10px 12px; }
 </style>
 </head>
 <body>
@@ -60,7 +61,7 @@
   'use strict';
   const qs = new URLSearchParams(location.search);
   const state = { items: [], idx: 0, done: 0, total: 0, showMachine: false, entered: {}, templates: {}, busy: false, renderedAt: 0, candidates: {},
-                  queue: '', checked: {}, formats: {} };
+                  queue: '', checked: {}, formats: {}, dotted: null, asking: false };
   // ✓ 행(checks)의 답: 키 → 서버의 answer, 보이는 이름 (tasks/0004 4.9 — 두 칸의 판정으로 저장된다)
   const CHECK = { '1': ['yes', '유'], '2': ['no', '무'], 'Enter': ['none', '표시 없음'], '?': ['unknown', '모름'] };
   const $ = (id) => document.getElementById(id);
@@ -77,6 +78,9 @@
     state.templates = q.templates || {};
     state.candidates = q.candidates || {};
     state.formats = q.formats || {};    // 형식마다 받는 글자·안내 (forms/formats.py — 서버가 다시 검사한다)
+    // 점으로 쓴 시각의 규칙 (forms/formats.dotted_clock_rule): 정규식과 분·하루의 상한 — 수는 서버에서만 온다
+    state.dotted = q.dotted_clock ? { re: new RegExp(q.dotted_clock.pattern), maxMinute: q.dotted_clock.max_minute,
+                                      maxDay: q.dotted_clock.max_day_minutes } : null;
     state.queue = q.name;
     $('qname').textContent = '대기열 ' + q.name + ' · ' + (q.site || '');
     // 숫자 정답을 만드는 대기열: 이 규칙이 인식기의 "빈 칸"과 "거절"의 정답이 된다 (tasks/0003 4.3, docs/DATA.md)
@@ -89,7 +93,8 @@
             + '<kbd>?</kbd> 모름 — 누르면 바로 저장하고 다음 행. ✓ 가 경계선을 넘었으면 <b>시작한 칸</b>이 표시한 칸입니다. '
             + '<kbd>PgUp</kbd>/<kbd>PgDn</kbd> 이전/다음 (전에 고른 답이 보이고, 다시 고르면 고쳐 저장합니다)'
           : (q.name === 'readings'
-            ? '<b>쪽의 계기 칸 셋(시작·종료·총)을 한 번에 입력합니다.</b> ' + esc((state.formats.reading || {}).hint || '')
+            ? '<b>쪽의 가동 시간 칸 — 계기 칸(시작·종료·총)과 근무 시각 칸 — 을 한 번에 입력합니다.</b> '
+              + esc((state.formats.reading || {}).hint || '')
               + ' — 빈 칸은 비워 두고 <kbd>Enter</kbd>. 앞날의 값은 보여 주지 않습니다 (따라 적지 않게)'
             : (q.name === 'usage-check'
               ? '<b>검산이 어긋난 칸들입니다.</b> 종이와 다르게 입력된 칸만 고치고 <kbd>Enter</kbd> — 맞게 되면 빠집니다. '
@@ -148,15 +153,16 @@
         // 묶음에서 이미 검수된 셀은 참고용으로만 보여 준다 (다시 입력하지 않는다)
         h += '<div class="ro">' + esc(shown(c.review)) + ' <span class="label">(검수됨 · ' + esc(c.review.reviewer) + ')</span></div>';
       } else {
-        let init = '';
+        let init = '', decided = true;      // decided: 미리 채운 값이 사람이 정한 값(검수했던 값, usage-check 의 저장된 값)인가
         if (fixing && c.current) init = c.current.has_value ? (c.current.value == null ? '' : c.current.value) : '';
         else if (prev) init = prev.verdict === 'value' ? prev.value : (prev.verdict === 'illegible' ? '?' : '');
-        else if (state.showMachine && c.machine && c.machine.value_raw) init = c.machine.value_raw;
+        else if (state.showMachine && c.machine && c.machine.value_raw) { init = c.machine.value_raw; decided = false; }
         const cands = c.meta_key ? (state.candidates[c.meta_key] || []) : null;
         const listId = cands ? ('dl-' + i) : '';
         h += '<input class="val ' + (isNum ? 'num' : (fmt ? 'fmt' : 'text')) + '" data-i="' + i + '" data-fid="' + esc(c.field_id) + '"'
           + (fmt ? ' data-fmt="' + esc(fmt) + '"' : '')
           + (c.meta_key ? ' data-meta="' + esc(c.meta_key) + '"' : '') + (listId ? ' list="' + listId + '"' : '')
+          + (c.ask_dotted ? ' data-dotted="1" data-decided="' + esc(decided ? init : '') + '"' : '')
           + (c.human ? ' data-human="' + esc(c.human.value) + '" data-machine="' + esc(c.machine ? c.machine.value_raw : '') + '"' : '')
           + (isNum ? ' inputmode="numeric"' : (fmt === 'decimal' ? ' inputmode="decimal"' : '')) + ' data-init="' + esc(init) + '"'
           + ' value="' + esc(init) + '" autocomplete="off" spellcheck="false">';
@@ -272,8 +278,50 @@
     return j;
   }
 
+  // 점으로 쓴 시각(tasks/0006 4.8): forms/formats.dotted_clock 과 같은 규칙 — 정규식과 상한은 서버가 보낸 것(state.dotted)만 쓴다.
+  // 맞으면 'HH:MM', 아니면 null (tests/test_usage.py 가 같은 벡터로 이 함수를 돌려 Python 과 견준다)
+  function dottedClock(v) {
+    const d = state.dotted;
+    const m = d ? d.re.exec(String(v).trim()) : null;
+    if (!m) return null;
+    const h = parseInt(m[1], 10), mi = parseInt(m[2], 10);
+    if (mi > d.maxMinute || h * 60 + mi > d.maxDay) return null;
+    return String(h).padStart(2, '0') + ':' + m[2];
+  }
+
+  function askDotted(inp, clock) {
+    // 두 답만: 시각(콜론으로 바꿔 저장) / 계기 값(그대로 저장). Esc 는 입력으로 돌아간다 (저장하지 않는다).
+    // confirm() 을 쓰지 않는다 — 취소가 "계기 값"인지 "돌아가기"인지 모호하다. 질문 중의 다른 키는 삼킨다 (Enter 연타가 답이 되지 않게)
+    return new Promise(resolve => {
+      const box = document.createElement('div');
+      box.className = 'ask';
+      box.innerHTML = '<div><b>' + esc(inp.value.trim()) + '</b> — 점으로 쓴 시각입니까? 시각이면 콜론으로 (' + esc(clock)
+        + '). 계기 값이면 그대로 저장합니다.</div>'
+        + '<div class="choices"><button type="button" data-a="clock"><kbd>1</kbd> 시각 → ' + esc(clock) + ' 으로 저장</button>'
+        + '<button type="button" data-a="asis"><kbd>2</kbd> 계기 값 → 그대로 저장</button></div>'
+        + '<div class="keys"><kbd>Esc</kbd> 돌아가서 고쳐 쓰기</div>';
+      inp.closest('.cell').appendChild(box);
+      state.asking = true;
+      const finish = (a) => {
+        document.removeEventListener('keydown', onAsk, true);
+        box.remove(); state.asking = false; resolve(a);
+      };
+      const onAsk = (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        if (ev.repeat || ev.isComposing) return;
+        if (ev.key === '1') finish('clock');
+        else if (ev.key === '2') finish('asis');
+        else if (ev.key === 'Escape') finish(null);
+      };
+      document.addEventListener('keydown', onAsk, true);
+      box.querySelectorAll('button').forEach(b => b.addEventListener('click', () => finish(b.dataset.a)));
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      box.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
   async function saveItem() {
-    if (state.busy) return;                   // 저장이 끝나기 전의 Enter 연타는 무시한다 (같은 셀 두 번 저장·다음 셀 건너뜀 방지)
+    if (state.busy || state.asking) return;   // 저장이 끝나기 전의 Enter 연타는 무시한다 (같은 셀 두 번 저장·다음 셀 건너뜀 방지)
     const item = state.items[state.idx];
     const inputs = Array.from($('view').querySelectorAll('input.val'));
     const plans = [];
@@ -286,6 +334,16 @@
       if (p.verdict === 'value' && inp.dataset.meta) {   // 오타는 막되 새 사람·새 차는 받는다
         const cands = state.candidates[inp.dataset.meta] || [];
         if (cands.length && !cands.includes(p.value) && !confirm('목록에 없는 값입니다: ' + p.value + ' — 그대로 저장합니까?')) { inp.focus(); inp.select(); return; }
+      }
+      // 계기의 시작·종료 칸에 점으로 쓴 시각처럼 보이는 값: 저장 전에 묻는다. 미리 채운 값이 사람이 정한 값(검수했던 값,
+      // usage-check 의 저장된 값)이고 그와 같으면 묻지 않는다 — 이미 정한 칸이다. pending 이 미리 채운 기계 값은 정한 값이 아니다
+      if (p.verdict === 'value' && inp.dataset.dotted && p.value !== (inp.dataset.decided || '')) {
+        const clock = dottedClock(p.value);
+        if (clock) {
+          const a = await askDotted(inp, clock);
+          if (!a) { inp.focus(); inp.select(); return; }
+          if (a === 'clock') { inp.value = clock; p.value = clock; }
+        }
       }
       plans.push([inp.dataset.fid, p, state.queue === 'usage-check' ? item.item_id : '', inp.value.trim() !== (inp.dataset.init || '')]);
     }

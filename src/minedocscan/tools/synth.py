@@ -152,8 +152,9 @@ def _tick(img, bbox, rng, cross_right: bool = False) -> None:
     cv2.polylines(img, [pts], False, int(rng.integers(20, 70)), 3, cv2.LINE_AA)
 
 
-def scan_effect(img: np.ndarray, rng, strength: float = 1.0) -> np.ndarray:
-    """스캐너를 흉내 낸다: 약간 돌고, 밀리고, 흐려지고, 종이색과 잡음이 낀다."""
+def scan_effect(img: np.ndarray, rng, strength: float = 1.0, trace: list | None = None) -> np.ndarray:
+    """스캐너를 흉내 낸다: 약간 돌고, 밀리고, 흐려지고, 종이색과 잡음이 낀다.
+    trace: 주면 (기하 행렬 2×3, 결과 그림)을 붙인다 — 인쇄 층을 만들 쪽을 템플릿 좌표로 되돌리는 데 (_write_print_layers)."""
     h, w = img.shape
     m = cv2.getRotationMatrix2D((w / 2, h / 2), float(rng.uniform(-1.0, 1.0)) * strength,
                                 1.0 + float(rng.uniform(-0.012, 0.012)) * strength)
@@ -161,7 +162,18 @@ def scan_effect(img: np.ndarray, rng, strength: float = 1.0) -> np.ndarray:
     out = cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_LINEAR, borderValue=255)
     out = cv2.GaussianBlur(out, (3, 3), 0).astype(np.float32)
     out = out * (float(rng.uniform(232, 250)) / 255.0) + rng.normal(0, 4.0 * strength, out.shape).astype(np.float32)
-    return np.clip(out, 0, 255).astype(np.uint8)
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    if trace is not None:
+        trace.append((m, out))
+    return out
+
+
+def jpeg_roundtrip(img: np.ndarray) -> np.ndarray:
+    """_write_pdf 가 쪽을 담는 JPEG(품질 85)를 거친 그림."""
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        raise ValueError("페이지를 인코딩할 수 없습니다")
+    return cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
 
 
 # ── 빈 양식 세 종 (이미지 + 템플릿 정의) ───────────────────────────────────
@@ -379,11 +391,12 @@ def _blank_forms(low: bool = False, meta: bool = False) -> dict:
 
 
 def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low: bool = False, meta: bool = False,
-                    usage: bool = False) -> Path:
+                    usage: bool = False, usage_variants: bool = False) -> Path:
     """합성 사이트 팩(site.toml + 템플릿 세 종)을 쓴다. revision_from(날짜)을 주면 행렬 양식이 두 판이 된다:
     그 전날까지 v1, 그날부터 v2 (같은 계열, 유효 기간으로 가린다). low: 운반 양식 두 종이 낮은 칸.
     meta: 일보에 월·일 필드, 차량번호가 네 자리 숫자인 행렬 머리글 (tasks/0004 단계 2).
-    usage: 가동 일보 두 종(tools/synth_usage.py)과 장비명 대응표 [equipment.aliases] (tasks/0005)."""
+    usage: 가동 일보 두 종(tools/synth_usage.py)과 장비명 대응표 [equipment.aliases] (tasks/0005).
+    usage_variants: 운행일보의 판 B(synth_usage_log_b)를 더하고 두 판에 family·concurrent: true (tasks/0006 단계 4)."""
     site = Path(site_dir)
     site.mkdir(parents=True, exist_ok=True)
     toml = SITE_TOML
@@ -395,6 +408,9 @@ def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low:
     built = _blank_forms(low, meta)
     if usage:
         built.update({name: b() for name, b in synth_usage.BUILDERS.items()})
+    if usage_variants:
+        built.update({name: b() for name, b in synth_usage.VARIANT_BUILDERS.items()})
+        synth_usage.concurrent_specs(built)
     if revision_from:
         last_v1 = (date.fromisoformat(revision_from) - timedelta(days=1)).isoformat()
         built[T_MATRIX] = build_haul_matrix(SLOTS, T_MATRIX, (None, last_v1), low=low)
@@ -698,16 +714,73 @@ def _meta_answers(source: str, day: str, t: dict) -> list[dict]:
             for k, v in vals.items()]
 
 
-def _add_usage_pages(add, plans: list, blanks: dict, rng, stem: str, day: str, answers: list, truth: list) -> None:
-    """그날의 가동 일보 쪽을 묶음에 붙인다 (그리기·스캔 효과 모두 가동 일보의 난수로). 정답과 쪽 정답을 모은다."""
+def _add_usage_pages(add, plans: list, blanks: dict, rng, stem: str, day: str, answers: list, truth: list,
+                     layer_pages: dict | None = None) -> None:
+    """그날의 가동 일보 쪽을 묶음에 붙인다 (그리기·스캔 효과 모두 가동 일보의 난수로). 정답과 쪽 정답을 모은다.
+    layer_pages: 인쇄 층을 만들 쪽을 모은다 ({양식: {날짜: [그림 | None]}} — 고르지 않을 쪽은 None, _drop_unpicked).
+    스캔한 쪽을 PDF 와 같은 JPEG 를 거쳐 스캔 효과의 기하 행렬로 템플릿 좌표에 되돌린 것 (스캔의 흐림·종이색·잡음·보간은
+    그대로). 난수를 더 쓰지 않는다 — 스캔 문서는 그대로다."""
     from . import synth_usage
 
     for p in plans:
         img = synth_usage.fill_page(*blanks[p.template], p, rng)
-        n = add(img, p.template, _rng=rng, equipment=p.equipment)
+        trace: list | None = [] if layer_pages is not None else None
+        n = add(img, p.template, _rng=rng, _trace=trace, equipment=p.equipment)
+        if trace:
+            m, scanned = trace[0]
+            h, w = img.shape
+            back = cv2.warpAffine(jpeg_roundtrip(scanned), m, (w, h), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                                  borderValue=255)
+            by_day = layer_pages.setdefault(p.template, {})
+            by_day.setdefault(day, []).append(back)
+            _drop_unpicked(by_day)
         source = f"{stem}#{n}"
         answers += synth_usage.answers_of(source, p)
         truth.append(synth_usage.truth_of(source, day, p))
+
+
+def _layer_pick(by_day: dict) -> list[tuple[str, int]]:
+    """인쇄 층에 쓸 쪽의 자리 (날짜, 그날의 몇째): 날짜순으로 돌아가며 한 장씩, 최대 MAX_PAGES (template print-layer 의 pick_order 와
+    같은 차례)."""
+    from .printlayer import MAX_PAGES
+
+    days = sorted(by_day)
+    out, i = [], 0
+    while len(out) < MAX_PAGES and any(i < len(by_day[d]) for d in days):
+        out += [(d, i) for d in days if i < len(by_day[d])][:MAX_PAGES - len(out)]
+        i += 1
+    return out
+
+
+def _drop_unpicked(by_day: dict) -> None:
+    """지금까지 모은 쪽 중 _layer_pick 이 고르지 않는 쪽의 그림을 버린다 (자리는 None 으로 둔다 — 그날의 차례를 지킨다).
+    쪽은 날짜순, 그날 안에서는 차례대로 붙으므로 새 쪽은 늘 자기 돌림의 끝에 선다: 지금 고르지 않은 쪽은 뒤에 쪽이 더 붙어도
+    고르지 않는다. 그래서 모아 둔 그림은 MAX_PAGES 장을 넘지 않고(날수와 무관하게), 고르는 쪽은 다 모은 뒤 고른 것과 같다."""
+    keep = set(_layer_pick(by_day))
+    for d, imgs in by_day.items():
+        for i in range(len(imgs)):
+            if (d, i) not in keep:
+                imgs[i] = None
+
+
+def _write_print_layers(site: Path, layer_pages: dict) -> dict[str, str]:
+    """가동 일보 양식마다 인쇄 층을 추정해(imaging/printlayer.estimate, 백분위 75 — template print-layer 의 기본) 템플릿 폴더의
+    print.png 로 쓰고 template.yaml 에 print_image 를 적는다. 쪽은 날짜순으로 돌아가며 한 장씩, 최대 MAX_PAGES (명령과 같다).
+    생성기의 빈 그림이 아니라 스캔한 쪽에서 추정한다 — 손글씨의 잔상까지 실제와 같은 방법의 층이다. 돌려주는 값: {양식: print_sha}."""
+    from ..imaging import printlayer
+
+    out = {}
+    for name, by_day in sorted(layer_pages.items()):
+        pages = [by_day[d][i] for d, i in _layer_pick(by_day)]
+        assert all(p is not None for p in pages)                # _drop_unpicked 는 고를 쪽을 버리지 않는다
+        layer = printlayer.estimate(pages)
+        d = site / "templates" / name
+        imwrite(d / "print.png", layer)
+        spec = yaml.safe_load((d / "template.yaml").read_text(encoding="utf-8"))
+        spec["print_image"] = "print.png"
+        (d / "template.yaml").write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        out[name] = printlayer.sha(layer)
+    return out
 
 
 @dataclass
@@ -723,7 +796,7 @@ class SynthResult:
 def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "2030-01-07",
              strength: float = 1.0, matrix_revision: bool = False, low_cells: bool = False,
              meta_fields: bool = False, mix_pages: bool = False, usage_logs: bool = False,
-             usage_only: bool = False) -> SynthResult:
+             usage_only: bool = False, print_layers: bool = False, usage_variants: bool = False) -> SynthResult:
     """out_dir 에 합성 사이트 팩(site/)과 스캔 문서(scans/), 정답(truth.json, answers.json)을 만든다.
 
     하루에 PDF 한 개: 점검표 1장 → 차량별 일보(일보를 낸 차량 수) → 행렬 1장.
@@ -735,14 +808,25 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     usage_logs=True 면 날마다 묶음 끝에 가동 일보(tools/synth_usage.py)를 붙인다 — 난수를 따로 쓰므로 앞의 쪽은 그대로다.
     usage_only=True 면 가동 일보만 (점검표·운반 쪽 없이 — 시험 시간을 아낀다. 사이트 팩의 템플릿은 그대로 다 쓴다).
     가동 일보의 정답: truth["usage"] (쪽마다 eq_usage_daily 의 정답), answers.json 에 그 칸들.
+    print_layers=True 면 (가동 일보와 함께) 두 양식의 인쇄 층을 합성 쪽에서 추정해 템플릿에 넣는다 (print.png + print_image,
+    tasks/0006 단계 3): 스캔한 쪽(PDF 와 같은 JPEG)을 스캔 효과의 기하 행렬로 템플릿 좌표에 되돌려 imaging/printlayer.estimate.
+    스캔 문서와 정답은 그대로다 (난수를 더 쓰지 않는다). truth["print_layers"] = {양식: print_sha}.
+    usage_variants=True 면 (가동 일보와 함께) 운행일보에 같은 날 섞여 쓰이는 판 B(synth_usage_log_b — 작업 표·계기 표만 10 px 아래,
+    줄 간격 +1 %)를 더한다 (tasks/0006 단계 4): 두 판에 family·concurrent: true, 날마다 운행일보 쪽에 두 판을 번갈아 (시작하는 판은
+    따로 쓰는 난수로 — 쪽의 내용은 판을 섞지 않은 것과 같다). 정답·truth 의 template 은 그 쪽의 판 이름. 인쇄 층은 판마다 따로.
     """
     if mix_pages and not meta_fields:
         raise ValueError("mix_pages 는 meta_fields 와 같이 쓴다")
     usage_logs = usage_logs or usage_only
+    if print_layers and not usage_logs:
+        raise ValueError("print_layers 는 usage_logs(또는 usage_only)와 같이 쓴다")
+    if usage_variants and not usage_logs:
+        raise ValueError("usage_variants 는 usage_logs(또는 usage_only)와 같이 쓴다")
     root = Path(out_dir)
     d0 = date.fromisoformat(start)
     revision_from = (d0 + timedelta(days=1)).isoformat() if matrix_revision else None
-    site = write_site_pack(root / "site", revision_from=revision_from, low=low_cells, meta=meta_fields, usage=usage_logs)
+    site = write_site_pack(root / "site", revision_from=revision_from, low=low_cells, meta=meta_fields, usage=usage_logs,
+                           usage_variants=usage_variants)
     scans = root / "scans"
     rng = np.random.default_rng(seed)
     blanks = _blank_forms(low_cells, meta_fields)
@@ -758,6 +842,10 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         rng_u = np.random.default_rng([seed, 5005])               # 가동 일보는 따로 — 앞의 쪽의 난수 흐름을 건드리지 않는다
         usage_blanks = {name: b() for name, b in synth_usage.BUILDERS.items()}
         usage_plan = synth_usage.plan_days([(d0 + timedelta(days=d)).isoformat() for d in range(days)], rng_u)
+        if usage_variants:                                          # 판을 섞는 난수도 따로 — 쪽의 내용은 그대로다
+            usage_blanks.update({name: b() for name, b in synth_usage.VARIANT_BUILDERS.items()})
+            synth_usage.assign_variants(usage_plan, np.random.default_rng([seed, 5005, 2]))
+    layer_pages = {} if print_layers else None
     for d in range(days):
         day = (d0 + timedelta(days=d)).isoformat()
         v2 = bool(revision_from) and day >= revision_from
@@ -767,13 +855,13 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         stem = f"scan_{day}"
         pages, page_info = [], []
 
-        def add(img, template, _pages=pages, _info=page_info, _rng=rng, **extra):
-            _pages.append(scan_effect(img, _rng, strength))
+        def add(img, template, _pages=pages, _info=page_info, _rng=rng, _trace=None, **extra):
+            _pages.append(scan_effect(img, _rng, strength, _trace))
             _info.append({"page": len(_pages), "template": template, **extra})
             return len(_pages)
 
         if usage_only:
-            _add_usage_pages(add, usage_plan[d], usage_blanks, rng_u, stem, day, answers, usage_truth)
+            _add_usage_pages(add, usage_plan[d], usage_blanks, rng_u, stem, day, answers, usage_truth, layer_pages)
             _write_pdf(scans / f"{stem}.pdf", pages)
             documents[stem] = page_info
             continue
@@ -812,7 +900,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
                             "field_name": f"slot_{r['slot']}", "row_key": f"{r['material']}|{r['level']}",
                             "text": str(r["trips"])})
         if usage_logs:
-            _add_usage_pages(add, usage_plan[d], usage_blanks, rng_u, stem, day, answers, usage_truth)
+            _add_usage_pages(add, usage_plan[d], usage_blanks, rng_u, stem, day, answers, usage_truth, layer_pages)
         _write_pdf(scans / f"{stem}.pdf", pages)
         documents[stem] = page_info
         day_truths.append(dt)
@@ -845,6 +933,10 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         truth["meta_fields"] = True
     if usage_logs:
         truth["usage"] = usage_truth
+    if usage_variants:
+        truth["usage_variants"] = True
+    if print_layers:
+        truth["print_layers"] = _write_print_layers(site, layer_pages)
     truth_path, answers_path = root / "truth.json", root / "answers.json"
     truth_path.write_text(json.dumps(truth, ensure_ascii=False, indent=1), encoding="utf-8")
     answers_path.write_text(json.dumps(answers, ensure_ascii=False, indent=1), encoding="utf-8")

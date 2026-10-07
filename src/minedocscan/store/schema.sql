@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS doc_page (
   aligned_image   TEXT,                      -- 정합 이미지 경로 (work_root 기준 상대경로)
   homography      TEXT,                      -- JSON 3×3: 렌더링한 쪽 픽셀 → 템플릿 픽셀. 원본 해상도 크롭이 쓴다 (imaging/hires.py)
   render_dpi      INTEGER,                   -- 그 호모그래피를 구할 때 쪽을 렌더링한 해상도 (이미지 파일이면 원본 그대로)
+  print_sha       TEXT,                      -- 값 유무를 잰 인쇄 층의 해시 (Template.print_sha — 화소의 해시). 쓰지 않았으면 NULL (tasks/0006 4.3)
+  variant_errs    TEXT,                      -- 동시 판마다의 괘선 오차 JSON {판 이름: 오차 | null}. 판이 하나면 NULL (tasks/0006 4.6)
   work_date       TEXT,
   status          TEXT NOT NULL,             -- unknown_form | classified_only | align_failed | loaded | error
   error           TEXT                       -- error 일 때 예외 종류와 메시지. 그 쪽의 반쯤 쓰인 행은 남기지 않는다(SAVEPOINT)
@@ -202,7 +204,7 @@ CREATE TABLE IF NOT EXISTS xcheck_haul (
 );
 
 -- 장비 가동 일보 (tasks/0005 4.3): 쪽 하나에 한 행. 한 장비가 하루에 두 장을 내면 두 행이다 — 합치지 않는다 (읽는 쪽의 일).
--- 값은 검수를 적용한 최종 필드 행에서 만든다. *_raw 는 기계가 읽은 값(지금은 소수·시각을 읽는 모델이 없어 NULL — 0006).
+-- 값은 검수를 적용한 최종 필드 행에서 만든다. *_raw 는 기계가 읽은 값(지금은 소수·시각을 읽는 모델이 없어 NULL — 미룸, tasks/0006 1절).
 -- hours 는 적힌 값에서 계산한 것이고 무엇으로 계산했는지가 hours_basis 다: meter(종료 − 시작) > total(총 칸) > clock(시각)
 -- > shifts(근무 시각 범위의 합) > NULL. 추정하지 않는다 — 앞의 근거에 아직 모르는 칸(검수 대기)이 있거나 계기 칸에 숫자와
 -- 시각이 섞였으면 NULL. equipment_id 는 사이트 팩의 대응표([equipment.aliases])로만 정한다 (없으면 NULL, 이름은 남는다).

@@ -34,12 +34,21 @@ def clean_cell(aligned_gray: np.ndarray, bbox: tuple[int, int, int, int]) -> np.
     return cv2.morphologyEx(b, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
 
 
-def observe_cells(aligned_gray: np.ndarray, tpl: Template) -> list[CellObs]:
+def observe_cells(aligned_gray: np.ndarray, tpl: Template, print_mask: np.ndarray | None = None) -> list[CellObs]:
+    """칸마다 크롭(원래 그림)과 잉크 비율. print_mask(인쇄 마스크, bool — Template.print_mask)가 있으면 쪽의 이진 그림에서 그
+    화소를 0 으로 한 그림을 한 번 만들어 role 표의 형식 있는 칸(Template.role_value_cell)의 잉크를 그것으로 잰다 (tasks/0006 4.3).
+    회색 그림에서 인쇄를 흰색으로 칠한 뒤 이진화하지 않는다 — 적응 이진화가 칠한 자리의 가장자리를 잉크로 잡는다.
+    그 밖의 칸과 크롭은 원래 그림 그대로다. print_mask=None 이면 예전과 같다."""
     b = binarize(aligned_gray)
+    bm = None
+    if print_mask is not None:
+        bm = b.copy()
+        bm[print_mask] = 0
     out = []
     for c in tpl.cells() + tpl.field_cells():
         x0, y0, x1, y1 = c.bbox
-        sub = remove_rules(b[y0:y1, x0:x1])
+        src = bm if bm is not None and tpl.role_value_cell(c) else b
+        sub = remove_rules(src[y0:y1, x0:x1])
         sub = cv2.morphologyEx(sub, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
         ink = float((sub > 0).mean()) if sub.size else 0.0
         out.append(CellObs(c, ink, aligned_gray[y0:y1, x0:x1]))
