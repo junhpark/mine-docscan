@@ -30,6 +30,7 @@ RECORD_NAME = ".minedocscan-export.json"
 _replace = os.replace                      # 엑셀 파일을 바꿔 넣는 것 (시험이 "열려 있는 파일"을 흉내 낼 때 이것만 바꾼다)
 DAILY_RE = re.compile(r"^daily/(\d{4}-\d{2})/(\d{4}-\d{2}-\d{2})\.xlsx\Z", re.ASCII)
 MONTHLY_RE = re.compile(r"^monthly/(\d{4}-\d{2})\.xlsx\Z", re.ASCII)
+MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])\Z", re.ASCII)
 
 
 class ExportError(ValueError):
@@ -55,6 +56,10 @@ class Result:
 
 def daily_path(day: str) -> str:
     return f"daily/{day[:7]}/{day}.xlsx"
+
+
+def monthly_path(month: str) -> str:
+    return f"monthly/{month}.xlsx"
 
 
 def inside_git_tree(path: Path) -> bool:
@@ -205,6 +210,21 @@ def _targets(con, site, out: Path, iso: set[str], record: dict, days, months, fu
         want |= {m.group(2) for k in known if (m := DAILY_RE.match(k))}
     for day in sorted(want):
         yield daily_path(day), ((lambda day=day: daily_book(con, site, day, machine_values)) if day in iso else None)
+    yield from _monthly_targets(con, site, out, iso, record, months, full, machine_values)
+
+
+def _monthly_targets(con, site, out: Path, iso: set[str], record: dict, months, full: bool, machine_values: bool):
+    """월별 파일: 그 달에 쪽이 있는 날짜를 모은다. full 이면 DB 의 달 전부와 기록·폴더의 달, 아니면 준 달."""
+    from .monthly import monthly_book
+
+    by_month: dict[str, list[str]] = {}
+    for d in sorted(iso):
+        by_month.setdefault(d[:7], []).append(d)
+    want = set(by_month) if full else {m for m in (months or ()) if MONTH_RE.match(m)}
+    if full:
+        want |= {m.group(1) for k in set(record) | existing_files(out) if (m := MONTHLY_RE.match(k))}
+    for m in sorted(want):
+        yield monthly_path(m), ((lambda m=m: monthly_book(con, site, m, by_month[m], machine_values)) if m in by_month else None)
 
 
 def _apply(out: Path, rel: str, build, record: dict, res: Result, made_at: str) -> None:

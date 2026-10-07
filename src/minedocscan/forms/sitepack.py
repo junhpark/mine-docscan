@@ -48,6 +48,7 @@ class SitePack:
             self.templates[t.name] = t
         _check_families(self.templates)
         self.equipment_aliases: dict[str, str] = _equipment_aliases(self.config, self.templates)
+        self.haul_table: dict[str, list[str]] = _haul_table(self.config)
         self._labels: dict | None = None
         pat = self.config.get("ingest", {}).get("date_from_filename")
         self._date_re = re.compile(pat) if pat else None
@@ -249,6 +250,33 @@ def _variant_rows(reg: dict) -> list[str]:
 
 def _variant_fields(t: Template) -> list[str]:
     return sorted(_canon({k: v for k, v in _with_format(f).items() if k != "bbox"}) for f in t.fields)
+
+
+def _haul_table(config: dict) -> dict[str, list[str]]:
+    """site.toml 의 [haul_table] (월별 엑셀의 운반 표 — tasks/0008 4.4): columns = ["광종|편", …] 열의 순서, slots = ["T01", …]
+    자리의 순서. 거기에 없는 것은 뒤에 붙는다 (빠뜨리지 않는다). 현장의 것이라 코드에 적지 않는다. 틀리면 ConfigError 한 줄
+    (값은 찍지 않는다 — 몇 번째 항목인지만)."""
+    from ..config import ConfigError
+
+    raw = config.get("haul_table") or {}
+    if not isinstance(raw, dict):
+        raise ConfigError("site.toml 의 [haul_table] 은 표여야 합니다 (columns = [...], slots = [...])")
+    out: dict[str, list[str]] = {}
+    for key in ("columns", "slots"):
+        v = raw.get(key, [])
+        if not isinstance(v, list):
+            raise ConfigError(f"site.toml 의 [haul_table] {key} 는 글자의 목록이어야 합니다")
+        for i, x in enumerate(v, 1):
+            if not isinstance(x, str) or not x.strip() or (key == "columns" and x.count("|") != 1):
+                raise ConfigError(f"site.toml 의 [haul_table] {key} {i}번째 항목: "
+                                  + ("\"광종|편\" 꼴의 글자여야 합니다" if key == "columns" else "빈 문자열이 아닌 글자여야 합니다"))
+        if len(set(v)) != len(v):
+            raise ConfigError(f"site.toml 의 [haul_table] {key} 에 겹치는 항목이 있습니다")
+        out[key] = [x.strip() for x in v]
+    unknown = sorted(set(raw) - {"columns", "slots"})
+    if unknown:
+        raise ConfigError(f"site.toml 의 [haul_table] 에 모르는 키가 있습니다: {', '.join(unknown)} (columns, slots)")
+    return out
 
 
 def _equipment_aliases(config: dict, templates: dict[str, Template]) -> dict[str, str]:

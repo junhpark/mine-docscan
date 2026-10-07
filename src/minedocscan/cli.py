@@ -74,10 +74,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-watch", action="store_true",
                    help="감시·처리를 하지 않는다 (화면만 — 결정은 남고 처리는 watch 가 한다)")
 
-    p = sub.add_parser("export", parents=[common], help="내보내기 — 엑셀(일별). DB 의 사본이다 (tasks/0008)")
+    p = sub.add_parser("export", parents=[common], help="내보내기 — 엑셀(일별·월별). DB 의 사본이다 (tasks/0008)")
     esub = p.add_subparsers(dest="export_command", required=True)
     e = esub.add_parser("excel", parents=[common],
-                        help="엑셀 폴더에 일별 파일을 쓴다 — 바뀐 파일만 (내용의 해시). 파이프라인 잠금을 잡는다 (serve·watch 가 돌면 그쪽이 쓴다)")
+                        help="엑셀 폴더에 일별·월별 파일을 쓴다 — 바뀐 파일만 (내용의 해시). 파이프라인 잠금을 잡는다 (serve·watch 가 돌면 그쪽이 쓴다)")
     e.add_argument("out", nargs="?", help="엑셀 폴더 (없으면 [export] excel_dir 또는 MINEDOCSCAN_EXCEL_DIR). 있어야 한다 — 만들지 않는다")
     g = e.add_mutually_exclusive_group()
     g.add_argument("--date", help="그 날짜만 (YYYY-MM-DD)")
