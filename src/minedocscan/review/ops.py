@@ -138,13 +138,18 @@ class OpsApp:
 
     # ── 쪽 그림 ─────────────────────────────────────────────────────────────
     def page_png(self, params: dict) -> bytes:
-        """쪽 그림 (PNG). page_id 또는 doc+page. w: 폭 (100–2400, 기본 900). 방향을 알면(doc_page.rotation) 세워서 준다."""
+        """쪽 그림 (PNG). page_id 또는 doc+page. w: 폭 (100–2400, 기본 900). 방향을 알면(doc_page.rotation) 세워서 준다.
+        rot: 화면의 "돌려 보기" — 그 위에 시계 방향으로 더 돌린다 (0·90·180·270). 서버에서 돌려야 돌린 그림이 제 칸의 크기를 가진다
+        (CSS 로 돌리면 옆 칸을 덮는다 — tasks/0008 4.10)."""
         try:
             w = int(params.get("w") or 900)
+            turn = int(params.get("rot") or 0)
         except ValueError as e:
-            raise ApiError(400, "w 는 정수여야 합니다") from e
+            raise ApiError(400, "w·rot 는 정수여야 합니다") from e
         if not 100 <= w <= 2400:
             raise ApiError(400, f"w 는 100–2400: {w}")
+        if turn not in (0, 90, 180, 270):
+            raise ApiError(400, f"rot 는 0·90·180·270: {turn}")
         if params.get("page_id"):
             doc, page_no = decs.split_target(str(params["page_id"]))
         else:
@@ -162,7 +167,7 @@ class OpsApp:
         if src is None:
             raise ApiError(409, "원본에 닿지 않습니다")
         rot = self.con.execute("SELECT rotation FROM doc_page WHERE page_id = ?", (f"{doc}-p{page_no}",)).fetchone()
-        rotation = int(rot[0]) if rot is not None and rot[0] else 0
+        rotation = ((int(rot[0]) if rot is not None and rot[0] else 0) + turn) % 360
         key = (str(src), src.stat().st_mtime_ns, page_no, w, rotation)
         if key in self._png:
             self._png.move_to_end(key)

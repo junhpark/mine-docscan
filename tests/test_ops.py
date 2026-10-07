@@ -155,8 +155,15 @@ def test_page_png_is_upright_and_needs_date_pages_render_from_the_source(ops, mo
     assert diff < 12, diff                                             # JPEG 로 담은 것 — 화소까지는 아니다 (180° 면 훨씬 크다)
     assert diff < 0.5 * np.abs(np.rot90(got, 2).astype(int) - want.astype(int)).mean()
     nd = undated(ops)
-    assert png(doc=nd, page=1, w=300).shape[1] == 300
-    for bad, status in (({"doc": nd, "page": 5}, 404), ({"doc": "zz", "page": 1}, 404), ({"page_id": f"{a}-p1", "w": 5}, 400)):
+    plain = png(doc=nd, page=1, w=300)
+    assert plain.shape[1] == 300
+    # 화면의 "돌려 보기"(rot)는 서버가 돌린다 — 돌린 그림이 제 칸의 크기를 가진다 (tasks/0008 4.10)
+    quarter = png(doc=nd, page=1, w=300, rot=90)
+    assert quarter.shape[1] == 300 and abs(quarter.shape[0] / 300 - 300 / plain.shape[0]) < 0.02    # 가로 ↔ 세로
+    half = png(doc=nd, page=1, w=300, rot=180)
+    assert half.shape == plain.shape and np.abs(half.astype(int) - np.rot90(plain, 2).astype(int)).mean() < 1
+    for bad, status in (({"doc": nd, "page": 5}, 404), ({"doc": "zz", "page": 1}, 404), ({"page_id": f"{a}-p1", "w": 5}, 400),
+                        ({"doc": nd, "page": 1, "rot": 45}, 400), ({"doc": nd, "page": 1, "rot": "x"}, 400)):
         with pytest.raises(ApiError) as e:
             app.page_png(bad)
         assert e.value.status == status

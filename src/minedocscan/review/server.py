@@ -15,7 +15,7 @@
   GET  /doc?id=<document_id>               문서 화면 (static/home.html 한 장이 홈과 문서 화면을 다 그린다)
   GET  /api/home · /api/doc?id=            할 일·최근 문서·작업 상태 · 문서 하나
   POST /api/decision {items: [{target, kind, value, note}], confirm}   결정 — 전부 검사한 뒤에 쓴다
-  GET  /page.png?page_id=… 또는 ?doc=…&page=N (&w=폭)                쪽 그림 (원본에서, 방향을 알면 세워서)
+  GET  /page.png?page_id=… 또는 ?doc=…&page=N (&w=폭 &rot=더 돌릴 각)   쪽 그림 (원본에서, 방향을 알면 세워서)
 
 127.0.0.1 에만 바인딩한다 — 화면에 실제 이름과 차량번호가 보인다. 단일 스레드(SQLite 연결 하나 — serve 의 작업 스레드는 자기 연결).
 서버 로그에는 요청 경로와 상태 코드만 찍는다. 입력값과 이미지 내용은 찍지 않는다.

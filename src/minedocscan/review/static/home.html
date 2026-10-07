@@ -26,12 +26,23 @@
   .wait { color:var(--warn); font-size:12px; margin-left:6px; }
   .pages { display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:12px; }
   .page { background:#fff; border:1px solid var(--line); border-radius:6px; padding:8px; }
-  .page img { width:100%; height:auto; border:1px solid var(--line); background:#fff; transition: transform .15s; }
+  .page img { display:block; width:100%; height:auto; border:1px solid var(--line); background:#fff; cursor:zoom-in; }
   .page .meta { font-size:13px; color:var(--muted); margin:6px 0; }
   .page.duplicate { border-color: var(--warn); }
   .page.discarded img { opacity:.35; }
   .pair { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
   .pair img { width:100%; border:1px solid var(--line); }
+  /* 크게 보기 (tasks/0008 4.10): 원본에서 폭 1,600 px 이상으로 다시 받아 화면 가득. 누르면 원래 크기(1:1)와 맞추기를 오간다 */
+  .zoom { position:fixed; inset:0; z-index:10; background:#262626; display:flex; flex-direction:column; }
+  .zoom[hidden] { display:none; }
+  .zoom .zbar { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; padding:8px 14px; background:#fff; border-bottom:1px solid var(--line); }
+  .zoom .zbody { flex:1; overflow:auto; display:grid; gap:10px; padding:10px; align-content:start; justify-items:center; }
+  .zoom .zbody.two { grid-template-columns: 1fr 1fr; }
+  .zoom .zbody figure { margin:0; text-align:center; color:#ddd; font-size:13px; min-width:0; }
+  .zoom .zbody img { display:block; max-width:100%; background:#fff; cursor:zoom-in; }   /* 맞추기 = 폭에 맞춘다 (세로는 넘기며 본다) */
+  .zoom .zbody.actual img { max-width:none; cursor:zoom-out; }
+  .zoom .zact { padding:8px 14px; background:#fff; border-top:1px solid var(--line); }
+  .zoom .zact:empty { display:none; }
   button { font: inherit; padding:4px 10px; border:1px solid var(--line); background:#fff; border-radius:4px; cursor:pointer; }
   button.main { border-color: var(--accent); }
   input.date { font-size:22px; width: 12ch; padding:3px 8px; border:2px solid var(--line); border-radius:6px; }
@@ -54,6 +65,15 @@
   <div class="msg" id="msg"></div>
   <div id="view"></div>
 </main>
+<div class="zoom" id="zoom" hidden role="dialog" aria-label="크게 보기">
+  <div class="zbar"><b id="ztitle"></b>
+    <button id="zturn" hidden>돌려 보기 <kbd>R</kbd></button>
+    <button id="zfit">원래 크기 / 맞추기</button>
+    <span class="muted">그림을 누르면 원래 크기 · <kbd>Esc</kbd> 닫기</span>
+    <button id="zclose">닫기</button></div>
+  <div class="zbody" id="zbody"></div>
+  <div class="zact" id="zact"></div>
+</div>
 <script>
 (function () {
   'use strict';
@@ -162,20 +182,19 @@
       + (j.decision.discarded ? '<button id="docrestore">문서 되살리기</button>' : '<button id="docdiscard">문서 버리기</button>')
       + (j.watching ? '' : '<div class="muted">처리는 watch 가 합니다 (--no-watch)</div>') + '</div>';
     out += '<div class="pages">';
+    const byNo = {};
     for (const p of j.pages) {
-      const src = p.status ? '/page.png?page_id=' + encodeURIComponent(p.page_id) + '&w=520'
-                           : '/page.png?doc=' + encodeURIComponent(d.document_id) + '&page=' + p.page_no + '&w=520';
+      byNo[p.page_no] = p;
+      const src = pageSrc(d.document_id, p, 520, 0);
       const cls = 'page' + (p.status === 'duplicate' ? ' duplicate' : '') + (p.decision.discarded ? ' discarded' : '');
       out += '<div class="' + cls + '" id="p' + p.page_no + '">';
       if (p.status === 'duplicate' && p.earlier) {
-        out += '<div class="muted">다시 스캔 의심 — 먼저 들어온 쪽(왼쪽)과 유사도 ' + (p.duplicate_sim || 0).toFixed(3) + '</div><div class="pair">'
-          + '<img alt="먼저 들어온 쪽" src="/page.png?page_id=' + encodeURIComponent(p.earlier.page_id) + '&w=520">'
-          + '<img alt="이 쪽" src="' + src + '"></div>'
-          + '<div><button data-dup="later" data-p="' + esc(p.page_id) + '" data-e="' + esc(p.earlier.page_id) + '">같은 종이 — 이 쪽을 버린다</button> '
-          + '<button data-dup="earlier" data-p="' + esc(p.page_id) + '" data-e="' + esc(p.earlier.page_id) + '">같은 종이 — 먼저 쪽을 버리고 이 쪽을 쓴다</button> '
-          + '<button data-dup="keep" data-p="' + esc(p.page_id) + '" data-e="' + esc(p.earlier.page_id) + '">다른 종이 — 둘 다 쓴다</button></div>';
+        out += '<div class="muted">다시 스캔 의심 — 먼저 들어온 쪽(왼쪽)과 유사도 ' + (p.duplicate_sim || 0).toFixed(3) + ' · 그림을 누르면 두 장을 크게</div><div class="pair">'
+          + '<img alt="먼저 들어온 쪽" data-zoom="' + p.page_no + '" src="/page.png?page_id=' + encodeURIComponent(p.earlier.page_id) + '&w=520">'
+          + '<img alt="이 쪽" data-zoom="' + p.page_no + '" src="' + src + '"></div>'
+          + dupButtons(p);
       } else {
-        out += '<img alt="' + p.page_no + '쪽" src="' + src + '" data-rot="0">';
+        out += '<img alt="' + p.page_no + '쪽" data-zoom="' + p.page_no + '" src="' + src + '">';
       }
       out += '<div class="meta">' + p.page_no + '쪽 · ' + esc(templates[p.template_name] || p.template_name || '—') + ' · '
         + esc(PAGE[p.status] || p.status || '처리 전') + (p.work_date ? ' · ' + esc(p.work_date) : '')
@@ -183,7 +202,7 @@
       out += '<div>' + (p.decision.discarded ? '<button data-act="restore" data-p="' + esc(p.page_id) + '">되살리기</button>'
                                              : '<button data-act="discard" data-p="' + esc(p.page_id) + '">이 쪽 버리기</button>')
         + ' <button data-act="date" data-p="' + esc(p.page_id) + '">이 쪽은 다른 날짜</button>'
-        + (p.status ? '' : ' <button data-act="turn">돌려 보기</button>') + '</div></div>';
+        + (p.status ? '' : ' <button data-act="turn" data-n="' + p.page_no + '">돌려 보기</button>') + '</div></div>';
     }
     out += '</div>';
     $('view').innerHTML = out;
@@ -201,10 +220,8 @@
     for (const b of document.querySelectorAll('button[data-act]')) {
       b.onclick = async () => {
         const act = b.dataset.act, target = b.dataset.p;
-        if (act === 'turn') {                        // 방향을 아직 모르는 쪽 (날짜를 기다리는 문서) — 화면에서만 돌린다
-          const img = b.closest('.page').querySelector('img');
-          const r = (Number(img.dataset.rot) + 90) % 360;
-          img.dataset.rot = r; img.style.transform = 'rotate(' + r + 'deg)';
+        if (act === 'turn') {                        // 방향을 아직 모르는 쪽 (날짜를 기다리는 문서) — 화면에서만 돌린다 (서버가 돌린 그림을 준다)
+          turn(Number(b.dataset.n));
           return;
         }
         let items;
@@ -218,16 +235,86 @@
         if (await post(items)) reload();
       };
     }
-    for (const b of document.querySelectorAll('button[data-dup]')) {
+    wireDup(document.getElementById('view'), reload);
+    for (const img of document.querySelectorAll('#view img[data-zoom]')) img.onclick = () => openZoom(Number(img.dataset.zoom));
+
+    // ── 크게 보기 (tasks/0008 4.10) ──
+    const turns = {};                              // 쪽 번호 → 화면에서 더 돌린 각 (날짜를 기다리는 문서)
+    let zoomed = null;
+    function zoomWidth() {                         // 원본에서 다시 받는 폭: 1,600 px 이상, 화면의 실제 화소만큼 (2,400 까지)
+      return Math.min(2400, Math.max(1600, Math.round(window.innerWidth * (window.devicePixelRatio || 1))));
+    }
+    function turn(n) {
+      turns[n] = ((turns[n] || 0) + 90) % 360;
+      const p = byNo[n];
+      const card = document.getElementById('p' + n);
+      if (card) card.querySelector('img').src = pageSrc(d.document_id, p, 520, turns[n]);
+      if (zoomed === n) openZoom(n);
+    }
+    function openZoom(n) {
+      const p = byNo[n];
+      if (!p) return;
+      zoomed = n;
+      const w = zoomWidth();
+      const body = $('zbody');
+      const pair = p.status === 'duplicate' && p.earlier;
+      body.className = 'zbody' + (pair ? ' two' : '');
+      if (pair) {
+        body.innerHTML = '<figure><img alt="먼저 들어온 쪽" src="/page.png?page_id=' + encodeURIComponent(p.earlier.page_id) + '&w=' + w + '">'
+          + '<figcaption>먼저 들어온 쪽 ' + esc(p.earlier.page_id) + '</figcaption></figure>'
+          + '<figure><img alt="이 쪽" src="' + pageSrc(d.document_id, p, w, 0) + '"><figcaption>이 쪽 ' + esc(p.page_id)
+          + ' · 유사도 ' + (p.duplicate_sim || 0).toFixed(3) + '</figcaption></figure>';
+        $('zact').innerHTML = dupButtons(p);
+        wireDup($('zact'), () => { closeZoom(); reload(); });
+      } else {
+        body.innerHTML = '<figure><img alt="' + n + '쪽" src="' + pageSrc(d.document_id, p, w, turns[n] || 0) + '"></figure>';
+        $('zact').innerHTML = '';
+      }
+      $('ztitle').textContent = n + '쪽' + (p.template_name ? ' · ' + (templates[p.template_name] || p.template_name) : '');
+      $('zturn').hidden = !!p.status;              // 방향을 아는 쪽은 이미 세워져 있다
+      for (const img of body.querySelectorAll('img')) img.onclick = () => body.classList.toggle('actual');
+      $('zoom').hidden = false;
+      $('zclose').focus();
+    }
+    function closeZoom() {
+      $('zoom').hidden = true; $('zbody').innerHTML = ''; $('zact').innerHTML = '';
+      zoomed = null; dateBox.focus();
+    }
+    $('zclose').onclick = closeZoom;
+    $('zfit').onclick = () => $('zbody').classList.toggle('actual');
+    $('zturn').onclick = () => { if (zoomed !== null) turn(zoomed); };
+    document.onkeydown = (ev) => {
+      if ($('zoom').hidden) return;
+      if (ev.key === 'Escape') { ev.preventDefault(); closeZoom(); }
+      else if ((ev.key === 'r' || ev.key === 'R') && !$('zturn').hidden) { ev.preventDefault(); turn(zoomed); }
+    };
+    dateBox.focus();
+    if (location.hash) {                           // 홈의 "다시 스캔 의심 쪽" 링크(#p<n>) — 그 쪽으로
+      const target = document.getElementById(location.hash.slice(1));
+      if (target) target.scrollIntoView({ block: 'start' });
+    }
+  }
+
+  function pageSrc(docId, p, w, rot) {             // 쪽 그림: 처리된 쪽은 쪽 ID 로(세워서), 날짜를 기다리는 쪽은 원본의 쪽을
+    return (p.status ? '/page.png?page_id=' + encodeURIComponent(p.page_id)
+                     : '/page.png?doc=' + encodeURIComponent(docId) + '&page=' + p.page_no) + '&w=' + w + (rot ? '&rot=' + rot : '');
+  }
+  function dupButtons(p) {                         // 다시 스캔 의심 쪽의 세 선택 (문서 화면과 크게 보기가 같이 쓴다)
+    const a = ' data-p="' + esc(p.page_id) + '" data-e="' + esc(p.earlier.page_id) + '"';
+    return '<div><button data-dup="later"' + a + '>같은 종이 — 이 쪽을 버린다</button> '
+      + '<button data-dup="earlier"' + a + '>같은 종이 — 먼저 쪽을 버리고 이 쪽을 쓴다</button> '
+      + '<button data-dup="keep"' + a + '>다른 종이 — 둘 다 쓴다</button></div>';
+  }
+  function wireDup(root, after) {
+    for (const b of root.querySelectorAll('button[data-dup]')) {
       b.onclick = async () => {
         const later = b.dataset.p, earlier = b.dataset.e;
         const items = b.dataset.dup === 'later' ? [{ target: later, kind: 'discard' }]
           : (b.dataset.dup === 'earlier' ? [{ target: earlier, kind: 'discard' }]
              : [{ target: later, kind: 'keep' }, { target: earlier, kind: 'keep' }]);
-        if (await post(items)) reload();
+        if (await post(items)) after();
       };
     }
-    dateBox.focus();
   }
 
   if (location.pathname === '/doc') {

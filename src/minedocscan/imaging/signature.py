@@ -18,8 +18,8 @@ import numpy as np
 
 from .grid import binarize
 
-BLOCK = 16              # 칸의 크기 (px, 200 dpi 템플릿 좌표 — 약 2 mm). 실제 3일치에서 이 크기로 같은 날 다른 종이 최대 0.66,
-                        # 흔들어 다시 정합한 같은 종이 최소 0.91 (tasks/0007 1절 다)
+BLOCK = 16              # 칸의 크기 (px, 200 dpi 템플릿 좌표 — 약 2 mm). 실제 3일치에서 이 크기(표 밖 필드도 지운 서명)로 같은 날
+                        # 다른 종이 최대 0.593, 흔들어 다시 정합한 같은 종이 중앙 0.99 — 그러나 2–3 % 는 0.80 아래 (tasks/0008 1절 라)
 
 
 def signature(aligned: np.ndarray, print_mask: np.ndarray | None, binary: np.ndarray | None = None) -> np.ndarray:
