@@ -8,7 +8,9 @@
                 자리로 끌어오고 머리를 옮긴다 (다시 잡은 괘선이 판 B 의 실제 자리와 2–16 px 다르고, 표 밖 필드의 bbox 도 맞지 않는다).
   괘선          표마다 기존 괘선 둘레의 창에서 괘선을 잡고(imaging/grid.detect_grid_roi), 기존 괘선마다 ±min(MAX_SHIFT, 이웃 표의
                 가장 가까운 괘선까지의 절반) 안에서 가장 가까운 괘선과 짝짓는다 — 창이 이웃 표의 괘선을 품지 않게 (합성 양식은 두 표
-                사이가 50 px). 짝이 없는 괘선이 있는 표, 인쇄되지 않은 나눔 선(split_ys·split_xs)이 있는 표(다시 잡을 수 없다)는
+                사이가 50 px). 붙은 표가 같이 쓰는 경계선(이 표의 괘선과 SHARED_PX 안)은 그 거리에서 뺀다 — 실제 양식은 작업 표와
+                계기 표가 붙어 있어, 빼지 않으면 반경이 0.5 px 가 되고 괘선을 하나도 다시 잡지 못한다.
+                짝이 없는 괘선이 있는 표, 인쇄되지 않은 나눔 선(split_ys·split_xs)이 있는 표(다시 잡을 수 없다)는
                 기존 괘선을 그대로 두고 사람이 고치도록 알린다.
   그 밖         열·행·필드·handler·role·format·메타 키는 그대로. 표 밖 필드의 bbox 도 그대로 (머리에 맞춰 편 그림이므로 같은 좌표계)
                 — template preview 로 확인한다. family 는 기존 판의 것, 없으면 기존 판의 이름. 새 판에는 concurrent: true.
@@ -38,6 +40,8 @@ from ..review.export import inside_git_tree
 
 TABLE_MARGIN = 60          # 표 영역 = 괘선 범위 + 이만큼 (px) — 그 안의 특징점은 호모그래피에 쓰지 않는다 (4.6)
 MAX_SHIFT = 40             # 괘선을 짝짓는 거리의 상한 (px) — 판 B 의 표는 8–12 px 아래였다 (tasks/0006 1절)
+SHARED_PX = 3              # 이웃 표의 괘선이 이 표의 괘선과 이만큼(px) 안이면 같이 쓰는 경계선 — 반경을 재는 데서 뺀다. 한 괘선을
+                           # 두 표가 각자 적어 1–2 px 다를 수 있다 (괘선 굵기 2–3 px). 판 B 의 움직임(8–12 px)보다 훨씬 작다
 NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 
 
@@ -161,12 +165,15 @@ def _table_box(reg: dict, margin: int, w: int, h: int) -> tuple[int, int, int, i
 
 
 def _radius(lines: list[int], span: tuple[int, int], others: list[tuple[list[int], tuple[int, int]]]) -> float:
-    """짝짓는 거리: min(MAX_SHIFT, 이웃 표의 가장 가까운 괘선까지의 절반). 이웃 표 = 다른 축의 범위가 겹치는 표
-    (나란히 놓인 표의 괘선은 창에 들어오지 않는다)."""
+    """짝짓는 거리: min(MAX_SHIFT, 이웃 표의 가장 가까운 괘선까지의 절반). 이웃 표 = 다른 축의 범위가 겹치는(맞닿는) 표
+    (나란히 놓인 표의 괘선은 창에 들어오지 않는다). 이웃 표의 괘선 중 이 표의 괘선과 SHARED_PX 안인 것(붙은 표가 같이 쓰는
+    경계선)은 빼고 잰다 — 이 표의 괘선이기도 해서 짝지어도 틀리지 않는다."""
     r = float(MAX_SHIFT)
     for o_lines, o_span in others:
         if o_span[0] <= span[1] and span[0] <= o_span[1]:
-            r = min(r, min(abs(a - b) for a in lines for b in o_lines) / 2)
+            rest = [b for b in o_lines if min(abs(a - b) for a in lines) > SHARED_PX]
+            if rest:
+                r = min(r, min(abs(a - b) for a in lines for b in rest) / 2)
     return r
 
 

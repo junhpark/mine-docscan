@@ -114,8 +114,10 @@ def _table_y(top: int, variant: str):
     return lambda y: top + B_SHIFT + int(round((y - top) * B_SCALE))
 
 
-def build_usage_log(variant: str = "a") -> tuple[np.ndarray, dict]:
-    """variant: "a" (기본 — 지금까지의 판, 바이트까지 그대로) | "b" (판 B: 작업 표·계기 표만 옮긴 판, 이름 T_USAGE_B)."""
+def build_usage_log(variant: str = "a", joined: bool = False) -> tuple[np.ndarray, dict]:
+    """variant: "a" (기본 — 지금까지의 판, 바이트까지 그대로) | "b" (판 B: 작업 표·계기 표만 옮긴 판, 이름 T_USAGE_B).
+    joined: 계기 표를 작업 표 바로 아래에 붙인다 — 작업 표의 아래 괘선이 계기 표의 위 괘선이다 (실제 양식처럼, template variant 의
+    시험만. 판 B 에서도 붙어 있게 두 표를 한 덩어리로 옮긴다). 기본 합성 데이터는 쓰지 않는다 (두 표 사이 50 px)."""
     if variant not in ("a", "b"):
         raise ValueError(f"variant 는 a | b: {variant!r}")
     img = _canvas(PORTRAIT)
@@ -139,10 +141,11 @@ def build_usage_log(variant: str = "a") -> tuple[np.ndarray, dict]:
         _label(img, no, xs[0] + 12, ys[i + 1] + 45, 0.55 if i == 5 else 0.7)
         rows.append({"row": i, "key": "total" if i == 5 else f"r{i + 1}", "no": no, **({"subtotal": True} if i == 5 else {})})
 
-    my = _table_y(1050, variant)
+    my = wy if joined else _table_y(1050, variant)
     mxs = [100, 400, 818, 1236, 1554]                        # 계기: (인쇄된 이름) / 시작 / 종료 / 총 — 낮은 칸
-    mys = [my(y) for y in (1050, 1092, 1138)]
-    _label(img, "Hour meter", 100, mys[0] - 15, 0.8)
+    mys = [my(y) for y in ((1000, 1042, 1088) if joined else (1050, 1092, 1138))]
+    if not joined:                                            # 붙인 표에서는 이름표 자리가 작업 표의 마지막 행이다
+        _label(img, "Hour meter", 100, mys[0] - 15, 0.8)
     _grid(img, mys, mxs)
     for ci, s in enumerate(("", "Start", "End", "Total")):
         if s:

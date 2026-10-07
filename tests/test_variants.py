@@ -541,6 +541,44 @@ def test_variant_pairs_lines_within_half_the_gap_and_reports_unpaired_lines():
                                                                                  strict=True)) <= 1
 
 
+def test_shared_boundary_of_joined_tables_does_not_shrink_the_radius():
+    """붙은 표가 같이 쓰는 경계선(이 표의 괘선과 SHARED_PX 안)은 반경을 재는 데서 뺀다 — 빼지 않으면 반경이 0–0.5 px 가 되어 괘선을
+    하나도 다시 잡지 못한다 (실제 양식의 작업 표·계기 표). 뺀 뒤에는 그다음 괘선까지의 절반. 경계선만 있는 이웃은 줄이지 않는다."""
+    from minedocscan.tools.variant import MAX_SHIFT, SHARED_PX, _radius
+
+    work = [520, 580, 650, 720, 790, 860, 930, 1000]
+    for d in range(SHARED_PX + 1):                                # 두 표가 경계선을 1–3 px 다르게 적어도 같은 경계선
+        assert _radius(work, (100, 1554), [([1000 + d, 1042, 1088], (100, 1554))]) == 21, d   # 1042 까지의 절반
+    assert _radius([1000, 1042, 1088], (100, 1554), [(work, (100, 1554))]) == 35          # 작업 표의 930 까지
+    assert _radius(work, (100, 1554), [([1000 + SHARED_PX + 1, 1050], (100, 1554))]) == (SHARED_PX + 1) / 2
+    assert _radius([100, 200], (0, 50), [([200], (50, 80))]) == MAX_SHIFT                 # 경계선만 같이 쓰는 이웃
+
+
+def test_variant_redetects_joined_tables(clean_b, tmp_path):
+    """합성 판 A·B 를 두 표가 붙은 배치(synth_usage.build_usage_log(joined=True) — 작업 표의 아래 괘선 = 계기 표의 위 괘선)로 만들고
+    판 B 의 깨끗한 쪽으로 `template variant`: 두 표 다 다시 잡고, 괘선이 생성기의 판 B 와 2 px 안에서 같다 (경계선은 두 표에서
+    같은 괘선). 반경을 경계선으로 재던 때는 두 표 다 "짝이 없는 괘선"으로 사람에게 넘겼다."""
+    site = tmp_path / "site"
+    shutil.copytree(clean_b["site"], site)
+    tdir = site / "templates" / T_USAGE
+    img_a, spec_a = synth_usage.build_usage_log(joined=True)
+    img_b, spec_b = synth_usage.build_usage_log("b", joined=True)
+    assert spec_a["regions"][0]["grid"]["ys"][-1] == spec_a["regions"][1]["grid"]["ys"][0]
+    assert spec_b["regions"][0]["grid"]["ys"][-1] == spec_b["regions"][1]["grid"]["ys"][0]
+    imwrite(tdir / "reference.png", img_a)
+    (tdir / "template.yaml").write_text(yaml.safe_dump(spec_a, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    scan = tmp_path / "joined_b.png"
+    imwrite(scan, scan_effect(img_b, np.random.default_rng(CLEAN_SEEDS[0])))
+    r = make_variant(tdir, scan, 1, "joined_b")
+    assert r["fix_by_hand"] == [] and [t["redetected"] for t in r["tables"]] == [True, True], r["tables"]
+    new = Template(site / "templates" / "joined_b" / "template.yaml")
+    for reg, want in zip(new.regions, spec_b["regions"], strict=True):
+        for axis in ("ys", "xs"):
+            got, exp = np.array(reg["grid"][axis]), np.array(want["grid"][axis])
+            assert got.shape == exp.shape and np.abs(got - exp).max() <= 2, (reg["name"], axis, got, exp)
+    assert new.regions[0]["grid"]["ys"][-1] == new.regions[1]["grid"]["ys"][0]
+
+
 def _copy(reg: dict) -> dict:
     return json.loads(json.dumps(reg))
 
