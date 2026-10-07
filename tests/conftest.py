@@ -516,6 +516,18 @@ def fast_imaging(monkeypatch) -> dict:
     return calls
 
 
+def split_pages(src: Path, pages: list[int], out: Path) -> Path:
+    """합성 PDF 의 쪽 몇 개(1부터)를 새 PDF 로 — 다시 그리지 않고 옮긴다 (no_new_id: 같은 입력이면 바이트까지 같다)."""
+    import pymupdf
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with pymupdf.open(str(src)) as s, pymupdf.open() as d:
+        for n in pages:
+            d.insert_pdf(s, from_page=n - 1, to_page=n - 1)
+        d.save(str(out), no_new_id=True)
+    return out
+
+
 # 다시 처리 시험의 작은 묶음 (2–3쪽): 이름 → [(원본 묶음, 날짜 i, [쪽])]. 운반·점검표는 synth, 가동 일보는 usage_synth 의 쪽.
 # 2030-01-07 에 일보 문서 셋(a·b·c)과 점검표 두 쪽(a·c — c 의 점검표는 둘째 날의 것), T01 일보 두 쪽(a 와 c 의 첫째 날 T01·셋째 날 T01)
 BUNDLES = {
@@ -526,16 +538,24 @@ BUNDLES = {
     "u1_2030-01-07": [("usage", 0, [3, 5])],         # 운행일보 TRUCK(판 A) + DRILL
     "u2_2030-01-08": [("usage", 1, [3, 1])],         # TRUCK + 로우더
     "u3_2030-01-09": [("usage", 2, [3, 4])],         # TRUCK + DRILL(판 B)
+    "e_2030-01-07": [("rescan", 0, [1, 2])],         # a 의 두 쪽을 다시 스캔한 것 (점검표 — 흔들기, T01 — JPEG 재압축) → 붙잡힌다
 }
+BUNDLE_HELD = {"e_2030-01-07": {1: ("a_2030-01-07", 1), 2: ("a_2030-01-07", 2)}}   # 붙잡히는 쪽 → (앞 문서, 쪽)
 
 
 # 일보 쪽의 라벨 (차량번호·작성자 — synth 의 그 쪽의 정답): 자리 배정이 돌게. 2030-01-07 의 T01 일보 두 쪽(a#2, c#2)이 한 자리를 다툰다
 BUNDLE_LABELS = {"a_2030-01-07#2": ("V-101", "ALPHA"), "b_2030-01-07#1": ("V-102", "BRAVO"), "c_2030-01-07#2": ("V-101", "ALPHA"),
-                 "d_2030-01-08#1": ("V-101", "ALPHA")}
+                 "d_2030-01-08#1": ("V-101", "ALPHA"), "e_2030-01-07#2": ("V-101", "ALPHA")}
 
 
 @pytest.fixture(scope="session")
-def bundles(synth, usage_synth, tmp_path_factory) -> dict:
+def rescan_synth(tmp_path_factory):
+    """첫날 하루치와 그 쪽 몇 장을 다시 스캔한 파일 (synth --rescans, tasks/0007 단계 3). 첫날의 PDF 는 synth 의 첫날과 같은 바이트다."""
+    return generate(tmp_path_factory.mktemp("rescan_synth"), days=1, seed=0, rescans=True)
+
+
+@pytest.fixture(scope="session")
+def bundles(synth, usage_synth, rescan_synth, tmp_path_factory) -> dict:
     """BUNDLES 를 만든 폴더와 사이트 팩 — usage_synth 의 사이트 팩을 복사하고(운반·점검표 양식도 synth 와 같은 파일이다 — 가동 일보
     양식과 대응표가 더 있다) 일보 쪽의 라벨(BUNDLE_LABELS)을 넣었다.
     돌려주는 값: {"scans": 폴더, "site": 사이트 팩 경로, "files": {이름: 경로}}. 이 폴더들에 쓰지 않는다 (시험은 복사해서)."""
@@ -549,7 +569,8 @@ def bundles(synth, usage_synth, tmp_path_factory) -> dict:
     shutil.copytree(usage_synth.site, site)
     (site / "labels" / "pages.json").write_text(json.dumps(
         {k: {"vehicle_no": v, "operator": o} for k, (v, o) in BUNDLE_LABELS.items()}, indent=1), encoding="utf-8")
-    src = {"synth": sorted(synth.scans.glob("*.pdf")), "usage": sorted(usage_synth.scans.glob("*.pdf"))}
+    src = {"synth": sorted(synth.scans.glob("*.pdf")), "usage": sorted(usage_synth.scans.glob("*.pdf")),
+           "rescan": sorted(rescan_synth.scans.glob("*_rescan.pdf"))}
     files = {}
     for name, parts in BUNDLES.items():
         with pymupdf.open() as d:
@@ -575,8 +596,10 @@ def world_db(bundles, tmp_path_factory):
         st = settings_for(root, bundles["site"], scans)
         pipe = Pipeline(st, site=SitePack(bundles["site"]))
         pipe.run([scans])
-    statuses = [r[0] for r in pipe.con.execute("SELECT status FROM doc_page")]
-    assert statuses == ["loaded"] * sum(len(p) for parts in BUNDLES.values() for _k, _d, p in parts), statuses
+    held = sum(len(v) for v in BUNDLE_HELD.values())
+    statuses = sorted(r[0] for r in pipe.con.execute("SELECT status FROM doc_page"))
+    assert statuses == ["duplicate"] * held + ["loaded"] * (sum(len(p) for parts in BUNDLES.values() for _k, _d, p in parts)
+                                                            - held), statuses
     return pipe.con
 
 

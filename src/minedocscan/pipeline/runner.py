@@ -4,6 +4,7 @@
   처리      그 문서가 만든 것을 지우고 결정을 적용해 다시 만든다 (process_document — tasks/0007 4.1, 4.8):
     classify  페이지가 어느 양식인지 (그날 유효한 판만 — 날짜가 먼저다)
     align     양식 기준 이미지로 정합, 품질 점수 (돌아간 쪽은 세워서 다시 — imaging/align.align_upright)
+    duplicate 같은 날·같은 계열의 앞 순서 적재된 쪽과 손글씨 자리의 서명이 비슷하면 붙잡는다 (다시 스캔한 쪽 — 4.6, imaging/signature.py)
     extract   셀 크롭·잉크 관측
     recognize → correct → validate → load   — 양식의 핸들러가 수행 (handlers/)
     finalize  그 문서가 있던·있는 날짜와 장비의 교차검증·연속성·점검 행 (등록된 핸들러 전부)
@@ -48,9 +49,11 @@ from ..forms.classify import FormClassifier
 from ..forms.sitepack import SitePack
 from ..handlers import REGISTRY, PageContext, get_handler
 from ..handlers.base import apply_reviews, field_row
+from ..imaging import signature as sigs
 from ..imaging.align import align_to_template, align_upright
 from ..imaging.cells import observe_cells, page_ink
 from ..imaging.cropspec import PageImages, crop_cell
+from ..imaging.grid import binarize
 from ..imaging.io import IMAGE_EXT, SUPPORTED_EXT, count_pages, imwrite, load_pages, resolve_source
 from ..intake import decisions as decs
 from ..recognize import Recognizer, build_recognizer
@@ -86,7 +89,7 @@ class Pipeline:
         self._handlers: dict[str, object] = {}
         self.summary: dict = {"documents": 0, "pages": 0, "by_form": {}, "by_status": {}, "low_margin": [],
                               "handlers": {}, "skipped": 0, "failed": [], "page_errors": [], "warnings": [],
-                              "needs_date": [], "unreachable": [], "discarded": []}
+                              "needs_date": [], "unreachable": [], "discarded": [], "duplicates": []}
         self.summary["reviews"] = (import_into(self.con, settings.reviews_path(self.site.root)) if load_reviews
                                    else {"path": None, "imported": 0, "skipped": 0})
         self.summary["decisions"] = (decs.import_into(self.con, settings.decisions_path(self.site.root)) if load_decisions
@@ -269,12 +272,19 @@ class Pipeline:
         return {"document_id": document_id, "status": "ok", "pages": pages, "warning": warning}
 
     def _footprint(self, document_id: str) -> Footprint:
-        """그 문서의 쪽이 지금 있는 날짜·장비·쪽 (지우기 전과 처리한 뒤 — 다시 계산할 범위)."""
-        pages = self.con.execute("SELECT page_id, work_date FROM doc_page WHERE document_id = ?", (document_id,)).fetchall()
+        """그 문서의 쪽이 지금 있는 날짜·장비·쪽, 다시 스캔을 견주는 묶음(날짜, 계열) (지우기 전과 처리한 뒤 — 다시 계산할 범위)."""
+        pages = self.con.execute("SELECT page_id, work_date, template_name FROM doc_page WHERE document_id = ?",
+                                 (document_id,)).fetchall()
         refs = {equipment_ref(r) for r in self.con.execute(
             "SELECT u.* FROM eq_usage_daily u JOIN doc_page p ON u.page_id = p.page_id WHERE p.document_id = ?",
             (document_id,)).fetchall()}
-        return Footprint({r["work_date"] for r in pages if r["work_date"]}, {r for r in refs if r}, {r["page_id"] for r in pages})
+        groups = {(r["work_date"], self._sig_family(r["template_name"])) for r in pages if r["work_date"] and r["template_name"]}
+        return Footprint({r["work_date"] for r in pages if r["work_date"]}, {r for r in refs if r}, {r["page_id"] for r in pages},
+                         groups)
+
+    def _sig_family(self, template_name: str) -> str:
+        tpl = self.site.templates.get(template_name)
+        return tpl.sig_family if tpl is not None else template_name
 
     def _clear_document(self, document_id: str) -> Footprint:
         """② 그 문서가 만든 것을 지우고(store.db.PAGE_TABLES) 있던 날짜·장비를 다시 계산한다 — 부른 쪽의 트랜잭션 안에서.
@@ -295,6 +305,7 @@ class Pipeline:
             after = self._footprint(document_id)
             if after.pages:
                 self.finalize(dates=after.dates, equipment=after.refs, commit=False)
+            self._request_later(document_id, before.groups | after.groups)
             sets = {"work_date": date[0], "date_source": date[1], "work_done": req}
             if status is not None:
                 sets.update(status=status, error=error)
@@ -305,6 +316,61 @@ class Pipeline:
             if status is None:
                 self.con.execute("UPDATE doc_document SET status = ? WHERE document_id = ?",
                                  (document_status(self.con, document_id), document_id))
+
+    def _request_later(self, document_id: str, groups: set[tuple[str, str]]) -> list[str]:
+        """다시 스캔의 판정은 앞 순서의 적재된 쪽만 본다 (4.6). 이 문서를 처리했으니(버리기·날짜 바꾸기 포함) 판정이 달라질 수 있는
+        뒤 순서의 문서에 다시 처리를 요청한다: ① 이 문서의 쪽(지우기 전의 것 포함)과 같은 날짜·계열에 붙잡힌 쪽이 있는 문서,
+        ② 이 문서의 적재된 쪽과 같은 날짜·계열이고 서명이 기준 이상으로 비슷한 적재된 쪽(keep 이 없는 것)이 있는 문서.
+        요청은 뒤로만 가므로 끝난다. 돌려주는 값: 요청한 문서."""
+        if not groups:
+            return []
+        mine = self._doc_key(document_id)
+        my_sigs: dict[tuple[str, str], list] = {}
+        for r in self.con.execute("SELECT work_date, family, sig FROM doc_page_sig WHERE document_id = ?", (document_id,)):
+            my_sigs.setdefault((r["work_date"], r["family"]), []).append(sigs.decode(r["sig"]))
+        found: set[str] = set()
+        for day, fam in sorted(groups):
+            for r in self.con.execute("SELECT document_id, template_name FROM doc_page WHERE status = 'duplicate' AND "
+                                      "work_date = ? AND document_id <> ?", (day, document_id)):
+                if self._sig_family(r["template_name"]) == fam:
+                    found.add(r["document_id"])                                       # ①
+            mine_here = my_sigs.get((day, fam))
+            if not mine_here:
+                continue
+            for r in self.con.execute("SELECT s.page_id, s.document_id, s.sig, p.page_no FROM doc_page_sig s JOIN doc_page p "
+                                      "ON s.page_id = p.page_id WHERE s.work_date = ? AND s.family = ? AND s.document_id <> ?",
+                                      (day, fam, document_id)):
+                if r["document_id"] in found:
+                    continue
+                other = sigs.decode(r["sig"])
+                if any((sigs.similarity(m, other) or 0.0) >= self.settings.dup_min_sim for m in mine_here) \
+                        and not decs.effective(self.con, r["document_id"]).page(r["page_no"]).keep:
+                    found.add(r["document_id"])                                       # ②
+        later = sorted(d for d in found if self._doc_key(d) > mine)
+        decs.request_work(self.con, later)
+        return later
+
+    def _doc_key(self, document_id: str) -> tuple:
+        r = self.con.execute("SELECT document_id, source_rel, source_path FROM doc_document WHERE document_id = ?",
+                             (document_id,)).fetchone()
+        return row_document_key(r) if r is not None else (1, (), document_id)
+
+    def _earlier_match(self, page: dict, family: str, sig) -> tuple[str, float] | None:
+        """같은 날짜·계열의 앞 순서 적재된 쪽 중 서명이 가장 비슷한 것 (쪽 ID, 유사도). 견줄 것이 없으면 None.
+        같은 유사도면 앞 순서의 쪽."""
+        mine = (self._doc_key(page["document_id"]), page["page_no"])
+        rows = self.con.execute("SELECT s.page_id, s.sig, p.page_no, d.document_id, d.source_rel, d.source_path FROM doc_page_sig s "
+                                "JOIN doc_page p ON s.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id "
+                                "WHERE s.work_date = ? AND s.family = ? AND s.page_id <> ?",
+                                (page["work_date"], family, page["page_id"])).fetchall()
+        best = None
+        for key, r in sorted(((row_document_key(r), r["page_no"]), r) for r in rows):   # 앞 순서부터 — 같은 유사도면 앞의 것
+            if key >= mine:
+                break
+            sim = sigs.similarity(sig, sigs.decode(r["sig"]))
+            if sim is not None and (best is None or sim > best[1]):
+                best = (r["page_id"], sim)
+        return best
 
     def _discarded_page(self, document_id: str, source_name: str, page_no: int, dec: decs.DocDecisions) -> dict:
         """버린 쪽: 행 하나만 status discarded 로 (필드·업무 행 없음)."""
@@ -427,6 +493,18 @@ class Pipeline:
         if not day:                                 # 날짜가 없는 쪽은 핸들러에 넘기지 않는다 — 업무 행에 날짜 없는 행이 생기지 않게
             raise ValueError("날짜가 없는 쪽입니다 (문서의 날짜를 정한 뒤 다시 처리합니다)")   # (4.1, process_document 를 거치면 오지 않는다)
 
+        # 다시 스캔한 쪽 (4.6): 같은 날짜·계열의 앞 순서 적재된 쪽과 손글씨 자리의 서명이 기준 이상 비슷하면 붙잡는다 — 필드·업무 행 없이.
+        # keep(다른 종이다)이 있으면 견주지 않는다. 서명은 적재된 쪽만 남긴다 (뒤 쪽의 견줄 거리)
+        binary = binarize(ar.warped)
+        sig = sigs.signature(ar.warped, tpl.signature_mask, binary=binary)
+        family = tpl.sig_family
+        if not (decided is not None and decided.page(page_no).keep):
+            match = self._earlier_match(page, family, sig)
+            if match is not None and match[1] >= self.settings.dup_min_sim:
+                page.update(status="duplicate", duplicate_of=match[0], duplicate_sim=round(match[1], 6))
+                s["duplicates"].append({"page_id": page_id, "of": match[0], "sim": round(match[1], 4)})
+                return self._close_page(page)
+
         # extract → (recognize → correct → validate → load: 핸들러)
         # 인쇄 층(tasks/0006 4.3): 있으면 role 표의 형식 있는 칸의 잉크를 인쇄를 뺀 이진 그림으로 잰다. 어느 층으로 쟀는지 쪽에 남긴다
         print_mask = tpl.print_mask if tpl.uses_print_layer else None
@@ -438,7 +516,7 @@ class Pipeline:
         images = PageImages(aligned=ar.warped, source=source_path, page_no=page_no, homography=ar.homography,
                             render_dpi=self.settings.dpi, source_dpi=self.settings.source_dpi,
                             damaged=self.settings.damaged_pdf, source_image=gray if is_image else None)
-        obs = observe_cells(ar.warped, tpl, print_mask)
+        obs = observe_cells(ar.warped, tpl, print_mask, binary=binary)
         # 메타 필드를 핸들러보다 먼저 읽는다 — 쪽 메타가 핸들러가 행을 만들기 전에 정해져 있어야 한다 (tasks/0004 단계 5)
         meta_obs, machine, reads = self._read_meta(tpl, obs, images)
         # 쪽 메타: 검수값 > 라벨 > 파일명 > 기계 값 — 출처·대조와 함께 doc_page_meta 에. 핸들러는 그 최종 값을 쓴다
@@ -454,6 +532,8 @@ class Pipeline:
             upsert(self.con, "doc_field", apply_reviews(ctx, [_meta_field_row(ctx, o, r) for o, r in reads]))
         result = handler.load(ctx)
         page["status"] = "loaded"
+        upsert(self.con, "doc_page_sig", {"page_id": page_id, "document_id": document_id, "family": family, "work_date": day,
+                                          "sig": sigs.encode(sig)})
         hs = s["handlers"].setdefault(tpl.handler, {})
         for k, v in result.items():
             if isinstance(v, int | float):
@@ -530,13 +610,13 @@ class Pipeline:
 
 
 class Footprint:
-    """문서 하나가 DB 에 있는 범위: 쪽의 날짜, 장비(equipment_ref), 쪽 ID. 다시 계산할 범위를 정한다."""
+    """문서 하나가 DB 에 있는 범위: 쪽의 날짜, 장비(equipment_ref), 쪽 ID, 다시 스캔을 견주는 묶음(날짜, 계열). 다시 계산할 범위를 정한다."""
 
-    def __init__(self, dates: set[str], refs: set[str], pages: set[str]):
-        self.dates, self.refs, self.pages = set(dates), set(refs), set(pages)
+    def __init__(self, dates: set[str], refs: set[str], pages: set[str], groups: set[tuple[str, str]] = frozenset()):
+        self.dates, self.refs, self.pages, self.groups = set(dates), set(refs), set(pages), set(groups)
 
     def __or__(self, other: Footprint) -> Footprint:
-        return Footprint(self.dates | other.dates, self.refs | other.refs, self.pages | other.pages)
+        return Footprint(self.dates | other.dates, self.refs | other.refs, self.pages | other.pages, self.groups | other.groups)
 
 
 def _page_row(page_id: str, document_id: str, page_no: int, work_date: str | None) -> dict:

@@ -48,6 +48,10 @@ class Settings:
     # 실제 쪽 83장의 최소가 0.046, 합성 흰 종이·티 0.0003 이하, 가장자리 그림자 0.011 이하, 옅게 비친 뒷면(15 %) 0.001 이하.
     # 진하게 비친 뒷면(30 % ≤ 0.028, 45 % ≤ 0.053)은 겹친다 — unknown_form 으로 남아 사람이 본다. 실제 빈 쪽 표본은 아직 없다
     blank_max_ink: float = 0.02
+    # 다시 스캔한 쪽 (tasks/0007 4.6): 같은 날·같은 계열의 앞 순서 적재된 쪽과 서명(imaging/signature.py)의 코사인이 이 이상이면 붙잡는다.
+    # 실제 3일치: 같은 날 다른 종이 최대 0.66(258쌍), 흔들어 다시 정합한 같은 종이 최소 0.91(83쪽) — 그 사이. 합성(표 밖 필드를 지운
+    # 서명): 같은 날 다른 종이 최대 0.77, 다시 찍은 쪽 최소 0.998. 실제 다시 스캔을 본 뒤 다시 정한다 (8절)
+    dup_min_sim: float = 0.80
     extra: dict = field(default_factory=dict)
 
     @property
@@ -108,6 +112,7 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         source_dpi=_number(_table(raw, "review", path), "source_dpi", 300, int, "[review] source_dpi", lo=50, hi=1200),
         damaged_pdf=str(pipe.get("damaged_pdf", "fail")),
         blank_max_ink=_number(pipe, "blank_max_ink", 0.02, float, "[pipeline] blank_max_ink", lo=0.0, hi=1.0),
+        dup_min_sim=_number(pipe, "dup_min_sim", 0.80, float, "[pipeline] dup_min_sim", lo=0.0, hi=1.0),
         extra=raw,
     )
     env = os.environ
@@ -121,6 +126,7 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         s.db_url = env["MINEDOCSCAN_DB_URL"]
     if env.get("MINEDOCSCAN_REVIEWS"):
         s.reviews = Path(env["MINEDOCSCAN_REVIEWS"])
+
     if env.get("MINEDOCSCAN_DAMAGED_PDF"):
         s.damaged_pdf = env["MINEDOCSCAN_DAMAGED_PDF"]
     for k, v in overrides.items():

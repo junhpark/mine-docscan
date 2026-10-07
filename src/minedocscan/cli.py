@@ -190,6 +190,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="스캔한 쪽마다 0·90·180·270° 중 하나로 돌려서 담는다 (B5 가로를 세로로 넣은 스캐너 — tasks/0007)")
     p.add_argument("--blank-backs", action="store_true",
                    help="쪽마다 빈 뒷면(흰 종이·티·가장자리 그림자·옅게 비친 앞면)을 붙인다 (양면 스캔 — tasks/0007)")
+    p.add_argument("--rescans", action="store_true",
+                   help="첫날의 쪽 몇 장을 다른 흔들기로 다시 찍은 파일을 더한다 (JPEG 재압축·90° 돌린 것 포함 — 다시 스캔한 쪽, tasks/0007)")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
@@ -462,6 +464,8 @@ def cmd_run(a) -> int:
             + (f"날짜를 정할 문서 {len(summary['needs_date'])}건 — minedocscan doc list --status needs_date → doc date\n"
                if summary["needs_date"] else "")
             + (f"원본에 닿지 않은 문서 {len(set(summary['unreachable']))}건 (다음에 다시 봅니다)\n" if summary["unreachable"] else "")
+            + (f"다시 스캔 의심 쪽 {len(summary['duplicates'])}장 — 적재하지 않고 붙잡았습니다 (pages --status duplicate → doc discard/keep)\n"
+               if summary["duplicates"] else "")
             + f"분류 여유가 낮은 페이지: {len(summary['low_margin'])}장, 오류 난 쪽: {len(summary['page_errors'])}장\n"
             f"── DB 현황 ({s.resolved_db_url}) ──\n" + format_report(rep, xcheck_by_date(pipe.con)))
     if summary["failed"]:
@@ -879,7 +883,8 @@ def cmd_synth(a) -> int:
         raise SystemExit("--usage-variants 는 --usage-logs 또는 --usage-only 와 같이 씁니다")
     r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
                  usage_logs=a.usage_logs, usage_only=a.usage_only, print_layers=a.print_layers,
-                 usage_variants=a.usage_variants, rotate_pages=a.rotate_pages, blank_backs=a.blank_backs)
+                 usage_variants=a.usage_variants, rotate_pages=a.rotate_pages, blank_backs=a.blank_backs,
+                 rescans=a.rescans)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")

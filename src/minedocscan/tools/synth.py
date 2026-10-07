@@ -168,6 +168,34 @@ def scan_effect(img: np.ndarray, rng, strength: float = 1.0, trace: list | None 
     return out
 
 
+# 다시 스캔한 쪽 (tasks/0007 단계 3): 첫날의 몇 번째로 더한 쪽을 (어떻게) — 점검표, 일보 둘, 행렬
+RESCAN_PAGES = ((1, "shake"), (2, "jpeg"), (3, "rotated"), (-1, "shake"))
+RESCAN_JPEG_QUALITY = 45          # 다시 압축하는 품질 — 1절 다의 흔들기(JPEG 45–80)에서 가장 거친 것
+
+
+def _write_rescans(scans: Path, clean: list, labels: dict, rng, strength: float) -> list[dict]:
+    """첫날의 깨끗한 쪽 몇 장을 다른 흔들기로 다시 찍어 scan_<날짜>_rescan.pdf 로 (라벨은 원래 쪽의 것을 그대로 붙인다).
+    돌려주는 값: [{"page", "of", "how", "template"}]."""
+    if not clean:
+        return []
+    stem = clean[0][2].split("#")[0] + "_rescan"            # 원래 묶음 바로 뒤 (문서의 순서 — "." < "_")
+    pages, out = [], []
+    for idx, how in RESCAN_PAGES:
+        img, template, source, _extra = clean[idx - 1 if idx > 0 else idx]
+        scanned = scan_effect(img, rng, strength)
+        if how == "jpeg":
+            ok, buf = cv2.imencode(".jpg", scanned, [cv2.IMWRITE_JPEG_QUALITY, RESCAN_JPEG_QUALITY])
+            scanned = cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
+        elif how == "rotated":
+            scanned = rotate_scan(scanned, 90)
+        pages.append(scanned)
+        out.append({"page": len(pages), "of": source, "how": how, "template": template})
+        if source in labels:
+            labels[f"{stem}#{len(pages)}"] = dict(labels[source])
+    _write_pdf(scans / f"{stem}.pdf", pages)
+    return out
+
+
 def jpeg_roundtrip(img: np.ndarray) -> np.ndarray:
     """_write_pdf 가 쪽을 담는 JPEG(품질 85)를 거친 그림."""
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -839,7 +867,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
              strength: float = 1.0, matrix_revision: bool = False, low_cells: bool = False,
              meta_fields: bool = False, mix_pages: bool = False, usage_logs: bool = False,
              usage_only: bool = False, print_layers: bool = False, usage_variants: bool = False,
-             rotate_pages: bool = False, blank_backs: bool = False) -> SynthResult:
+             rotate_pages: bool = False, blank_backs: bool = False, rescans: bool = False) -> SynthResult:
     """out_dir 에 합성 사이트 팩(site/)과 스캔 문서(scans/), 정답(truth.json, answers.json)을 만든다.
 
     하루에 PDF 한 개: 점검표 1장 → 차량별 일보(일보를 낸 차량 수) → 행렬 1장.
@@ -861,6 +889,10 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     truth 의 쪽마다 rotation (파이프라인이 시계 방향으로 그만큼 돌려 세운다). blank_backs=True 면 쪽마다 빈 뒷면을 하나씩 붙인다
     (양면 스캔 — 흰 종이·티·가장자리 그림자·옅게 비친 앞면, truth 의 쪽에 template None 과 blank 종류). 둘 다 난수를 따로 쓴다 —
     앞면의 내용은 그대로이고, 기본 데이터는 바이트까지 그대로다. 쪽 번호는 뒷면만큼 밀린다 (라벨·정답의 쪽 번호도 같이).
+    rescans=True 면 첫날의 쪽 몇 장(RESCAN_PAGES — 점검표·일보 둘·행렬)을 다시 스캔한 파일 scan_<첫날>_rescan.pdf 를 더한다 (tasks/0007
+    단계 3): 같은 깨끗한 쪽을 다른 흔들기(따로 쓰는 난수)로 — 하나는 JPEG 로 한 번 더 거칠게 압축하고 하나는 90° 돌려서. 파일 이름이
+    첫 묶음보다 뒤라 문서의 순서도 뒤다. truth["rescans"] = [{"page", "of": "<원래 파일>#<쪽>", "how"}]. 난수를 따로 쓰므로 앞의
+    묶음은 바이트까지 그대로다.
     """
     if mix_pages and not meta_fields:
         raise ValueError("mix_pages 는 meta_fields 와 같이 쓴다")
@@ -894,6 +926,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
             synth_usage.assign_variants(usage_plan, np.random.default_rng([seed, 5005, 2]))
     layer_pages = {} if print_layers else None
     rng_i = np.random.default_rng([seed, 7007]) if (rotate_pages or blank_backs) else None   # 접수의 쪽 — 따로
+    clean_first: list = []                                                  # rescans: 첫날의 깨끗한 쪽 (원래 쪽 번호와 함께)
     for d in range(days):
         day = (d0 + timedelta(days=d)).isoformat()
         v2 = bool(revision_from) and day >= revision_from
@@ -903,7 +936,9 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         stem = f"scan_{day}"
         pages, page_info = [], []
 
-        def add(img, template, _pages=pages, _info=page_info, _rng=rng, _trace=None, **extra):
+        def add(img, template, _pages=pages, _info=page_info, _rng=rng, _trace=None, _d=d, _stem=stem, **extra):
+            if rescans and _d == 0:
+                clean_first.append((img, template, f"{_stem}#{len(_pages) + 1}", dict(extra)))
             scanned = scan_effect(img, _rng, strength, _trace)
             if rotate_pages:
                 extra["rotation"] = int(rng_i.choice([0, 90, 180, 270]))
@@ -962,6 +997,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         documents[stem] = page_info
         day_truths.append(dt)
 
+    rescan_truth = _write_rescans(scans, clean_first, labels, np.random.default_rng([seed, 8008]), strength) if rescans else None
     (site / "labels" / "pages.json").write_text(json.dumps(labels, ensure_ascii=False, indent=1), encoding="utf-8")
     insp = [r for dt in day_truths for r in dt["inspection"]]
     pages_by_form: dict[str, int] = {}
@@ -998,6 +1034,8 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     if blank_backs:
         truth["blank_backs"] = True
         truth["expected"]["blank"] = sum(p["template"] is None for info in documents.values() for p in info)
+    if rescans:
+        truth["rescans"] = rescan_truth
     if print_layers:
         truth["print_layers"] = _write_print_layers(site, layer_pages)
     truth_path, answers_path = root / "truth.json", root / "answers.json"

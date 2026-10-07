@@ -319,6 +319,27 @@ class Template:
         return self._roles.get(cell.region) in BLOB_ROLES
 
     @property
+    def signature_mask(self) -> np.ndarray:
+        """다시 스캔한 쪽의 서명(imaging/signature.py)에서 지우는 자리 (tasks/0007 4.6): 인쇄(인쇄 층이 있으면 그 마스크, 없으면
+        기준 이미지를 인쇄 층으로 본 마스크)와 표 밖 필드(fields — 날짜 줄·차량번호·작성자)의 칸. 표 밖 필드는 같은 날의 쪽마다 같은
+        글자(그날의 날짜, 비슷한 차량번호)를 같은 자리에 쓴다 — 합성 글씨는 사람마다 획이 같아 그 칸들이 서명 질량의 58–66 % 였고
+        같은 날의 다른 종이가 0.81 까지 올라갔다 (기준 0.80, 다시 찍은 쪽 최소 0.9986). 표 안의 손글씨로만 견준다. 한 번만 계산한다."""
+        if "sig_mask" not in self._print:
+            base = self.print_mask if self.print_path is not None else printlayer.mask(self.reference)
+            m = base.copy()
+            h, w = m.shape
+            for f in self.spec.get("fields") or []:
+                x0, y0, x1, y1 = (int(v) for v in f["bbox"])
+                m[max(0, y0):min(h, y1), max(0, x0):min(w, x1)] = True
+            self._print["sig_mask"] = m
+        return self._print["sig_mask"]
+
+    @property
+    def sig_family(self) -> str:
+        """다시 스캔을 견주는 묶음: family 가 있으면 그것, 없으면 템플릿 이름 (4.6)."""
+        return self.family or self.name
+
+    @property
     def uses_print_layer(self) -> bool:
         """이 템플릿의 쪽을 인쇄 층으로 재는가: print_image 가 있고 role_value_cell 인 칸이 하나라도 있다. 아니면 파이프라인은
         인쇄 층을 읽지도 않는다 (doc_page.print_sha 도 NULL) — 역할이 없는 표뿐인 양식(운반·점검표)에 print_image 를 적어도

@@ -111,12 +111,17 @@ def format_intake(it: dict) -> list[str]:
         lines.append("돌아서 들어와 세운 쪽: " + ", ".join(f"{k}° {v}" for k, v in it["rotated"].items()) + " (pages --rotated)")
     if it.get("blank"):
         lines.append(f"빈 쪽 {it['blank']} (pages --status blank)")
+    if it.get("duplicates"):
+        d = it["duplicates"]
+        lines.append(f"다시 스캔 의심 쪽 {d['pages']} — 유사도 최소 {d['sim']['min']:.3f}, 중앙 {d['sim']['median']:.3f}, "
+                     f"최대 {d['sim']['max']:.3f} (pages --status duplicate)")
     return lines
 
 
 def intake_summary(con: sqlite3.Connection) -> dict:
     """접수의 수 (tasks/0007): needs_date(날짜를 정할 문서), waiting(다시 처리 대기 문서), discarded(버린 문서·쪽),
-    date_source(날짜의 출처별 문서 수 — 파일명 말고 다른 출처가 있을 때만), rotated(방향별 쪽 수 — 0 이 아닌 것), blank(빈 쪽).
+    date_source(날짜의 출처별 문서 수 — 파일명 말고 다른 출처가 있을 때만), rotated(방향별 쪽 수 — 0 이 아닌 것), blank(빈 쪽),
+    duplicates(다시 스캔 의심 쪽의 수와 유사도의 최소·중앙·최대).
     0 인 항목은 빠지고, 다 0 이면 빈 사전 — 날짜 있는 이름의 바로 선 묶음이면 키가 생기지 않는다."""
     out: dict = {}
     one = lambda sql: con.execute(sql).fetchone()[0] or 0          # noqa: E731
@@ -138,6 +143,12 @@ def intake_summary(con: sqlite3.Connection) -> dict:
     blank = con.execute("SELECT COUNT(*) FROM doc_page WHERE status = 'blank'").fetchone()[0]
     if blank:
         out["blank"] = blank
+    sims = sorted(r[0] for r in con.execute("SELECT duplicate_sim FROM doc_page WHERE status = 'duplicate'") if r[0] is not None)
+    if sims:                                                     # 다시 스캔 의심 쪽 (4.6): 수와 유사도의 분포
+        n = len(sims)
+        median = sims[n // 2] if n % 2 else (sims[n // 2 - 1] + sims[n // 2]) / 2
+        out["duplicates"] = {"pages": n, "sim": {"min": round(sims[0], 4), "median": round(median, 4),
+                                                 "max": round(sims[-1], 4)}}
     return out
 
 
@@ -359,6 +370,7 @@ def list_pages(con: sqlite3.Connection, status: str | None = None, template: str
     rotated: 돌아서 들어와 세운 쪽만 (rotation 이 0 이 아닌 쪽 — tasks/0007 4.4)."""
     sql = ("SELECT d.source_name || '#' || p.page_no AS source, p.page_id, p.document_id, p.page_no, p.work_date, "
            "p.template_name, p.classify_margin, p.align_inliers, p.align_grid_err, p.status, p.error, p.rotation, "
+           "p.duplicate_of, p.duplicate_sim, "
            "d.source_path, d.source_rel"
            + (", p.variant_errs" if variants else "")
            + " FROM doc_page p JOIN doc_document d ON p.document_id = d.document_id WHERE 1=1")
@@ -392,6 +404,7 @@ def format_pages(rows: list[dict]) -> str:
         lines.append(f"{r['source']:<28} {r['work_date'] or '-':<10} {r['template_name'] or '-':<24} {m:>5} "
                      f"{str(r['align_inliers'] or '-'):>7} {g:>5} {r['status']:<16} {r['error'] or ''}"
                      + (f"  방향 {r['rotation']}°" if r.get("rotation") else "")
+                     + (f"  다시 스캔 의심: {r['duplicate_of']} 와 {r['duplicate_sim']:.3f}" if r.get("duplicate_of") else "")
                      + ("" if "variant_errs" not in r else "  판마다 괘선 오차: " + ", ".join(
                          f"{k} {'-' if v is None else v}" for k, v in sorted(r["variant_errs"].items()))))
     return "\n".join(lines)

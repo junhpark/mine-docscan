@@ -275,10 +275,10 @@ def test_request_during_processing_survives_and_review_keeps_status(world):
     decide(pipe, [{"target": a, "kind": "restore"}])             # 버린 적은 없다 — 다시 처리만 요청한다
     out = pipe.process_document(a)
     assert out["status"] == "ok" and seen == ["received", "received"]
-    assert pipe.pending_documents() == [a]                        # 도중에 온 요청이 남았다
+    assert pipe.pending_documents()[0] == a                       # 도중에 온 요청이 남았다 (뒤 문서 e — a 의 다시 스캔 — 도 대기)
     from minedocscan.report import build_report
 
-    assert build_report(pipe.con)["intake"]["waiting"] == 1
+    assert build_report(pipe.con)["intake"]["waiting"] == len(pipe.pending_documents())
     assert pipe.con.execute("SELECT status FROM doc_page WHERE page_id = ?", (f"{a}-p2",)).fetchone()[0] == "loaded"
     pipe.process_pending()
     assert pipe.pending_documents() == []
@@ -348,7 +348,7 @@ def test_pages_are_committed_one_by_one(world):
     pipe, b = world["pipe"], world["ids"]["b_2030-01-07"]
     other = open_db(world["st"].resolved_db_url)
     seen = []
-    pipe.on_page = lambda doc, n: seen.append((n, other.execute(
+    pipe.on_page = lambda doc, n: doc == b and seen.append((n, other.execute(
         "SELECT COUNT(*) FROM doc_page WHERE document_id = ?", (doc,)).fetchone()[0], other.execute(
         "SELECT COUNT(*) FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id WHERE p.document_id = ?",
         (doc,)).fetchone()[0] > 0))
@@ -374,7 +374,7 @@ def test_read_failure_leaves_no_rows_and_interruption_resumes(world, monkeypatch
 
     monkeypatch.setattr(runner, "load_pages", broken)
     decide(pipe, [{"target": c, "kind": "restore"}])
-    assert pipe.process_pending() == 1
+    assert pipe.process_pending() == 2                             # c, 그리고 같은 날·계열에 붙잡힌 쪽이 있는 뒤 문서 e (4.6 ①)
     row = con.execute("SELECT * FROM doc_document WHERE document_id = ?", (c,)).fetchone()
     assert row["status"] == "failed" and "읽다 끊겼습니다" in row["error"] and row["work_done"] == row["work_requested"]
     assert con.execute("SELECT COUNT(*) FROM doc_page WHERE document_id = ?", (c,)).fetchone()[0] == 0
@@ -396,7 +396,7 @@ def test_read_failure_leaves_no_rows_and_interruption_resumes(world, monkeypatch
     assert con.execute("SELECT COUNT(*) FROM doc_page WHERE document_id = ?", (c,)).fetchone()[0] == 1   # 만들다 만 것
     again = Pipeline(world["st"], site=world["site"])             # 다음 실행 (새 프로세스처럼)
     assert again.pending_documents() == [c]
-    assert again.process_pending() == 1
+    assert again.process_pending() == 2
     no_null_dates(again.con)
     assert_same(dump(again.con), dump(fresh_of(world["st"], world["site"], world["scans"], root, "w_fresh").con), "끊긴 뒤")
 
@@ -480,7 +480,7 @@ def test_slot_collision_and_inspection_follow_page_order_not_insert_order(world)
     pipe.process_pending()
     assert {r[0] for r in con.execute("SELECT page_id FROM insp_daily WHERE inspection_date = '2030-01-07'")} == {f"{a}-p1"}
     assert con.execute("SELECT remark FROM insp_daily WHERE inspection_id = ?", (eid[0],)).fetchone()[0] == "지는 쪽"
-    assert con.execute("SELECT COUNT(*) FROM doc_page WHERE template_name = ?", (T_INSP,)).fetchone()[0] == 1
+    assert con.execute("SELECT COUNT(*) FROM doc_page WHERE template_name = ? AND status = 'loaded'", (T_INSP,)).fetchone()[0] == 1
     assert_same(dump(con), dump(fresh_of(world["st"], world["site"], world["scans"], world["root"], "w_fresh2").con))
 
 

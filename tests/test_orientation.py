@@ -168,7 +168,7 @@ def test_rotated_pdf_and_rotated_then_shaken_pages_load_upright(orient, usage_sy
         pdf_pages.append(rotate_scan(img, TURNS[name]))
         shaken.append(scan_effect(rotate_scan(img, (TURNS[name] + 90) % 360), rng))
     _write_pdf(root / "pdf" / f"scan_{DAY}_rotated.pdf", pdf_pages)
-    _write_pdf(root / "pdf" / f"scan_{DAY}_shaken.pdf", shaken)
+    _write_pdf(root / "pdf" / "scan_2030-01-08_shaken.pdf", shaken)   # 다른 날 — 같은 날이면 같은 종이의 다시 스캔으로 붙잡힌다 (4.6)
     pipe = _run(_settings(usage_synth, root, "pdf"), root / "pdf")
     rows = pipe.con.execute("SELECT d.source_name, p.page_no, p.rotation, p.status, p.page_id FROM doc_page p "
                             "JOIN doc_document d ON p.document_id = d.document_id").fetchall()
