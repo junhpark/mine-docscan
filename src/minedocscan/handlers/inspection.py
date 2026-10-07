@@ -65,7 +65,7 @@ class InspectionHandler(FormHandler):
                 n_auto += vals["review_status"] == "auto"
                 n_pending += vals["review_status"] == "pending"
                 daily.append({"inspection_id": f"{ctx.work_date}:{eid}", "inspection_date": ctx.work_date,
-                              "equipment_id": eid, **vals, "entry_source": "scan"})
+                              "equipment_id": eid, **vals, "entry_source": "scan", "page_id": ctx.page_id})
             upsert(ctx.con, "insp_daily", daily)
         return {"fields": len(rows), "rows_auto": n_auto, "rows_pending": n_pending,
                 "marks_undecided": sum(1 for m in marks.values() if m.choice is None),

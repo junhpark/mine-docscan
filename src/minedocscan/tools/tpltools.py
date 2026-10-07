@@ -213,16 +213,18 @@ def preview(tdir: str | Path, out_dir: str | Path, scan: str | Path | None = Non
             raise TemplateError(f"인쇄 층을 읽을 수 없습니다: {tpl.spec.get('print_image')}") from e
         tint = binary(base)
     if scan is not None:
-        from ..imaging.align import align_to_template
+        from ..imaging.align import align_to_template, align_upright
         from ..imaging.io import load_pages
 
         gray = next((g for no, g in load_pages(scan, dpi) if no == page), None)
         if gray is None:
             raise ValueError(f"{scan} 에 {page} 쪽이 없습니다")
-        ar = align_to_template(gray, tpl.reference, tpl.regions, ref_features=tpl.features)
+        # 돌아간 스캔은 세워서 다시 정합한다 (tasks/0007 4.4 — 파이프라인과 같은 함수)
+        ar, rotation, _up = align_upright(
+            gray, lambda g: align_to_template(g, tpl.reference, tpl.regions, ref_features=tpl.features))
         base = ar.warped
         aligned = {"ok": bool(ar.ok), "inliers": int(ar.n_inliers), "grid_err": None if ar.grid_err_px == float("inf")
-                   else round(float(ar.grid_err_px), 2)}
+                   else round(float(ar.grid_err_px), 2), "rotation": rotation}
     img, boxes = draw(tpl, base, tint=tint)
     stem = tpl.name if scan is None else f"{tpl.name}__{Path(scan).stem}_p{page}"
     if print_layer:

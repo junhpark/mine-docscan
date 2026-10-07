@@ -21,7 +21,9 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 # 5: 쪽 메타의 출처(doc_page_meta) — docs/tasks/0004-page-fields-and-checks.md
 # 6: 값의 형식(doc_field.format), 장비 가동 일보(eq_usage_daily, prod_tally, xcheck_usage) — docs/tasks/0005-usage-logs.md
 # 7: 인쇄 층·동시 판(doc_page.print_sha, doc_page.variant_errs) — docs/tasks/0006-print-layer-and-variants.md
-SCHEMA_VERSION = 7
+# 8: 접수(doc_document.received_at·date_source·work_requested·work_done, doc_page.rotation·duplicate_of·duplicate_sim,
+#    insp_daily.page_id, doc_decision, doc_page_sig) — docs/tasks/0007-intake.md
+SCHEMA_VERSION = 8
 
 # 테이블별 기본 키 (upsert 의 충돌 대상)
 PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
@@ -39,6 +41,8 @@ PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     "eq_usage_daily": ("page_id",),
     "prod_tally": ("tally_id",),
     "xcheck_usage": ("page_id", "check_kind", "item"),
+    "doc_decision": ("decision_id",),
+    "doc_page_sig": ("page_id",),
 }
 
 
@@ -94,8 +98,9 @@ def _check_version(con: sqlite3.Connection, path: str) -> None:
             "다시 돌리면 그대로 붙습니다.")
 
 
-def upsert(con: sqlite3.Connection, table: str, rows: dict | Iterable[dict]) -> int:
-    """기본 키가 같으면 덮어쓴다. 같은 문서를 다시 돌려도 행이 늘지 않는다(멱등)."""
+def upsert(con: sqlite3.Connection, table: str, rows: dict | Iterable[dict], insert_only: tuple[str, ...] = ()) -> int:
+    """기본 키가 같으면 덮어쓴다. 같은 문서를 다시 돌려도 행이 늘지 않는다(멱등).
+    insert_only: 새 행일 때만 쓰고 있는 행에서는 덮어쓰지 않는 열 (doc_document.received_at — 다시 처리해도 받은 시각은 그대로)."""
     if isinstance(rows, dict):
         rows = [rows]
     rows = list(rows)
@@ -103,7 +108,7 @@ def upsert(con: sqlite3.Connection, table: str, rows: dict | Iterable[dict]) -> 
         return 0
     cols = list(rows[0].keys())
     keys = PRIMARY_KEYS[table]
-    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c not in keys)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c not in keys and c not in insert_only)
     sql = (f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))}) "
            f"ON CONFLICT ({', '.join(keys)}) DO " + (f"UPDATE SET {updates}" if updates else "NOTHING"))
     con.executemany(sql, [tuple(r[c] for c in cols) for r in rows])

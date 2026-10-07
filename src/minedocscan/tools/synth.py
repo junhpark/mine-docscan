@@ -176,6 +176,48 @@ def jpeg_roundtrip(img: np.ndarray) -> np.ndarray:
     return cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
 
 
+# ── 접수에서 만나는 쪽 (tasks/0007 단계 1): 돌아간 쪽, 양면 스캔의 빈 뒷면 ─────────────────────────────
+BLANK_KINDS = ("white", "specks", "shadow", "show")      # 흰 종이, 티, 가장자리 그림자, 앞면이 옅게(15 %) 비친 뒷면
+
+
+def rotate_scan(img: np.ndarray, rotation: int) -> np.ndarray:
+    """스캔한 쪽을 반시계 방향으로 rotation 만큼 돌린다 (np.rot90 — 정확히). 파이프라인은 시계 방향으로 rotation 만큼 돌려 세운다
+    (doc_page.rotation = rotation)."""
+    return np.ascontiguousarray(np.rot90(img, rotation // 90)) if rotation else img
+
+
+def blank_back(front: np.ndarray, rng, kind: str) -> np.ndarray:
+    """양면 스캔의 빈 뒷면 (앞면과 같은 크기). 종이색·잡음은 scan_effect 와 같은 범위.
+      white   흰 종이     specks  티 몇 점     shadow  한 가장자리의 그림자
+      show    앞면이 좌우로 뒤집혀 15 % 비친 것 (종이를 지나며 번진다 — 가우스 흐림 3 px)"""
+    h, w = front.shape
+    paper = float(rng.uniform(232, 250))
+    out = np.full((h, w), paper, np.float32)
+    if kind == "specks":
+        for _ in range(int(rng.integers(3, 13))):
+            cv2.circle(out, (int(rng.integers(0, w)), int(rng.integers(0, h))), int(rng.integers(1, 4)),
+                       float(rng.uniform(60, 140)), -1, cv2.LINE_AA)
+    elif kind == "shadow":
+        band = int(rng.integers(20, 61))
+        ramp = np.linspace(float(rng.uniform(110, 150)), paper, band, dtype=np.float32)
+        edge = int(rng.integers(4))
+        if edge == 0:
+            out[:, :band] = ramp[None, :]
+        elif edge == 1:
+            out[:, w - band:] = ramp[None, ::-1]
+        elif edge == 2:
+            out[:band, :] = ramp[:, None]
+        else:
+            out[h - band:, :] = ramp[::-1, None]
+    elif kind == "show":
+        seen = cv2.GaussianBlur(np.fliplr(front).astype(np.float32), (0, 0), 3.0)      # 종이를 지나며 번진다
+        out = out - 0.15 * (paper - seen).clip(0, None)
+    elif kind != "white":
+        raise ValueError(f"빈 뒷면의 종류는 {BLANK_KINDS} 중 하나: {kind!r}")
+    out = cv2.GaussianBlur(out, (3, 3), 0) + rng.normal(0, 4.0, out.shape).astype(np.float32)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 # ── 빈 양식 세 종 (이미지 + 템플릿 정의) ───────────────────────────────────
 def build_inspection() -> tuple[np.ndarray, dict]:
     img = _canvas(PORTRAIT)
@@ -796,7 +838,8 @@ class SynthResult:
 def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "2030-01-07",
              strength: float = 1.0, matrix_revision: bool = False, low_cells: bool = False,
              meta_fields: bool = False, mix_pages: bool = False, usage_logs: bool = False,
-             usage_only: bool = False, print_layers: bool = False, usage_variants: bool = False) -> SynthResult:
+             usage_only: bool = False, print_layers: bool = False, usage_variants: bool = False,
+             rotate_pages: bool = False, blank_backs: bool = False) -> SynthResult:
     """out_dir 에 합성 사이트 팩(site/)과 스캔 문서(scans/), 정답(truth.json, answers.json)을 만든다.
 
     하루에 PDF 한 개: 점검표 1장 → 차량별 일보(일보를 낸 차량 수) → 행렬 1장.
@@ -814,6 +857,10 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     usage_variants=True 면 (가동 일보와 함께) 운행일보에 같은 날 섞여 쓰이는 판 B(synth_usage_log_b — 작업 표·계기 표만 10 px 아래,
     줄 간격 +1 %)를 더한다 (tasks/0006 단계 4): 두 판에 family·concurrent: true, 날마다 운행일보 쪽에 두 판을 번갈아 (시작하는 판은
     따로 쓰는 난수로 — 쪽의 내용은 판을 섞지 않은 것과 같다). 정답·truth 의 template 은 그 쪽의 판 이름. 인쇄 층은 판마다 따로.
+    rotate_pages=True 면 스캔한 쪽마다 0·90·180·270° 중 하나로 돌려서 담는다 (B5 가로를 세로로 넣은 스캐너 — tasks/0007 단계 1).
+    truth 의 쪽마다 rotation (파이프라인이 시계 방향으로 그만큼 돌려 세운다). blank_backs=True 면 쪽마다 빈 뒷면을 하나씩 붙인다
+    (양면 스캔 — 흰 종이·티·가장자리 그림자·옅게 비친 앞면, truth 의 쪽에 template None 과 blank 종류). 둘 다 난수를 따로 쓴다 —
+    앞면의 내용은 그대로이고, 기본 데이터는 바이트까지 그대로다. 쪽 번호는 뒷면만큼 밀린다 (라벨·정답의 쪽 번호도 같이).
     """
     if mix_pages and not meta_fields:
         raise ValueError("mix_pages 는 meta_fields 와 같이 쓴다")
@@ -846,6 +893,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
             usage_blanks.update({name: b() for name, b in synth_usage.VARIANT_BUILDERS.items()})
             synth_usage.assign_variants(usage_plan, np.random.default_rng([seed, 5005, 2]))
     layer_pages = {} if print_layers else None
+    rng_i = np.random.default_rng([seed, 7007]) if (rotate_pages or blank_backs) else None   # 접수의 쪽 — 따로
     for d in range(days):
         day = (d0 + timedelta(days=d)).isoformat()
         v2 = bool(revision_from) and day >= revision_from
@@ -856,9 +904,18 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         pages, page_info = [], []
 
         def add(img, template, _pages=pages, _info=page_info, _rng=rng, _trace=None, **extra):
-            _pages.append(scan_effect(img, _rng, strength, _trace))
+            scanned = scan_effect(img, _rng, strength, _trace)
+            if rotate_pages:
+                extra["rotation"] = int(rng_i.choice([0, 90, 180, 270]))
+                scanned = rotate_scan(scanned, extra["rotation"])
+            _pages.append(scanned)
             _info.append({"page": len(_pages), "template": template, **extra})
-            return len(_pages)
+            n_front = len(_pages)
+            if blank_backs:
+                kind = str(rng_i.choice(BLANK_KINDS))
+                _pages.append(blank_back(scanned, rng_i, kind))
+                _info.append({"page": len(_pages), "template": None, "blank": kind})
+            return n_front
 
         if usage_only:
             _add_usage_pages(add, usage_plan[d], usage_blanks, rng_u, stem, day, answers, usage_truth, layer_pages)
@@ -910,12 +967,13 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     pages_by_form: dict[str, int] = {}
     for info in documents.values():
         for p in info:
-            pages_by_form[p["template"]] = pages_by_form.get(p["template"], 0) + 1
+            if p["template"] is not None:                     # 빈 뒷면은 양식이 없다 (blank_backs)
+                pages_by_form[p["template"]] = pages_by_form.get(p["template"], 0) + 1
     truth = {
         "seed": seed, "start": start, "n_days": days, "low_cells": low_cells, "documents": documents, "days": day_truths,
         "expected": {
             "documents": days,
-            "pages": sum(pages_by_form.values()),
+            "pages": sum(len(info) for info in documents.values()),
             "pages_by_form": pages_by_form,
             "inspection": {"rows": len(insp),
                            "abnormal_yes": sum(r["abnormal"] is True for r in insp),
@@ -935,6 +993,11 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         truth["usage"] = usage_truth
     if usage_variants:
         truth["usage_variants"] = True
+    if rotate_pages:
+        truth["rotate_pages"] = True
+    if blank_backs:
+        truth["blank_backs"] = True
+        truth["expected"]["blank"] = sum(p["template"] is None for info in documents.values() for p in info)
     if print_layers:
         truth["print_layers"] = _write_print_layers(site, layer_pages)
     truth_path, answers_path = root / "truth.json", root / "answers.json"

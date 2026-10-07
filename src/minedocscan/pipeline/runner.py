@@ -35,8 +35,8 @@ from ..forms.classify import FormClassifier
 from ..forms.sitepack import SitePack
 from ..handlers import PageContext, get_handler
 from ..handlers.base import apply_reviews, field_row
-from ..imaging.align import align_to_template
-from ..imaging.cells import observe_cells
+from ..imaging.align import align_to_template, align_upright
+from ..imaging.cells import observe_cells, page_ink
 from ..imaging.cropspec import PageImages, crop_cell
 from ..imaging.io import IMAGE_EXT, SUPPORTED_EXT, imwrite, load_pages
 from ..recognize import Recognizer, build_recognizer
@@ -165,6 +165,7 @@ class Pipeline:
         page = {"page_id": page_id, "document_id": document_id, "page_no": page_no, "template_name": None,
                 "classify_margin": None, "align_inliers": None, "align_grid_err": None, "align_ok": None,
                 "aligned_image": None, "homography": None, "render_dpi": None, "print_sha": None, "variant_errs": None,
+                "rotation": None, "duplicate_of": None, "duplicate_sim": None,
                 "work_date": meta.get("date"), "status": "unknown_form", "error": None}
         try:
             out = self._process_page(page, source_name, gray, template, source_path)
@@ -201,17 +202,25 @@ class Pipeline:
         page["template_name"], page["classify_margin"] = name, margin
         tpl = self.site.templates.get(name) if name else None
         if tpl is None:
+            # 빈 쪽 (tasks/0007 4.5): 양식을 못 찾은 쪽 중 어두운 화소가 거의 없는 것 — 양면 스캔의 뒷면. 양식을 찾은 쪽은 아무리
+            # 옅어도 빈 쪽이 아니다. blank 는 문서를 needs_review 로 만들지 않는다 (update_document_status)
+            if page_ink(gray) < self.settings.blank_max_ink:
+                page["status"] = "blank"
             return self._close_page(page)
         if not tpl.has_cells:
             page["status"] = "classified_only"
             return self._close_page(page)
 
-        # align — 동시 판의 묶음이면 판마다 정합해 고른다. 판이 하나뿐인 양식은 지금처럼 한 번만
+        # align — 동시 판의 묶음이면 판마다 정합해 고른다. 판이 하나뿐인 양식은 지금처럼 한 번만.
+        # 쪽이 돌아 있으면(첫 정합의 호모그래피로 읽는다) 정확히 세워 다시 정합한다 — 동시 판이면 세운 쪽으로 판을 다시 고른다 (tasks/0007 4.4).
+        # 저장하는 호모그래피는 렌더링한 원래 쪽 → 템플릿 (세우는 회전을 합성한 것), 정합 그림은 세운 쪽의 것
         if group:
-            tpl, ar, errs = self._align_variants(gray, group)
+            (ar, tpl, errs), rotation, _upright = align_upright(gray, lambda g: _variant_first(self._align_variants(g, group)))
             page["template_name"], page["variant_errs"] = tpl.name, json.dumps(errs, sort_keys=True)
         else:
-            ar = align_to_template(gray, tpl.reference, tpl.regions, ref_features=tpl.features)
+            ar, rotation, _upright = align_upright(
+                gray, lambda g: align_to_template(g, tpl.reference, tpl.regions, ref_features=tpl.features))
+        page["rotation"] = rotation
         page.update(align_inliers=ar.n_inliers, align_grid_err=_finite(ar.grid_err_px), align_ok=int(ar.ok),
                     homography=homography_json(ar.homography) if ar.n_inliers else None,
                     render_dpi=self.settings.dpi)
@@ -331,6 +340,12 @@ def _meta_field_row(ctx: PageContext, o, read) -> dict:
     return field_row(ctx, o, has_value=True, value_raw=c.value, value_final=c.value, confidence=float(c.confidence),
                      candidates=c.candidates, backend=f"meta-{reader.reader}",
                      review_status="auto" if status == "auto" else "pending")
+
+
+def _variant_first(chosen: tuple) -> tuple:
+    """_align_variants 의 (템플릿, AlignResult, 오차) → (AlignResult, 템플릿, 오차) — align_upright 는 첫 값을 정합 결과로 읽는다."""
+    tpl, ar, errs = chosen
+    return ar, tpl, errs
 
 
 VARIANT_TIE_PX = 0.5        # 동시 판의 괘선 오차가 이만큼 안이면 인라이어로 가른다 — 괘선 오차의 단위 (Pipeline._align_variants)

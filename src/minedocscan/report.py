@@ -88,7 +88,35 @@ def build_report(con: sqlite3.Connection, families: dict[str, str] | None = None
     # 사이트의 리포트(와 regress 의 기준)는 예전과 같고, 있는 사이트는 regress 에 새 항목으로 나온다 (usage 묶음 안에 두면 어긋남)
     if rep["usage"]["pages"]:
         rep["usage_dotted_suspect"] = dotted_suspect(con)
+    # 접수 (tasks/0007): 돌아서 들어와 세운 쪽, 빈 쪽 … — 그런 것이 하나라도 있을 때만 키가 생긴다. 날짜가 있고 바로 선 묶음의
+    # 리포트(와 regress 의 기준)는 예전과 같다
+    intake = intake_summary(con)
+    if intake:
+        rep["intake"] = intake
     return rep
+
+
+def format_intake(it: dict) -> list[str]:
+    """리포트의 접수 줄 (tasks/0007). 수만 — 파일명·이름은 찍지 않는다."""
+    lines = []
+    if it.get("rotated"):
+        lines.append("돌아서 들어와 세운 쪽: " + ", ".join(f"{k}° {v}" for k, v in it["rotated"].items()) + " (pages --rotated)")
+    if it.get("blank"):
+        lines.append(f"빈 쪽 {it['blank']} (pages --status blank)")
+    return lines
+
+
+def intake_summary(con: sqlite3.Connection) -> dict:
+    """접수의 수 (tasks/0007): rotated(방향별 쪽 수 — 0 이 아닌 것), blank(빈 쪽). 0 인 항목은 빠지고, 다 0 이면 빈 사전."""
+    out: dict = {}
+    rotated = {str(r[0]): r[1] for r in con.execute(
+        "SELECT rotation, COUNT(*) FROM doc_page WHERE rotation IS NOT NULL AND rotation <> 0 GROUP BY 1 ORDER BY 1")}
+    if rotated:
+        out["rotated"] = rotated
+    blank = con.execute("SELECT COUNT(*) FROM doc_page WHERE status = 'blank'").fetchone()[0]
+    if blank:
+        out["blank"] = blank
+    return out
 
 
 def dotted_suspect(con: sqlite3.Connection) -> int:
@@ -303,11 +331,13 @@ def format_meta_mismatch(rows: list[dict]) -> str:
 
 
 def list_pages(con: sqlite3.Connection, status: str | None = None, template: str | None = None,
-               low_margin: float | None = None, variants: bool = False) -> list[dict]:
-    """쪽 목록: 출처(파일명#쪽), 날짜, 양식, 분류 여유, 인라이어, 괘선 오차, 상태, 오류.
-    variants: 판마다 정합한 쪽 중 가르기 어려웠던 쪽만 (두 판의 괘선 오차 차이 < NEAR_TIE_PX — variant_errs 를 같이 낸다)."""
+               low_margin: float | None = None, variants: bool = False, rotated: bool = False) -> list[dict]:
+    """쪽 목록: 출처(파일명#쪽), 날짜, 양식, 분류 여유, 인라이어, 괘선 오차, 상태, 오류, 방향.
+    variants: 판마다 정합한 쪽 중 가르기 어려웠던 쪽만 (두 판의 괘선 오차 차이 < NEAR_TIE_PX — variant_errs 를 같이 낸다).
+    rotated: 돌아서 들어와 세운 쪽만 (rotation 이 0 이 아닌 쪽 — tasks/0007 4.4)."""
     sql = ("SELECT d.source_name || '#' || p.page_no AS source, p.page_id, p.document_id, p.page_no, p.work_date, "
-           "p.template_name, p.classify_margin, p.align_inliers, p.align_grid_err, p.status, p.error, d.source_path, d.source_rel"
+           "p.template_name, p.classify_margin, p.align_inliers, p.align_grid_err, p.status, p.error, p.rotation, "
+           "d.source_path, d.source_rel"
            + (", p.variant_errs" if variants else "")
            + " FROM doc_page p JOIN doc_document d ON p.document_id = d.document_id WHERE 1=1")
     args: list = []
@@ -322,6 +352,8 @@ def list_pages(con: sqlite3.Connection, status: str | None = None, template: str
         args.append(low_margin)
     if variants:
         sql += " AND p.variant_errs IS NOT NULL"
+    if rotated:
+        sql += " AND p.rotation IS NOT NULL AND p.rotation <> 0"
     sql += " ORDER BY p.work_date, d.source_name, p.page_no"
     rows = [dict(r) for r in con.execute(sql, args)]
     if variants:
@@ -337,6 +369,7 @@ def format_pages(rows: list[dict]) -> str:
         g = "-" if r["align_grid_err"] is None else f"{r['align_grid_err']:.1f}"
         lines.append(f"{r['source']:<28} {r['work_date'] or '-':<10} {r['template_name'] or '-':<24} {m:>5} "
                      f"{str(r['align_inliers'] or '-'):>7} {g:>5} {r['status']:<16} {r['error'] or ''}"
+                     + (f"  방향 {r['rotation']}°" if r.get("rotation") else "")
                      + ("" if "variant_errs" not in r else "  판마다 괘선 오차: " + ", ".join(
                          f"{k} {'-' if v is None else v}" for k, v in sorted(r["variant_errs"].items()))))
     return "\n".join(lines)
@@ -369,6 +402,7 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
     for group, v in (rep.get("variants") or {}).items():
         lines.append(f"동시 판 {group}: 고른 쪽 {kv(v['chosen'])}, 정합 실패 {v['align_failed']}, "
                      f"고른 쪽 중 두 판의 괘선 오차 차이가 {NEAR_TIE_PX:g} px 미만인 쪽 {v['near_tie']} (pages --variants)")
+    lines += format_intake(rep.get("intake") or {})
     f, i, h = rep["fields"], rep["inspection"], rep["haul"]
     lines += [
         f"필드 {f['total']}개 (값 있음 {f['with_value']}, 검수 대기 {f['pending']})",

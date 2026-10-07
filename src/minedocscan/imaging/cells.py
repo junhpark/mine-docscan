@@ -34,6 +34,12 @@ def clean_cell(aligned_gray: np.ndarray, bbox: tuple[int, int, int, int]) -> np.
     return cv2.morphologyEx(b, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
 
 
+def page_ink(gray: np.ndarray) -> float:
+    """쪽 전체의 어두운 화소 비율: grid.binarize → 2 × 2 열기(점 잡음) → 0 이 아닌 화소의 비율. 빈 쪽을 가린다 (tasks/0007 4.5)."""
+    b = cv2.morphologyEx(binarize(gray), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    return float(np.count_nonzero(b)) / b.size if b.size else 0.0
+
+
 def observe_cells(aligned_gray: np.ndarray, tpl: Template, print_mask: np.ndarray | None = None) -> list[CellObs]:
     """칸마다 크롭(원래 그림)과 잉크 비율. print_mask(인쇄 마스크, bool — Template.print_mask)가 있으면 쪽의 이진 그림에서 그
     화소를 0 으로 한 그림을 한 번 만들어 role 표의 형식 있는 칸(Template.role_value_cell)의 잉크를 그것으로 잰다 (tasks/0006 4.3).

@@ -583,6 +583,26 @@ def _copy(reg: dict) -> dict:
     return json.loads(json.dumps(reg))
 
 
+def test_variant_from_a_turned_clean_b_page_reads_the_turn(clean_b, tmp_path):
+    """돌아간 판 B 의 쪽(반시계 방향 90°)으로도 같은 판이 나온다: 표 밖의 특징점으로 구한 호모그래피에서 방향을 읽어 쪽을 세운 뒤
+    다시 구한다 (tasks/0007 4.4). 다시 잡은 괘선이 생성기의 판 B 와 2 px 안, 요약에 세운 각."""
+    from minedocscan.tools.synth import rotate_scan
+    from minedocscan.tools.variant import format_summary
+
+    site = tmp_path / "site"
+    shutil.copytree(clean_b["site"], site)
+    turned = tmp_path / "turned_b.png"
+    imwrite(turned, rotate_scan(cv2.imread(str(clean_b["scan"]), cv2.IMREAD_GRAYSCALE), 90))
+    r = make_variant(site / "templates" / T_USAGE, turned, 1, "usage_b_turned")
+    assert r["rotation"] == 90 and r["fix_by_hand"] == [] and "90°" in format_summary(r)
+    new = Template(site / "templates" / "usage_b_turned" / "template.yaml")
+    for reg, want in zip(new.regions, clean_b["spec"]["regions"], strict=True):
+        for axis in ("ys", "xs"):
+            got, exp = np.array(reg["grid"][axis]), np.array(want["grid"][axis])
+            assert got.shape == exp.shape and np.abs(got - exp).max() <= 2, (reg["name"], axis, got, exp)
+    assert new.reference.shape == Template(site / "templates" / T_USAGE / "template.yaml").reference.shape
+
+
 def test_variant_refuses_repo_existing_folder_and_reports_tables_it_cannot_redo(clean_b, tmp_path):
     """출력이 git 작업 트리 안이면(기준 그림은 현장 스캔) 거절, 이미 있는 폴더도 거절 — 한 줄, 아무것도 쓰지 않는다. 나눔 선이 있는 표
     (로우더 작업량)는 기존 괘선을 그대로 두고 사람이 고치도록 알린다. 짝이 없는 괘선도 같다 (_pair)."""

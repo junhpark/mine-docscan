@@ -44,6 +44,10 @@ class Settings:
     save_aligned: bool = True
     source_dpi: int = 300                # 원본 해상도 크롭을 뜰 때 PDF 를 렌더링하는 해상도 (스캔 원본이 300 dpi)
     damaged_pdf: str = "fail"            # 라이브러리가 복구해서 연 PDF: fail(문서 실패) | warn(처리하고 경고를 남김)
+    # 빈 쪽 (tasks/0007 4.5): 양식을 못 찾은 쪽 중 어두운 화소(binarize → 2×2 열기)가 이 비율 미만이면 blank. 0.02 의 근거:
+    # 실제 쪽 83장의 최소가 0.046, 합성 흰 종이·티 0.0003 이하, 가장자리 그림자 0.011 이하, 옅게 비친 뒷면(15 %) 0.001 이하.
+    # 진하게 비친 뒷면(30 % ≤ 0.028, 45 % ≤ 0.053)은 겹친다 — unknown_form 으로 남아 사람이 본다. 실제 빈 쪽 표본은 아직 없다
+    blank_max_ink: float = 0.02
     extra: dict = field(default_factory=dict)
 
     @property
@@ -99,6 +103,7 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         save_aligned=_flag(pipe, "save_aligned", True, "[pipeline] save_aligned"),
         source_dpi=_number(_table(raw, "review", path), "source_dpi", 300, int, "[review] source_dpi", lo=50, hi=1200),
         damaged_pdf=str(pipe.get("damaged_pdf", "fail")),
+        blank_max_ink=_number(pipe, "blank_max_ink", 0.02, float, "[pipeline] blank_max_ink", lo=0.0, hi=1.0),
         extra=raw,
     )
     env = os.environ

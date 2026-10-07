@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--by-month", action="store_true", help="양식 × 월: 쪽 수, 적재, 정합 실패, 괘선 오차, 분류 여유")
 
     p = sub.add_parser("pages", parents=[common], help="쪽 목록")
-    p.add_argument("--status", help="unknown_form | classified_only | align_failed | loaded | error")
+    p.add_argument("--status", help="unknown_form | blank | classified_only | align_failed | duplicate | loaded | discarded | error")
     p.add_argument("--template", help="이 양식만")
     p.add_argument("--low-margin", action="store_true", help="분류 여유가 classify_min_margin 아래인 쪽만")
     p.add_argument("--thumbs", nargs="?", const="", metavar="DIR",
@@ -75,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--variants", action="store_true",
                    help="같은 날 섞여 쓰이는 판(concurrent)마다 정합한 쪽 중 두 판의 괘선 오차 차이가 1 px 미만인 쪽 "
                         "(판마다의 오차를 같이 낸다. 두 판 모두 정합에 실패한 쪽도 상태 align_failed 로 나온다)")
+    p.add_argument("--rotated", action="store_true", help="돌아서 들어와 세운 쪽만 (방향이 0 이 아닌 쪽 — tasks/0007 4.4)")
 
     p = sub.add_parser("eval", parents=[common], help="정답과 비교")
     g = p.add_mutually_exclusive_group(required=True)
@@ -106,6 +107,9 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--page", type=int, default=1)
     t.add_argument("--handler", default="generic")
     t.add_argument("--overwrite", action="store_true")
+    t.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=0,
+                   help="돌아간 스캔이면 시계 방향으로 이만큼 돌려 세운 그림을 기준 이미지로 (tasks/0007 4.4). 없으면 들어온 방향 그대로 "
+                        "— '바로 선 것'은 기준 이미지의 방향이다")
     t = tsub.add_parser("preview", parents=[common],
                         help="칸·필드의 테두리와 이름·종류·형식·역할·행 번호를 기준 이미지(또는 정합한 스캔) 위에 그린 PNG")
     t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
@@ -161,6 +165,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--usage-variants", action="store_true",
                    help="--usage-logs/--usage-only 와 함께: 운행일보에 같은 날 섞여 쓰이는 판 B(표만 아래로 옮긴 판)를 더한다 — "
                         "두 판에 family·concurrent: true (tasks/0006)")
+    p.add_argument("--rotate-pages", action="store_true",
+                   help="스캔한 쪽마다 0·90·180·270° 중 하나로 돌려서 담는다 (B5 가로를 세로로 넣은 스캐너 — tasks/0007)")
+    p.add_argument("--blank-backs", action="store_true",
+                   help="쪽마다 빈 뒷면(흰 종이·티·가장자리 그림자·옅게 비친 앞면)을 붙인다 (양면 스캔 — tasks/0007)")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
@@ -510,7 +518,8 @@ def cmd_pages(a) -> int:
               "검수 화면: minedocscan review serve --queue meta-check")
         return 0
     rows = list_pages(con, status=a.status, template=a.template,
-                      low_margin=s.classify_min_margin if a.low_margin else None, variants=a.variants)
+                      low_margin=s.classify_min_margin if a.low_margin else None, variants=a.variants,
+                      rotated=a.rotated)
     written = []
     if a.thumbs is not None:
         from .tools.thumbs import write_thumbs
@@ -642,7 +651,7 @@ def cmd_template(a) -> int:
         al = r["aligned"]
         _emit(a, r, f"그렸습니다: {r['out']} — 테두리 {r['boxes']}개 (칸 + 필드)"
               + ("" if al is None else f"\n정합: {'통과' if al['ok'] else '실패'}, 인라이어 {al['inliers']}, "
-                 f"괘선 오차 {al['grid_err']} px")
+                 f"괘선 오차 {al['grid_err']} px" + (f", 쪽을 시계 방향으로 {al['rotation']}° 세워서" if al.get("rotation") else ""))
               + "\n저장소에 넣지 마세요 — 실제 양식의 이름·차량번호가 보입니다.")
         return 0
     if a.template_command == "variant":
@@ -683,7 +692,7 @@ def cmd_template(a) -> int:
         raise SystemExit("사이트 팩이 지정되지 않았습니다: --site 또는 MINEDOCSCAN_SITE")
     roi = _roi(a.roi) if a.roi else None
     path = init_template(a.image, a.name, Path(s.site) / "templates", roi=roi, header_rows=a.header_rows,
-                         page=a.page, dpi=s.dpi, handler=a.handler, overwrite=a.overwrite)
+                         page=a.page, dpi=s.dpi, handler=a.handler, overwrite=a.overwrite, rotate=a.rotate)
     _emit(a, {"template": str(path)}, f"템플릿 뼈대를 만들었습니다: {path}\n열 이름·kind·행 키를 채우세요 (docs/SITE_PACK.md).")
     return 0
 
@@ -709,7 +718,7 @@ def cmd_synth(a) -> int:
         raise SystemExit("--usage-variants 는 --usage-logs 또는 --usage-only 와 같이 씁니다")
     r = generate(a.out, days=a.days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
                  usage_logs=a.usage_logs, usage_only=a.usage_only, print_layers=a.print_layers,
-                 usage_variants=a.usage_variants)
+                 usage_variants=a.usage_variants, rotate_pages=a.rotate_pages, blank_backs=a.blank_backs)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")

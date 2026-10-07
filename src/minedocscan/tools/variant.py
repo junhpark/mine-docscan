@@ -33,7 +33,7 @@ import numpy as np
 import yaml
 
 from ..forms.template import Template, TemplateError
-from ..imaging.align import MIN_INLIERS, warp_to_template
+from ..imaging.align import MIN_INLIERS, orientation, rotate_upright, warp_to_template
 from ..imaging.grid import detect_grid_roi
 from ..imaging.io import imwrite, load_page
 from ..review.export import inside_git_tree
@@ -87,6 +87,10 @@ def make_variant(template_dir: str | Path, scan: str | Path, page: int, name: st
         raise VariantError(f"스캔을 읽을 수 없습니다: {str(e).splitlines()[0] if str(e) else type(e).__name__}") from e
 
     H, inliers = header_homography(gray, ref, tpl.regions)
+    rotation = orientation(H) if H is not None and inliers >= MIN_INLIERS else 0
+    if rotation:                       # 돌아간 쪽: 세워서 다시 구한다 (tasks/0007 4.4 — 파이프라인과 같은 방법, 이 명령의 호모그래피로)
+        gray = rotate_upright(gray, rotation)
+        H, inliers = header_homography(gray, ref, tpl.regions)
     if H is None or inliers < MIN_INLIERS:
         raise VariantError(f"표 영역 밖의 특징점으로 정합하지 못했습니다 (인라이어 {inliers} < {MIN_INLIERS}) — 머리·제목이 보이는 "
                            "깨끗한 쪽을 고릅니다")
@@ -114,7 +118,7 @@ def make_variant(template_dir: str | Path, scan: str | Path, page: int, name: st
     add = [] if tpl.family else [f"family: {family}"]
     if not tpl.concurrent:
         add.append("concurrent: true")
-    return {"template": tpl.name, "variant": name, "out": str(out), "inliers": inliers, "family": family,
+    return {"template": tpl.name, "variant": name, "out": str(out), "inliers": inliers, "family": family, "rotation": rotation,
             "tables": tables, "fix_by_hand": [t["region"] for t in tables if not t["redetected"]],
             "existing_needs": add, "existing": str(path)}
 
@@ -218,7 +222,8 @@ def _pair(lines: list[int], found: list[int], radius: float) -> tuple[list[int],
 
 def format_summary(r: dict) -> str:
     lines = [f"새 판을 만들었습니다: {r['out']} (판 {r['variant']}, 기존 판 {r['template']}, 계열 {r['family']})",
-             f"  기준 그림: 표 영역 밖의 특징점으로 기존 판에 맞춰 편 쪽 (인라이어 {r['inliers']})"]
+             f"  기준 그림: 표 영역 밖의 특징점으로 기존 판에 맞춰 편 쪽 (인라이어 {r['inliers']}"
+             + (f", 쪽을 시계 방향으로 {r['rotation']}° 세워서" if r.get("rotation") else "") + ")"]
     for t in r["tables"]:
         if t["redetected"]:
             lines.append(f"  {t['region']}: 괘선 {t['lines']}개를 다시 잡았습니다 (가장 많이 움직인 것 {t['max_shift']} px)")
