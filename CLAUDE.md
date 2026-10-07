@@ -28,7 +28,7 @@
 pip install -e ".[dev]"
 
 pytest                      # 합성 양식으로 전체 시험 (약 6–7분, 실데이터·torch 불필요)
-pytest -m slow              # 무거운 시험 (다시 처리의 불변식 흔들기, 합성 접수 시나리오, 돌린 쪽의 비교 — CI 의 slow 작업)
+pytest -m slow              # 무거운 시험 (다시 처리의 불변식 흔들기, 합성 접수 시나리오, 돌린 쪽의 비교, 엑셀 끝에서 끝까지, 가린 그림 — CI 의 slow 작업)
 pytest -m train             # 숫자 인식기 학습 시험 (torch 필요: pip install -e ".[train]", 몇 분)
 ruff check .
 
