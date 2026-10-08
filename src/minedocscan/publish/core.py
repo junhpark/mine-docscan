@@ -120,13 +120,40 @@ def scrub(text: str, url: str | None) -> str:
     return re.sub(r"password\s*=\s*('(?:[^'\\]|\\.)*'|\S+)", "password=***", out)
 
 
-def psycopg_connect(url: str, timeout_s: float):
-    """psycopg 연결 (autocommit 꺼짐). 드라이버가 없으면 PublishError (종료 코드 2)."""
+# 연결의 TCP keepalive (PR #15 검토): 싣는 가운데 서버의 전원이 나가거나 선이 끊기면 문장의 시간 제한(서버가 건다)은 소용이 없고,
+# 연결은 OS 의 기본값(keepalive 2시간, 다시 보내기 약 15분)까지 답을 기다린다 — 그동안 작업 스레드가 선다.
+# - 답을 기다릴 때(보낸 것은 받았다고 했다): 10초 조용하면 2초 간격으로 묻는다. 윈도우(현장 PC)는 keepalives_count 를 듣지 않고 10번
+#   물으므로 약 30초(10 + 2 × 10)에 끊는다. 리눅스는 tcp_user_timeout 을 걸면 횟수 대신 그 시간(아래)에 끊는다. 서버가 긴 문장을 도는
+#   동안은 서버의 커널이 답하므로 끊기지 않는다.
+# - 보내는 가운데(COPY): 보낸 것을 받았다고 하지 않은 채 tcp_user_timeout 이 지나면 끊는다 (리눅스만 — 윈도우는 다시 보내기의 기본값). 서버가
+#   잠금·느린 문장을 기다리는 동안은 COPY 를 읽지 않아 창이 닫혀도 끊긴다 — 그래서 이 값은 두 시간 제한 중 긴 것보다 30초 길다
+#   (`user_timeout_ms`, 기본 90초. 30초로 두었을 때 문서 크기의 COPY 가 잠금 제한 50초·느린 트리거 40초보다 먼저 30초에 끊겨 종류가
+#   OperationalError 였다 — 검토의 재현).
+# URL 에 적은 값이 있으면 그것을 쓴다.
+KEEPALIVE = {"keepalives": 1, "keepalives_idle": 10, "keepalives_interval": 2, "keepalives_count": 3}
+USER_TIMEOUT_MARGIN_S = 30
+
+
+def user_timeout_ms(settings) -> int:
+    """tcp_user_timeout (밀리초): 잠금·문장 시간 제한 중 긴 것 + 30초 — 서버의 시간 제한이 먼저 알리게 (기본 90초)."""
+    return round((max(_limits(settings)) + USER_TIMEOUT_MARGIN_S) * 1000)
+
+
+def psycopg_connect(url: str, timeout_s: float, user_timeout_ms: int | None = None):
+    """psycopg 연결 (autocommit 꺼짐, TCP keepalive, tcp_user_timeout). 드라이버가 없으면 PublishError (종료 코드 2)."""
     try:
         import psycopg
     except ImportError:
         raise PublishError("psycopg 가 없습니다 — pip install -e \".[postgres]\" (싣기는 꺼집니다)", 2, "no_driver") from None
-    return psycopg.connect(url, connect_timeout=max(1, round(timeout_s)), autocommit=False)
+    try:
+        from psycopg.conninfo import conninfo_to_dict
+
+        given = set(conninfo_to_dict(url))
+    except Exception:                                        # noqa: BLE001 — 읽지 못하는 URL 은 connect 가 알린다
+        given = set()
+    want = {**KEEPALIVE, **({"tcp_user_timeout": user_timeout_ms} if user_timeout_ms else {})}
+    extra = {k: v for k, v in want.items() if k not in given}
+    return psycopg.connect(url, connect_timeout=max(1, round(timeout_s)), autocommit=False, **extra)
 
 
 connect = psycopg_connect      # 연결은 이 이름 하나를 거친다 — 시험이 바꿔 끼운다 (부를 때 찾는다)
@@ -146,6 +173,13 @@ class Target:
 
     def cur(self):
         return self.conn.cursor()
+
+    def limit(self, lock_s: float, statement_s: float) -> None:
+        """이 트랜잭션의 잠금·문장 시간 제한 (set_config(…, true) = SET LOCAL — 트랜잭션이 끝나면 풀린다: 되돌린 뒤 다시 건다.
+        연결의 options 가 아니라 트랜잭션마다 거는 것은 URL 의 options 를 덮지 않고, 연결을 나눠 쓰는 풀러에서도 지켜지게)."""
+        with self.cur() as c:
+            c.execute("SELECT set_config('lock_timeout', %s, true), set_config('statement_timeout', %s, true)",
+                      (f"{max(1, round(lock_s * 1000))}ms", f"{max(1, round(statement_s * 1000))}ms"))
 
     def exists(self) -> bool:
         with self.cur() as c:
@@ -336,8 +370,12 @@ def open_target(settings, connect: Callable | None = None):
     """대상에 연결한다. 실패하면 PublishError(종류 connect) — 드라이버의 글은 싣지 않는다 (비밀번호가 섞일 수 있다)."""
     if not settings.publish_url:
         raise PublishError("통합 DB 가 없습니다: 환경변수 MINEDOCSCAN_PUBLISH_URL", 2, "off")
+    fn = _connect_fn(connect)
     try:
-        conn = _connect_fn(connect)(settings.publish_url, settings.publish_connect_timeout_s)
+        if fn is psycopg_connect:                             # 시험이 바꿔 끼운 연결 함수는 (URL, 초) 만 받는다
+            conn = fn(settings.publish_url, settings.publish_connect_timeout_s, user_timeout_ms(settings))
+        else:
+            conn = fn(settings.publish_url, settings.publish_connect_timeout_s)
     except PublishError:
         raise
     except Exception as e:                                  # noqa: BLE001 — 연결 실패의 종류만
@@ -346,10 +384,37 @@ def open_target(settings, connect: Callable | None = None):
     return Target(conn, settings.publish_schema)
 
 
+def _sqlstate(e: BaseException):
+    return getattr(e, "sqlstate", None) or getattr(getattr(e, "diag", None), "sqlstate", None)
+
+
 def _is_conflict(e: BaseException) -> bool:
     """키가 부딪쳤다 (더러운 범위만 실었는데 빠뜨린 범위가 그 키를 쥐고 있었다) — psycopg 의 IntegrityError (SQLSTATE 23…)."""
-    state = getattr(e, "sqlstate", None) or getattr(getattr(e, "diag", None), "sqlstate", None)
+    state = _sqlstate(e)
     return type(e).__name__ in ("IntegrityError", "UniqueViolation") or (isinstance(state, str) and state.startswith("23"))
+
+
+def _limits(settings) -> tuple[float, float]:
+    from ..config import Settings
+
+    s = settings if settings is not None else Settings()
+    return s.publish_lock_timeout_s, s.publish_statement_timeout_s
+
+
+def _failure(e: BaseException, settings) -> PublishError:
+    """대상에서 난 예외 → PublishError (종류와 수만 — 드라이버의 글은 싣지 않는다). 시간 제한은 종류를 따로 둔다 (홈·요약에 보인다)."""
+    lock_s, stmt_s = _limits(settings)
+    state, name = _sqlstate(e), type(e).__name__
+    if state == "55P03" or name == "LockNotAvailable":
+        return PublishError(f"대상의 잠금을 {lock_s:g}초 넘게 기다려 이번 싣기를 그만뒀습니다 — 다른 연결이 대상의 표를 쥐고 있습니다 "
+                            "(커밋하지 않은 DB 도구, 표를 고치는 작업 …). 대상은 싣기 전 그대로이고 다음에 다시 합니다", 2, "lock_timeout")
+    if state == "57014" or name == "QueryCanceled":
+        return PublishError(f"대상에서 문장 하나가 {stmt_s:g}초를 넘어(또는 관리자가 취소해) 이번 싣기를 그만뒀습니다 — "
+                            "대상은 싣기 전 그대로이고 다음에 다시 합니다", 2, "statement_timeout")
+    if name == "OperationalError" and not state:              # 연결한 뒤에 끊겼다 (keepalive·tcp_user_timeout, 서버가 꺼졌다 …)
+        return PublishError("싣는 가운데 대상과의 연결이 끊겼습니다 — 커밋하지 못한 것은 서버가 되돌리고, 다음에 다시 합니다", 2,
+                            "connection_lost")
+    return PublishError(f"통합 DB 에 싣지 못했습니다 ({name}) — 대상은 싣기 전 그대로입니다", 2, name)
 
 
 def run(con, settings, full: bool = True, documents: Iterable[str] = (), dates: Iterable[str] = (), check: bool = False,
@@ -361,14 +426,16 @@ def run(con, settings, full: bool = True, documents: Iterable[str] = (), dates: 
     own = target is None
     t = target or open_target(settings, connect)
     try:
+        t.limit(*_limits(settings))                          # 트랜잭션마다 (되돌리면 풀린다)
         if rebuild:
-            _drop_and_create(t)
+            _drop_and_create(t, settings)
         try:
             res = publish(con, t, full=full, documents=documents, dates=dates, check=check, fail_after=fail_after)
         except Exception as e:
             _rollback(t)
             if full or check or rebuild or not _is_conflict(e):
                 raise
+            t.limit(*_limits(settings))
             res = publish(con, t, full=True, check=False, fail_after=fail_after)
             res.fell_back = True
         if check:
@@ -381,8 +448,7 @@ def run(con, settings, full: bool = True, documents: Iterable[str] = (), dates: 
         raise
     except Exception as e:                                   # noqa: BLE001 — 드라이버의 글을 싣지 않는다
         _rollback(t)
-        raise PublishError(f"통합 DB 에 싣지 못했습니다 ({type(e).__name__}) — 대상은 싣기 전 그대로입니다", 2,
-                           type(e).__name__) from None
+        raise _failure(e, settings) from None
     finally:
         if own:
             try:
@@ -391,17 +457,20 @@ def run(con, settings, full: bool = True, documents: Iterable[str] = (), dates: 
                 pass
 
 
-def _drop_and_create(t: Target) -> None:
+def _drop_and_create(t: Target, settings=None) -> None:
     """이 프로그램이 만든 표만 지우고 다시 만든다 (CASCADE 하지 않는다 — 부른 쪽의 트랜잭션 안에서, 커밋하지 않는다).
-    뷰가 걸려 있어 지우지 못하면 PublishError (종류 depends)."""
+    뷰가 걸려 있어 지우지 못하면 PublishError (종류 depends). 표를 읽는 연결이 있으면 DROP 이 잠금을 기다린다 — lock_timeout."""
     try:
         t.drop()
         t.create()
     except Exception as e:                                   # noqa: BLE001
         _rollback(t)
-        if type(e).__name__ == "DependentObjectsStillExist" or getattr(e, "sqlstate", None) == "2BP01":
+        if type(e).__name__ == "DependentObjectsStillExist" or _sqlstate(e) == "2BP01":
             raise PublishError("대상의 표에 다른 것(뷰 등)이 걸려 있어 지우지 않았습니다 — 그것을 먼저 치우십시오", 2,
                                "depends") from None
+        f = _failure(e, settings)
+        if f.kind in ("lock_timeout", "statement_timeout", "connection_lost"):
+            raise f from None
         raise PublishError(f"다시 만들지 못했습니다 ({type(e).__name__})", 2, type(e).__name__) from None
 
 

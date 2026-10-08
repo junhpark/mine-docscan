@@ -363,10 +363,12 @@ def cmd_info(a) -> int:
 
     data["publish"] = {"target": describe_url(s.publish_url) if s.publish_url else None, "schema": s.publish_schema,
                        "enabled": s.publish_on, "sweep_minutes": s.publish_sweep_minutes,
-                       "connect_timeout_s": s.publish_connect_timeout_s, "retry_seconds": s.publish_retry_seconds}
+                       "connect_timeout_s": s.publish_connect_timeout_s, "retry_seconds": s.publish_retry_seconds,
+                       "lock_timeout_s": s.publish_lock_timeout_s, "statement_timeout_s": s.publish_statement_timeout_s}
     lines.append(f"통합 DB: {data['publish']['target']} 스키마 {s.publish_schema} ("
                  + ("켜짐" if s.publish_on else "꺼짐 — [publish] enabled = false") + f", 전체 훑기 {s.publish_sweep_minutes:g}분마다, "
-                 f"연결 {s.publish_connect_timeout_s:g}초, 다시 연결 {s.publish_retry_seconds:g}초 뒤)" if s.publish_url
+                 f"연결 {s.publish_connect_timeout_s:g}초, 잠금 {s.publish_lock_timeout_s:g}초, 문장 {s.publish_statement_timeout_s:g}초, "
+                 f"다시 연결 {s.publish_retry_seconds:g}초 뒤)" if s.publish_url
                  else "통합 DB: 없음 (환경변수 MINEDOCSCAN_PUBLISH_URL) — 싣기 꺼짐")
     site = _need_site(s) if s.site and Path(s.site).is_dir() else None
     data["recognizer"] = _describe_recognizer(s, site)

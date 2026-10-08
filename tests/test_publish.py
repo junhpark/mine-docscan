@@ -216,10 +216,17 @@ def test_publish_url_only_from_the_environment(tmp_path, monkeypatch):
     with pytest.raises(ConfigError) as e:
         load_settings(cfg)
     assert SECRET not in str(e.value)
-    cfg.write_text('[publish]\nschema = "site_a"\nretry_seconds = 10\nenabled = false\n', encoding="utf-8")
+    cfg.write_text('[publish]\nschema = "site_a"\nretry_seconds = 10\nenabled = false\nlock_timeout_s = 2\n'
+                   'statement_timeout_s = 30\n', encoding="utf-8")
     monkeypatch.setenv("MINEDOCSCAN_PUBLISH_URL", URL)
     s = load_settings(cfg)
     assert s.publish_schema == "site_a" and s.publish_retry_seconds == 10 and not s.publish_on
+    assert (s.publish_lock_timeout_s, s.publish_statement_timeout_s) == (2.0, 30.0)
+    for bad in ("lock_timeout_s = 0", "lock_timeout_s = 601", "statement_timeout_s = 0.5", "statement_timeout_s = 3601",
+                'lock_timeout_s = "five"'):
+        cfg.write_text(f"[publish]\n{bad}\n", encoding="utf-8")
+        with pytest.raises(ConfigError):
+            load_settings(cfg)
     assert SECRET not in repr(s)
     cfg.write_text('[publish]\nschema = "Bad-Name"\n', encoding="utf-8")
     with pytest.raises(ConfigError):
@@ -297,25 +304,53 @@ def test_real_driver_to_a_closed_port_keeps_the_timeout_and_the_secret():
     assert e.value.kind == "connect" and SECRET not in str(e.value)
 
 
+class FakeConn:
+    """가짜 대상 연결: 시간 제한을 거는 문장(set_config)과 commit·rollback 을 적는다. fail: 그 밖의 문장에서 낼 예외."""
+
+    def __init__(self, fail: Exception | None = None):
+        self.log, self.sql, self.fail = [], [], fail
+
+    def cursor(self):
+        conn = self
+
+        class Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, sql, args=()):
+                conn.sql.append((sql, args))
+                if "set_config" in sql:
+                    conn.log.append("limit")
+                elif conn.fail is not None:
+                    raise conn.fail
+
+            def fetchone(self):
+                return (1,)
+
+            def fetchall(self):
+                return []
+
+        return Cur()
+
+    def commit(self):
+        self.log.append("commit")
+
+    def rollback(self):
+        self.log.append("rollback")
+
+    def close(self):
+        self.log.append("close")
+
+
 def test_a_conflict_in_a_dirty_publish_falls_back_to_a_full_sweep(monkeypatch):
     """더러운 범위만 실은 것이 키 충돌로 실패하면 되돌리고 같은 자리에서 전체 훑기로 다시 한다 (서버 없이 — 가짜 대상)."""
     class IntegrityError(Exception):
         sqlstate = "23505"
 
-    class Conn:
-        def __init__(self):
-            self.log = []
-
-        def commit(self):
-            self.log.append("commit")
-
-        def rollback(self):
-            self.log.append("rollback")
-
-        def close(self):
-            self.log.append("close")
-
-    conn = Conn()
+    conn = FakeConn()
     calls = []
 
     def fake_publish(con, target, full=True, **kw):
@@ -327,7 +362,8 @@ def test_a_conflict_in_a_dirty_publish_falls_back_to_a_full_sweep(monkeypatch):
     monkeypatch.setattr(core, "publish", fake_publish)
     target = core.Target(conn, "minedocscan")
     r = core.run(None, None, full=False, documents={"d"}, dates={"2030-01-07"}, target=target)
-    assert calls == [False, True] and r.fell_back and conn.log == ["rollback", "commit"]
+    # 시간 제한은 트랜잭션마다 건다 — 되돌린 뒤의 전체 훑기에도
+    assert calls == [False, True] and r.fell_back and conn.log == ["limit", "rollback", "limit", "commit"]
     # 충돌이 아닌 실패는 되돌리고 알린다 (드라이버의 글 없이)
     def broken(con, target, full=True, **kw):
         raise RuntimeError(f"boom {SECRET}")
@@ -352,3 +388,118 @@ def test_any_failure_keeps_the_dirty_set(world, monkeypatch):
     monkeypatch.setattr(Touched, "all_dates", broken)
     r = pub.after_round(world["pipe"].con, Touched(documents={"d1"}, dates={"2030-01-07"}))
     assert r.as_dict()["error"] == "OperationalError" and "d1" in pub.held.documents and "2030-01-07" in pub.held.dates
+
+
+# ── 연결한 뒤의 시간 제한 (PR #15 검토 1번) ──────────────────────────────────────────
+class LockNotAvailable(Exception):
+    sqlstate = "55P03"
+
+
+class QueryCanceled(Exception):
+    sqlstate = "57014"
+
+
+class OperationalError(Exception):                    # 연결한 뒤에 끊겼다 (SQLSTATE 없음)
+    sqlstate = None
+
+
+def test_each_transaction_gets_the_lock_and_statement_timeouts():
+    """트랜잭션마다 SET LOCAL(set_config(…, true))로 — 설정의 초를 밀리초로. 설정이 없으면(가짜 대상) Settings 의 기본값."""
+    from minedocscan.config import Settings
+
+    conn = FakeConn()
+    core.Target(conn, "minedocscan").limit(2.5, 90)
+    assert conn.sql == [("SELECT set_config('lock_timeout', %s, true), set_config('statement_timeout', %s, true)",
+                         ("2500ms", "90000ms"))]
+    d = Settings()
+    assert (d.publish_lock_timeout_s, d.publish_statement_timeout_s) == (5.0, 60.0)
+    assert core._limits(None) == (5.0, 60.0)
+
+
+@pytest.mark.parametrize("exc, kind", [(LockNotAvailable("canceling statement due to lock timeout"), "lock_timeout"),
+                                       (QueryCanceled("canceling statement due to statement timeout"), "statement_timeout"),
+                                       (OperationalError("canceling: server closed the connection"), "connection_lost")])
+def test_timeouts_become_their_own_failure_and_roll_back(exc, kind, monkeypatch):
+    """대상이 잠금·시간 제한으로 문장을 그만두게 하면 되돌리고 PublishError(종류 lock_timeout | statement_timeout) — 글에 비밀번호·드라이버의
+    글이 없다. --rebuild 의 DROP 이 잠금을 기다린 것도 같다."""
+    from minedocscan.config import Settings
+
+    monkeypatch.setattr(core, "publish", lambda con, target, **kw: target.exists())     # 대상에 보내는 첫 문장에서
+    st = Settings(publish_url=URL, publish_lock_timeout_s=3.0)
+    conn = FakeConn(fail=exc)
+    with pytest.raises(core.PublishError) as e:
+        core.run(None, st, target=core.Target(conn, "minedocscan"))
+    assert e.value.kind == kind and conn.log[:2] == ["limit", "rollback"] and "commit" not in conn.log
+    assert SECRET not in str(e.value) and "canceling" not in str(e.value)
+    assert ("3초" in str(e.value)) == (kind == "lock_timeout")
+    conn = FakeConn(fail=exc)
+    with pytest.raises(core.PublishError) as e:
+        core.run(None, st, target=core.Target(conn, "minedocscan"), rebuild=True)
+    assert e.value.kind == kind
+
+
+def test_keepalive_goes_to_the_driver_unless_the_url_says_otherwise(monkeypatch):
+    """실제 드라이버에 넘기는 것 (가짜 psycopg 로 — 드라이버 없이): connect_timeout, autocommit 꺼짐, TCP keepalive, 그리고 tcp_user_timeout =
+    두 시간 제한 중 긴 것 + 30초 (서버의 시간 제한이 먼저 알리게 — 짧으면 멈춘 COPY 를 커널이 먼저 끊는다). URL 에 적은 값은 덮지 않는다."""
+    import types
+
+    from minedocscan.config import Settings
+
+    got = []
+    fake = types.ModuleType("psycopg")
+    fake.connect = lambda url, **kw: got.append(kw) or "conn"
+    conninfo = types.ModuleType("psycopg.conninfo")
+    conninfo.conninfo_to_dict = lambda url: {"keepalives_idle": "60"} if "keepalives_idle" in url else {}
+    fake.conninfo = conninfo
+    monkeypatch.setitem(sys.modules, "psycopg", fake)
+    monkeypatch.setitem(sys.modules, "psycopg.conninfo", conninfo)
+    assert core.psycopg_connect(URL, 4.6) == "conn"
+    assert got[0] == {"connect_timeout": 5, "autocommit": False, **core.KEEPALIVE}
+    assert core.KEEPALIVE == {"keepalives": 1, "keepalives_idle": 10, "keepalives_interval": 2, "keepalives_count": 3}
+    core.psycopg_connect(URL + "?keepalives_idle=60", 5)
+    assert "keepalives_idle" not in got[1] and got[1]["keepalives_interval"] == 2
+    core.open_target(Settings(publish_url=URL))                                       # 기본: 잠금 5, 문장 60 → 90초
+    assert got[2]["tcp_user_timeout"] == 90_000 and got[2]["keepalives"] == 1
+    core.open_target(Settings(publish_url=URL, publish_lock_timeout_s=600, publish_statement_timeout_s=20))
+    assert got[3]["tcp_user_timeout"] == 630_000
+    for lock_s, stmt_s in ((1, 1), (5, 3600), (600, 1)):
+        assert core.user_timeout_ms(Settings(publish_lock_timeout_s=lock_s, publish_statement_timeout_s=stmt_s)) \
+            >= (max(lock_s, stmt_s) + 30) * 1000
+
+
+def test_a_stuck_target_is_visible_and_the_next_round_still_works(world, monkeypatch):
+    """대상이 잠금을 기다리게 하다 그만두게 하면(가짜 연결이 LockNotAvailable): 그 바퀴는 끝나고 요약·홈에 그 종류가 보이고, 건드린 것을
+    들고 있다. 싣는 동안 작업 상태는 publishing (홈: 몇 초째), 끝나면 idle. 다음 바퀴의 처리는 그대로 된다 (retry_seconds 안이라 연결하지 않는다)."""
+    from minedocscan.intake import decisions as decs
+
+    pipe, site = world["pipe"], world["site"]
+    clock = Clock()
+    seen = []
+    worker = None
+
+    def stuck(url, timeout_s):
+        clock.t += 7                                                   # 대상이 기다리게 한 시간
+        seen.append(dict(worker.status))
+        ops_seen.append(OpsApp(pipe.con, site, st, "jp", worker=worker).home_json()["worker"])
+        return FakeConn(fail=LockNotAvailable("lock timeout"))
+
+    ops_seen: list = []
+    monkeypatch.setattr(core, "connect", stuck)
+    st = replace(world["st"], publish_url=URL, publish_retry_seconds=60.0, publish_sweep_minutes=0.0)
+    pub = AutoPublish(st, clock=clock)
+    worker = Worker(pipe, after={"publish": pub}, clock=clock)
+    out = worker.run_once()
+    assert out["publish"]["error"] == "lock_timeout" and worker.status == {"state": "idle"}
+    assert seen[0]["state"] == "publishing" and ops_seen[0] == {"state": "publishing", "elapsed_s": 7}
+    line = format_round(out)
+    assert "통합 DB: 싣지 못함 (lock_timeout" in line and SECRET not in line
+    assert pub.status["last_error"] == "lock_timeout" and pub.last_sweep is None
+    assert out["publish"]["behind"] == pub.status["behind"] == 1                # 건드린 것이 없어도 밀린 전체 훑기 하나
+    doc = world["ids"]["d_2030-01-08"]
+    decs.save(pipe.con, st.decisions_path(site.root), [{"target": doc, "kind": "discard"}], "jp")
+    clock.t += 55                                                      # 실패한 때부터 55초 (시작한 때부터는 62초)
+    out = worker.run_once()
+    assert out["processed"] == 1 and "publish" not in out and len(seen) == 1     # 처리는 되고, 다시 연결하지 않는다
+    assert worker.status == {"state": "idle"} and pub.status["behind"] >= 1      # 기다리는 동안에도 밀린 것이 보인다
+    clock.t += 6                                                       # 실패한 때부터 61초 — 다시 한다
+    assert worker.run_once()["publish"]["error"] == "lock_timeout" and len(seen) == 2

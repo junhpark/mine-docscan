@@ -301,3 +301,129 @@ def test_reprocess_fuzz_with_dirty_publishing(world, pg, seed):
     assert not [r[0] for r in con.execute("SELECT document_id FROM doc_document WHERE status = 'failed'")]
     assert remote(pg, f'SELECT COUNT(*) FROM "{pg.publish_schema}".doc_document WHERE document_id = ANY(%s)', (failed,)) == [(0,)]
     print(f"seed {seed}: 전체 훑기로 넘어간 횟수 {auto.fell_back}")
+
+
+# ── 연결한 뒤의 시간 제한 (PR #15 검토 1번) ──────────────────────────────────────────
+class Clock:
+    def __init__(self):
+        self.t = 5000.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_a_lock_on_the_target_ends_the_round_and_the_work_goes_on(world, pg):
+    """다른 연결이 대상의 행을 쥐고 있으면(DB 도구의 커밋하지 않은 UPDATE) 그 문서를 갈아 끼우는 싣기는 lock_timeout_s 에 그만두고
+    (대상은 그 전 그대로, 건드린 것은 들고 있다), 바퀴가 끝나 다음 바퀴의 처리는 그대로 된다. 놓으면 retry_seconds 뒤에 따라잡는다.
+    싣는 동안 작업 상태는 publishing 이다 (홈이 "쉬는 중"이라고 하지 않는다)."""
+    import threading
+    import time
+
+    psycopg = pytest.importorskip("psycopg")
+    from minedocscan.intake.worker import Worker
+
+    pipe, site, ids = world["pipe"], world["site"], world["ids"]
+    con = pipe.con
+    st = replace(pg, publish_lock_timeout_s=1.0, publish_retry_seconds=60.0, publish_sweep_minutes=0.0)
+    clock = Clock()
+    auto = AutoPublish(st, clock=clock)
+    worker = Worker(pipe, after={"publish": auto})
+    assert worker.run_once()["publish"]["full"]                              # 시작할 때의 전체 훑기
+    fid, doc = con.execute("SELECT h.source_field_id, p.document_id FROM prod_haul h JOIN doc_page p ON h.page_id = p.page_id "
+                           "WHERE h.source_role = 'log' AND h.review_status = 'pending' ORDER BY h.haul_id LIMIT 1").fetchone()
+    holder = psycopg.connect(PG)                                              # autocommit 꺼짐 — 커밋하지 않는다
+    try:
+        holder.execute(f'UPDATE "{st.publish_schema}".doc_document SET status = status WHERE document_id = %s', (doc,))
+        state = f'SELECT kind, key, fingerprint FROM "{st.publish_schema}".pub_state ORDER BY 1, 2'
+        before = remote(st, state)
+        t = Touched()
+        save(con, site, world["st"], review_from_field(con, fid, "value", "8", "jp"), touched=t)
+        auto.mark(t)                                                          # 화면의 검수 저장처럼
+        seen = []
+        real = core.run
+
+        def watching(*a, **kw):
+            seen.append(dict(worker.status))
+            return real(*a, **kw)
+
+        core.run = watching
+        out: dict = {}
+        try:                                                                  # 시간 제한이 빠지면 멈춘다 — 실패로 끝나게 스레드에서
+            th = threading.Thread(target=lambda: out.update(worker.run_once()), daemon=True)
+            t0 = time.monotonic()
+            th.start()
+            th.join(30)
+            took = time.monotonic() - t0
+            if th.is_alive():
+                holder.rollback()
+                th.join(30)
+                pytest.fail(f"잠금을 쥔 동안 바퀴가 30초 안에 끝나지 않았다 (작업 상태 {seen})")
+        finally:
+            core.run = real
+        assert out["publish"]["error"] == "lock_timeout" and took < 20, (out, took)
+        assert seen and seen[0]["state"] == "publishing" and worker.status == {"state": "idle"}
+        assert auto.status["last_error"] == "lock_timeout" and auto.status["behind"] >= 1 and doc in auto.held.documents
+        assert remote(st, state) == before                                      # 대상은 싣기 전 그대로
+        # 잠금을 쥔 채로도 다음 바퀴는 처리한다 (retry_seconds 안이라 싣기는 연결하지 않는다)
+        decs.save(con, world["st"].decisions_path(site.root), [{"target": ids["u3_2030-01-09"], "kind": "discard"}], "jp")
+        t0 = time.monotonic()
+        out = worker.run_once()
+        assert out["processed"] == 1 and "publish" not in out and time.monotonic() - t0 < 20
+    finally:
+        holder.rollback()
+        holder.close()
+    clock.t += 61                                                             # 놓은 뒤 retry_seconds 가 지나면 따라잡는다
+    out = worker.run_once()
+    assert not out["publish"].get("error") and auto.status["last_error"] is None and not auto.held
+    assert_same(con, st)
+
+
+def test_a_slow_statement_is_cut_at_statement_timeout(world, pg):
+    """대상의 문장 하나가 statement_timeout_s 를 넘으면(여기서는 지우기에 거는 3초짜리 트리거 — 2단계가 표에 무언가를 걸었다) 그 싣기를
+    그만두고 종류 statement_timeout, 대상은 그 전 그대로. 트리거를 치우면 다음 싣기가 따라잡는다. 실제 드라이버에 keepalive 와 시간 제한이 간다."""
+    import time
+
+    psycopg = pytest.importorskip("psycopg")
+    pipe, site = world["pipe"], world["site"]
+    con = pipe.con
+    st = replace(pg, publish_statement_timeout_s=1.0, publish_sweep_minutes=0.0)
+    auto = AutoPublish(st)
+    assert auto.after_round(con, Touched()).full
+    t = core.open_target(st)                                                  # 실제 드라이버에 간 것
+    try:
+        params = {i.keyword.decode(): (i.val or b"").decode() for i in t.conn.pgconn.info}
+        assert {k: params[k] for k in core.KEEPALIVE} == {k: str(v) for k, v in core.KEEPALIVE.items()}
+        assert params["tcp_user_timeout"] == str((5 + 30) * 1000)            # 두 시간 제한 중 긴 것(잠금 5초) + 30초
+        t.limit(st.publish_lock_timeout_s, st.publish_statement_timeout_s)
+        with t.cur() as c:
+            c.execute("SHOW lock_timeout")
+            lock = c.fetchone()[0]
+            c.execute("SHOW statement_timeout")
+            assert (lock, c.fetchone()[0]) == ("5s", "1s")
+        t.conn.commit()                                                       # 되돌리기는 세션 SET 도 되돌린다 — 커밋한 뒤에 본다
+        with t.cur() as c:
+            c.execute("SHOW statement_timeout")
+            assert c.fetchone()[0] != "1s"                                    # SET LOCAL — 트랜잭션이 끝나면 풀린다
+        t.conn.rollback()
+    finally:
+        t.conn.close()
+    sch = st.publish_schema
+    with psycopg.connect(PG, autocommit=True) as c:
+        c.execute(f'CREATE FUNCTION "{sch}".slow() RETURNS trigger LANGUAGE plpgsql AS '
+                  "$$ BEGIN PERFORM pg_sleep(3); RETURN OLD; END $$")
+        c.execute(f'CREATE TRIGGER slow BEFORE DELETE ON "{sch}".doc_document FOR EACH ROW EXECUTE FUNCTION "{sch}".slow()')
+    fid = con.execute("SELECT source_field_id FROM prod_haul WHERE source_role = 'log' AND review_status = 'pending' "
+                      "ORDER BY haul_id LIMIT 1").fetchone()[0]
+    touched = Touched()
+    save(con, site, world["st"], review_from_field(con, fid, "value", "8", "jp"), touched=touched)
+    state = f'SELECT kind, key, fingerprint FROM "{sch}".pub_state ORDER BY 1, 2'
+    before = remote(st, state)
+    t0 = time.monotonic()
+    r = auto.after_round(con, touched)
+    assert r.kind == "statement_timeout" and time.monotonic() - t0 < 3, (r, time.monotonic() - t0)
+    assert remote(st, state) == before and auto.status["last_error"] == "statement_timeout"
+    with psycopg.connect(PG, autocommit=True) as c:
+        c.execute(f'DROP TRIGGER slow ON "{sch}".doc_document')
+    r = auto.after_round(con, Touched())                                      # 들고 있던 것을 싣는다 (retry_seconds = 0)
+    assert r.replaced["document"] == 1 and auto.status["last_error"] is None
+    assert_same(con, st)

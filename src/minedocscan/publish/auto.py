@@ -73,22 +73,23 @@ class AutoPublish:
             return None
         t = Touched().add(self.held).add(touched).add(self.box.take())
         now = self.clock()
+        full = t.everything or self.last_sweep is None or (self.sweep_s > 0 and now - self.last_sweep >= self.sweep_s)
         if self.last_fail is not None and now - self.last_fail < self.retry_s:
             self.held = t                              # 연결하지 않는다 — 다음에
-            self.status = dict(self.status, behind=_count(t))
+            self.status = dict(self.status, behind=_count(t, full))
             return None
-        full = t.everything or self.last_sweep is None or (self.sweep_s > 0 and now - self.last_sweep >= self.sweep_s)
         if not full and not t:
             return None
         try:
             res = core.run(con, self.settings, full=full, documents=t.documents | t.removed, dates=t.all_dates(con),
                            connect=self.connect)
         except Exception as e:                                # noqa: BLE001 — 무엇이 실패하든 건드린 것을 들고 있다가 다음에
-            self.held, self.last_fail = t, now
+            # 다시 하는 간격은 실패한 때부터 (시작한 때부터 재면 잠금·문장을 기다린 만큼 간격이 준다)
+            self.held, self.last_fail = t, self.clock()
             kind = e.kind if isinstance(e, core.PublishError) else ("orphans" if isinstance(e, Orphans) else type(e).__name__)
-            self.status = dict(self.status, behind=_count(t) or 1, last_error=kind)
+            self.status = dict(self.status, behind=_count(t, full) or 1, last_error=kind)
             msg = str(e) if isinstance(e, core.PublishError | Orphans) else f"싣지 못했습니다 ({type(e).__name__})"
-            return Failed(kind, msg, _count(t))
+            return Failed(kind, msg, _count(t, full) or 1)
         self.held, self.last_fail = Touched(), None
         if full:
             self.last_sweep = now
@@ -99,6 +100,7 @@ class AutoPublish:
         return res
 
 
-def _count(t: Touched) -> int:
-    """밀린 범위의 수 (문서 + 날짜 — 장비로 넓히기 전)."""
-    return len(t.documents | t.removed) + len(t.dates) + (1 if t.everything else 0)
+def _count(t: Touched, full: bool = False) -> int:
+    """밀린 범위의 수 (문서 + 날짜 — 장비로 넓히기 전). 해야 할 전체 훑기(시작할 때·sweep_minutes 마다)가 밀렸으면 그것도 하나로 센다 —
+    건드린 것 없이 전체 훑기가 막혔을 때 "밀린 범위 0" 이라고 하지 않게."""
+    return len(t.documents | t.removed) + len(t.dates) + (1 if t.everything or full else 0)

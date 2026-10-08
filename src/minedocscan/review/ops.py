@@ -80,7 +80,9 @@ class OpsApp:
             "FROM doc_page p WHERE p.status = 'duplicate' ORDER BY p.work_date, p.page_id")]
         bad = dict(con.execute("SELECT status, COUNT(*) FROM doc_page WHERE status IN ('unknown_form', 'align_failed', 'error') "
                                "GROUP BY 1").fetchall())
-        status = (self.worker.status if self.worker is not None else {"state": "off"})
+        status = dict(self.worker.status if self.worker is not None else {"state": "off"})
+        if "started" in status:                                 # 바퀴 끝의 일: 몇 초째 (시계는 작업의 것 — 화면에 보내지 않는다)
+            status["elapsed_s"] = max(0, round(self.worker.clock() - status.pop("started")))
         return {"site": self.site.name, "reviewer": self.reviewer, "watching": self.watching,
                 "worker": dict(status), "worker_error": getattr(self.worker, "last_error", None),
                 "todo": {"needs_date": [_doc_brief(d) for d in needs_date], "duplicates": dups,

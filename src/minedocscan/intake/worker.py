@@ -3,23 +3,27 @@
 
 `watch --once` 는 한 바퀴, `watch` 와 `serve` 의 작업 스레드는 바퀴를 되풀이한다 (run_forever — 멈춤 신호와 깨우기 신호로 기다린다,
 시험은 잠들지 않는다). 처리 밖에서 난 예외도 그 문서를 failed 로 남기고 다음으로 간다 — 작업은 죽지 않는다.
-상태(status)는 화면이 읽는다: 통째로 바꿔 끼우는 사전 {"state": idle | processing, "document_id", "page_no", "n_pages"}.
+상태(status)는 화면이 읽는다: 통째로 바꿔 끼우는 사전 {"state": idle | processing, "document_id", "page_no", "n_pages"} —
+바퀴 끝의 일을 하는 동안은 {"state": exporting | publishing, "started": 시계} (오래 걸리거나 멈추면 홈에 몇 초째인지 보인다).
 요약과 로그에는 수와 문서 ID 만 — 파일명·이름은 doc list 와 화면에서 본다.
 """
 from __future__ import annotations
 
 import threading
+import time
+from collections.abc import Callable
 
 from ..touched import Touched
 
 KEYS = ("needs_date", "failed", "unreachable", "duplicates")
+AFTER_STATES = {"excel": "exporting", "publish": "publishing"}   # 바퀴 끝의 일 → 작업 상태
 
 
 class Worker:
-    def __init__(self, pipe, inbox=None, after: dict | None = None):
+    def __init__(self, pipe, inbox=None, after: dict | None = None, clock: Callable[[], float] = time.monotonic):
         """after: {이름: 바퀴 끝의 일} — after_round(연결, Touched) → 결과(as_dict 가 있는 것) | None. 예외는 그 일만 건너뛴다
-        (이름_error 에 예외의 종류) — 접수·처리는 계속된다."""
-        self.pipe, self.inbox = pipe, inbox
+        (이름_error 에 예외의 종류) — 접수·처리는 계속된다. clock: 상태의 started (화면이 몇 초째인지 센다)."""
+        self.pipe, self.inbox, self.clock = pipe, inbox, clock
         self.after = dict(after or {})
         self.status: dict = {"state": "idle"}
         self.rounds = 0
@@ -68,6 +72,7 @@ class Worker:
             out["duplicates"] = n_dup
         touched, self.pipe.touched = self.pipe.touched, Touched()
         for name, job in self.after.items():
+            self.status = {"state": AFTER_STATES.get(name, name), "started": self.clock()}
             try:
                 r = job.after_round(self.pipe.con, touched)
             except Exception as e:                             # noqa: BLE001 — 바퀴 끝의 일이 실패해도 작업은 죽지 않는다
@@ -75,6 +80,8 @@ class Worker:
                     self.pipe.con.rollback()
                 out[f"{name}_error"] = type(e).__name__
                 continue
+            finally:
+                self.status = {"state": "idle"}
             if r is not None:
                 out[name] = r.as_dict()
         self.rounds += 1

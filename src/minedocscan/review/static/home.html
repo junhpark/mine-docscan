@@ -94,6 +94,9 @@
     const w = h.worker || {};
     const err = h.worker_error ? ' · 지난 바퀴 오류 ' + h.worker_error : '';
     if (w.state === 'processing') return '작업: 처리 중 — 문서 ' + esc(w.document_id) + ' ' + (w.page_no || 0) + '/' + (w.n_pages || '?') + '쪽' + err;
+    // 바퀴 끝의 일 (tasks/0008 4.7·4.8): 오래 걸리면 몇 초째인지 — 그동안 접수·처리는 다음 바퀴를 기다린다
+    if (w.state === 'exporting' || w.state === 'publishing')
+      return '작업: ' + (w.state === 'exporting' ? '엑셀 쓰는 중' : '통합 DB 에 싣는 중') + ' — ' + (w.elapsed_s || 0) + '초째' + err;
     return '작업: 쉬는 중' + err;
   }
   function docLink(d) { return '<a href="/doc?id=' + encodeURIComponent(d.document_id) + '">' + esc(d.source_name) + '</a>'; }
@@ -107,7 +110,9 @@
   function publishText(p) {
     if (!p || !p.enabled) return '통합 DB: ' + ({no_driver: '꺼짐 (psycopg 없음)', disabled: '꺼짐 ([publish] enabled = false)', no_watch: '꺼짐 (--no-watch)'}[p && p.reason] || '꺼짐 (MINEDOCSCAN_PUBLISH_URL 없음)');
     let t = '통합 DB ' + esc(p.target) + '/' + esc(p.schema) + ': ' + (p.last_ok_at ? '마지막 ' + esc(p.last_ok_at) : '실은 적 없음');
-    if (p.last_error) t += ' · <span class="status-failed">싣지 못함 (' + esc(p.last_error) + ', 밀린 범위 ' + p.behind + ')</span>';
+    const WHY = {lock_timeout: '대상의 잠금을 기다리다 그만둠', statement_timeout: '대상의 시간 제한을 넘김', connect: '닿지 못함',
+                 connection_lost: '싣는 가운데 연결이 끊김'};
+    if (p.last_error) t += ' · <span class="status-failed">싣지 못함 (' + esc(WHY[p.last_error] || p.last_error) + ', 밀린 범위 ' + p.behind + ')</span>';
     if (p.skipped) t += ' · <span class="status-failed">실을 수 없는 값이 있어 건너뛴 범위 ' + p.skipped + '</span>';
     return t;
   }

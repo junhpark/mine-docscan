@@ -75,6 +75,16 @@ class Settings:
     publish_sweep_minutes: float = 30.0  # 전체 훑기의 간격 (분). 0 이면 시작할 때만
     publish_connect_timeout_s: float = 5.0
     publish_retry_seconds: float = 60.0  # 연결에 실패한 뒤 이만큼은 다시 연결하지 않는다 (꺼진 서버에 바퀴마다 매달리지 않게)
+    # 연결한 뒤의 시간 제한 (PR #15 검토): 시간 제한이 연결에만 있던 때, 다른 연결의 커밋하지 않은 UPDATE 한 행(DB 도구의 수동 커밋)이
+    # 싣기를 붙잡아 같은 작업 스레드의 접수·처리·엑셀이 60초 넘게 멈췄다 (홈은 "쉬는 중"). 넘기면 그 바퀴의 싣기만 그만두고
+    # 건드린 것을 들고 retry_seconds 뒤에 다시 한다.
+    # 잠금: 실은 표에 쓰는 것은 이 프로그램뿐이라(ADR 0021) 기다릴 잠금은 다른 사람의 긴 트랜잭션·DDL 뿐이다 — 그만큼만 (연결과 같은 5초:
+    # 대상이 잠겨 있는 동안 접수는 retry_seconds(60초)마다 5초씩 늦는다).
+    publish_lock_timeout_s: float = 5.0
+    # 문장 하나: 합성 30일치(18,487행)를 처음 실을 때 문장 670개 중 가장 긴 것이 0.02초(문서 하나의 doc_field COPY, 약 400행) —
+    # 실제 하루치 문서(필드 약 3,700개)면 그 10배쯤이고, 문서·날짜 하나의 문장은 DB 가 커져도 그 범위만 지우고 넣는다.
+    # 60초는 그보다 훨씬 넉넉하게, 그래도 작업 스레드가 1분 넘게 서지 않게 (잠금을 기다리는 시간도 여기에 든다).
+    publish_statement_timeout_s: float = 60.0
     extra: dict = field(default_factory=dict)
 
     @property
@@ -159,6 +169,9 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         publish_connect_timeout_s=_number(publish, "connect_timeout_s", 5.0, float, "[publish] connect_timeout_s", lo=1.0,
                                           hi=600.0),
         publish_retry_seconds=_number(publish, "retry_seconds", 60.0, float, "[publish] retry_seconds", lo=0.0),
+        publish_lock_timeout_s=_number(publish, "lock_timeout_s", 5.0, float, "[publish] lock_timeout_s", lo=1.0, hi=600.0),
+        publish_statement_timeout_s=_number(publish, "statement_timeout_s", 60.0, float, "[publish] statement_timeout_s",
+                                            lo=1.0, hi=3600.0),
         extra=raw,
     )
     env = os.environ
