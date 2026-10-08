@@ -181,7 +181,7 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 | `tools/thumbs.py` | 쪽 미리보기 (1/4, WORK_ROOT/thumbs — 방향을 알면 세워서, 파일 이름에 문서 ID) |
 | `tools/mktemplate.py` | 새 양식의 템플릿 뼈대(`template init`)와 표 더하기(`template add-region` → `add_region`: 인쇄 층이 있으면 그것에서 괘선, `regions` 블록 끝에 글자로 끼워 넣고 다시 읽어 확인, 아니면 되돌린다). 둘이 같은 뼈대 `region_skeleton`(`--role` 의 자리표시)을 쓴다 |
 | `export/` | 내보내기 (tasks/0008, ADR 0022 — DB 의 사본, 작업 DB 에 쓰지 않는다): `model.py`(DB → 책·시트·칸 — 순수 함수, 칸의 상태 `field_cell` 한 곳, 시트 이름, 내용의 해시), `labels.py`(한글 머리글·표시 한 곳), `business.py`(업무 시트 — 확정일 때만 값, `(잠정)`), `daily.py`·`monthly.py`(일별·월별, 운반 표 — 자리 미정·문서 없음·모름, 합계는 확정된 줄만), `xlsx.py`(모델 → xlsx, 수식이 되지 않게), `writer.py`(기록 파일 `.minedocscan-export.json`, 바뀐 것만, 원자적으로, 기록에 있는 것만 지운다, OUT 을 만들지 않는다), `auto.py`(바퀴 끝 — 더러운 날짜, 전체 훑기, 시계 주입), `masked.py`(가린 쪽 그림 — 템플릿이 아는 자리만) |
-| `publish/` | 통합 DB 로 싣기 (ADR 0021 — 대상에 쓰는 곳은 여기 하나): `ddl.py`(schema.sql → 대상의 표 — 형을 넓혀, 외래 키 없이), `scopes.py`(범위 문서·날짜·통째와 지문 — 순수 함수), `core.py`(한 트랜잭션의 갈아 끼우기, `pub_state`·`pub_meta`, `--check`·`--rebuild`, 연결 함수 `connect` — 시험이 바꿔 끼운다, URL·비밀번호를 찍지 않는다), `auto.py`(바퀴 끝 — 더러운 범위, 충돌이면 전체 훑기, `retry_seconds`). psycopg 는 여기서만 |
+| `publish/` | 통합 DB 로 싣기 (ADR 0021 — 대상에 쓰는 곳은 여기 하나): `ddl.py`(schema.sql → 대상의 표 — 형을 넓혀, 외래 키 없이), `scopes.py`(범위 문서·날짜·통째와 지문 — 순수 함수), `core.py`(한 트랜잭션의 갈아 끼우기, `pub_state`·`pub_meta`, `--check`·`--rebuild`, 연결 함수 `connect` — 시험이 바꿔 끼운다, URL·비밀번호를 찍지 않는다, 트랜잭션마다 `lock_timeout`·`statement_timeout`·연결에 TCP keepalive), `auto.py`(바퀴 끝 — 더러운 범위, 충돌이면 전체 훑기, `retry_seconds`). psycopg 는 여기서만 |
 | `touched.py` | 처리·검수가 건드린 것(날짜·문서·지운 문서·장비) — 엑셀·싣기가 다시 볼 범위. 장비는 가동 기록이 있는 모든 날짜로 넓힌다 (계기의 연속성) |
 | `cli.py` | `minedocscan` 명령 |
 
@@ -347,6 +347,9 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 - **PostgreSQL**: `schema.sql` 은 PostgreSQL 16 에서 그대로 돌지만 `REAL` 은 4바이트, `INTEGER` 는 32비트다 — 되읽으면 `classify_margin`·`ink` 가 다르다
   → 싣는 쪽은 `DOUBLE PRECISION`·`BIGINT` 로 넓힌다. 조회문은 그대로 돌지 않는다 (`?` 자리표시자·행 객체 154곳, `SUM(비교식)`, `PRAGMA`) — 그리고 0007 의
   처리 단위(쪽마다 커밋·WAL·잠금 파일·`--fresh`)는 로컬 SQLite 를 전제로 한다 → 작업 DB 는 그대로, 통합 DB 에는 싣는다 (ADR 0021).
+- **싣기는 작업 스레드에서 돈다 — 대상이 기다리게 하면 접수가 선다.** 시간 제한이 연결에만 있던 때, 다른 연결의 커밋하지 않은 `UPDATE` 한 행(DB 도구의
+  수동 커밋)이 60초 넘게 새 스캔의 접수를 멈췄고 홈은 "쉬는 중"·"밀린 범위 0"이었다 → 트랜잭션마다 `lock_timeout`·`statement_timeout`, 연결에 TCP keepalive,
+  바퀴 끝의 일 동안 작업 상태 `exporting`·`publishing` (PR #15 검토).
 - 가린 그림: 템플릿은 서명·작성자·차량번호 필드의 자리를 안다 (실제 일곱 양식 모두 표 밖 필드 3–5개). 행렬 양식 머리의 인쇄된 이름, 점검표의 인쇄된
   등록번호 열, 작업 표의 글자 칸에 쓴 이름은 필드가 아니다 → 템플릿의 `redact` 상자와 글자 칸은 기본으로 가린다. 그래도 템플릿이 모르는 자리는 남는다.
 

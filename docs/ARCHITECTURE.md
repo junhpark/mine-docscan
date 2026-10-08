@@ -873,7 +873,8 @@ ISO 날짜가 아닌 `work_date`(쪽 라벨에서 올 수 있다)는 파일로 �
 
 - **대상**: 환경변수 `MINEDOCSCAN_PUBLISH_URL`(`postgresql://사용자:비밀번호@호스트/DB`) — **환경변수로만** (설정 파일의 `[publish]` 에 `url`·`dsn`·`password`
   를 적으면 `ConfigError`). 설정 `[publish] schema`(기본 `minedocscan`, 환경변수 `MINEDOCSCAN_PUBLISH_SCHEMA` — 영문 소문자·숫자·밑줄) · `enabled`(바퀴 끝의 싣기 —
-  기본: URL 이 있으면 켜짐) · `sweep_minutes`(기본 30) · `connect_timeout_s`(기본 5) · `retry_seconds`(기본 60). `psycopg` 가 없으면 `publish` 는 한 줄 안내와 종료 코드 2,
+  기본: URL 이 있으면 켜짐) · `sweep_minutes`(기본 30) · `connect_timeout_s`(기본 5) · `lock_timeout_s`(기본 5) · `statement_timeout_s`(기본 60) ·
+  `retry_seconds`(기본 60). `psycopg` 가 없으면 `publish` 는 한 줄 안내와 종료 코드 2,
   `watch`·`serve` 는 시작할 때 한 번 알리고 싣기를 끈다.
 - **싣는 표**(`store/db.py` 의 `PUBLISH_TABLES`): `doc_document`, `doc_page`, `doc_field`, `doc_page_meta`, `eq_equipment`, `eq_assignment_obs`, `insp_daily`,
   `prod_haul`, `prod_tally`, `eq_usage_daily`, `xcheck_haul`, `xcheck_usage`. 싣지 않는 표: `doc_page_sig`(안에서만 쓴다), `doc_review`·`doc_decision`(원본은 파일),
@@ -929,6 +930,17 @@ ISO 날짜가 아닌 `work_date`(쪽 라벨에서 올 수 있다)는 파일로 �
   (그 횟수를 `fell_back` 으로 센다).
 - 실패하면(서버가 꺼졌다, 권한이 없다, 판이 다르다) 그 바퀴의 싣기만 건너뛰고 건드린 것을 들고 있다가 다음에 같이 싣는다. 실패한 뒤 `retry_seconds` 안의
   바퀴는 연결하지 않는다 (꺼진 서버에 바퀴마다 매달리지 않게). 접수·처리·엑셀은 계속된다. 시계는 주입한다.
+- **연결한 뒤의 시간 제한** (PR #15 검토): 싣기는 작업 스레드에서 돈다 — 대상이 기다리게 하면 접수·처리·엑셀이 같이 선다 (시간 제한이 연결에만
+  있던 때, 다른 연결의 커밋하지 않은 `UPDATE` 한 행이 60초 넘게 접수를 멈췄고 홈은 "쉬는 중"이었다). 그래서
+  - 트랜잭션마다 `lock_timeout`·`statement_timeout` 을 건다 (`Target.limit` — `set_config(…, true)` = `SET LOCAL`: URL 의 `options` 를 덮지 않고,
+    되돌리면 풀리므로 전체 훑기로 다시 할 때도 다시 건다). 넘기면 종류 `lock_timeout`·`statement_timeout` 의 실패 — 되돌리고 위의 실패 경로로.
+    연결한 뒤에 끊기면(SQLSTATE 없는 `OperationalError`) 종류 `connection_lost`.
+  - 연결에 TCP keepalive(10초 조용하면 2초 간격으로 묻는다 — `core.KEEPALIVE`)와 `tcp_user_timeout`(두 시간 제한 중 긴 것 + 30초, 기본 90초 —
+    `core.user_timeout_ms`)을 건다. URL 에 적은 값이 있으면 그것. 싣는 가운데 서버의 전원이 나가면 문장의 시간 제한(서버가 건다)은 소용이 없고
+    OS 의 기본값(keepalive 2시간, 다시 보내기 약 15분)까지 기다린다. 끊기까지: 윈도우(현장 PC)는 `keepalives_count` 를 듣지 않고 10번 물어 약 30초,
+    `tcp_user_timeout` 은 윈도우에서 듣지 않는다. 리눅스는 `tcp_user_timeout` 을 걸면 그 시간(90초)에 끊는다. `tcp_user_timeout` 이 시간 제한보다
+    짧으면 서버가 잠금·느린 문장 때문에 COPY 를 읽지 않는 동안 커널이 살아 있는 연결을 끊는다 (30초로 두었을 때 검토의 재현) — 그래서 그보다 길다.
+  - 바퀴 끝의 일을 하는 동안 작업 상태는 `exporting`·`publishing` 이고 홈에 몇 초째인지 보인다 (`intake/worker.py`).
 - **홈**의 `publish`: 켜짐·꺼짐과 이유(`off` URL 없음 · `disabled` `[publish] enabled = false` · `no_driver` · `no_watch`), 대상(호스트·DB)과 스키마,
   마지막 성공 시각, 밀린 범위의 수(문서 + 날짜), 마지막 실패의 종류, 마지막 싣기에서 바꾼 범위의 수(갈아 끼운 것 + 지운 것), 전체 훑기로 넘어간 횟수.
 - **비밀값**: URL 을 어디에도 그대로 찍지 않는다 — 로그·요약·오류·`info`·홈에는 `호스트(:포트)/DB` 와 스키마만 (`core.describe_url` — 비밀번호에

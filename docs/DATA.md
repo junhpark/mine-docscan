@@ -282,7 +282,8 @@ minedocscan export masked-pages OUT --date 2030-01-07 [--keep-text]     # 또는
 
 - **대상은 환경변수 `MINEDOCSCAN_PUBLISH_URL` 로만 받는다** — `minedocscan.toml` 의 `[publish]` 에 URL·비밀번호를 적으면 설정 오류다. 설정 파일에는
   `schema`(기본 `minedocscan`, 환경변수 `MINEDOCSCAN_PUBLISH_SCHEMA` — 영문 소문자·숫자·밑줄), `enabled`(URL 이 있으면 켜짐), `sweep_minutes`(30),
-  `connect_timeout_s`(5), `retry_seconds`(60). URL 은 어디에도 찍히지 않는다 — `info`·`publish`·홈에는 호스트·DB·스키마만.
+  `connect_timeout_s`(5), `lock_timeout_s`(5), `statement_timeout_s`(60), `retry_seconds`(60). URL 은 어디에도 찍히지 않는다 — `info`·`publish`·홈에는
+  호스트·DB·스키마만.
 - **전용 계정으로 그 스키마에만 쓴다** (관리자 계정을 쓰지 않는다). 관리자가 스키마를 만들어 그 계정에 소유를 주면(`CREATE SCHEMA … AUTHORIZATION
   <전용 계정>`) 그 계정에는 DB 의 `CREATE` 권한이 필요 없다 — 처음 싣기(대상에 `pub_meta` 가 없을 때)와 `--rebuild` 는 스키마가 **없을 때만**
   `CREATE SCHEMA` 를 보내고, 그 안에 표와 상태 표(`pub_state`, `pub_meta`)를 만든다. 그 뒤의 싣기는 그 스키마의 표에만 쓴다. 이 스키마의 표는 이 프로그램이 갈아 끼운다 — 2단계는 읽기만
@@ -300,6 +301,12 @@ minedocscan export masked-pages OUT --date 2030-01-07 [--keep-text]     # 또는
   싣기가 실패한 뒤(연결·권한·판 …) `retry_seconds` 동안은 다시 연결하지 않는다. 홈에는 밀린 범위의 수와 마지막 실패의 종류, 감시 요약에는
   "통합 DB: 싣지 못함 (…, 밀린 범위 N) — 다음에 다시". 서버가 돌아오면 다음 바퀴에 따라온다 (아직 한 번도 훑지 못했으면 전부 훑는다). `publish` 명령은 한 줄(호스트·DB 와
   예외의 종류)과 종료 코드 2.
+- **대상이 기다리게 하면** — 다른 연결이 실은 표의 행을 쥐고 있다(DB 도구에서 고치고 커밋하지 않았다, 2단계가 표에 인덱스·제약을 거는 중 …) — 싣기는
+  `lock_timeout_s`(5초) 뒤에 그만둔다 (`lock_timeout`). 문장 하나가 `statement_timeout_s`(60초)를 넘어도 그만둔다 (`statement_timeout`). 둘 다 위와 같이 그
+  바퀴의 싣기만 건너뛰고 `retry_seconds` 뒤에 다시 한다 — 쥔 쪽이 놓을 때까지 접수는 `retry_seconds` 마다 그만큼씩 늦는다. 싣는 가운데 서버가 꺼지면
+  TCP keepalive 로 끊는다 (`connection_lost` — 윈도우는 약 30초, 리눅스는 두 시간 제한 중 긴 것 + 30초 = 기본 90초). 싣는 동안 홈의 작업 상태는
+  "통합 DB 에 싣는 중 — N초째"다. 실은 표를 고치려면 이 프로그램을 멈추고 하거나
+  자기 표·뷰에서 한다 (실은 표에는 이 프로그램만 쓴다 — ADR 0021).
 - **한 번의 싣기는 한 트랜잭션이다** — 중간에 끊기면 대상은 싣기 전 그대로이고, 읽는 쪽은 반쯤 바뀐 문서를 보지 않는다. `psycopg` 가 없으면
   `publish` 는 한 줄과 종료 코드 2, `serve`·`watch` 는 시작할 때 한 번 알리고 싣기를 끈다.
 - 대상의 스키마 버전이나 싣기의 판이 이 프로그램과 다르면 싣지 않고 `publish --rebuild` 를 알린다. 실을 수 없는 값(NUL 문자가 든 글자 …)이 있는

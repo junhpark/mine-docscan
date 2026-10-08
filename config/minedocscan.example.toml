@@ -41,6 +41,8 @@ poll_seconds = 3             # 접수 폴더를 훑는 간격
 # enabled = true             # 없으면 URL 이 있을 때 켜진다. false 면 URL 이 있어도 watch·serve 가 싣지 않는다
 # sweep_minutes = 30         # 전체 훑기의 간격 (분). 0 이면 시작할 때만 — 그 사이에는 바뀐 문서·날짜만
 # connect_timeout_s = 5      # 연결을 기다리는 시간 (초, 1–600)
+# lock_timeout_s = 5         # 연결한 뒤 대상의 잠금을 기다리는 시간 (초, 1–600) — 넘기면 그 바퀴의 싣기만 그만둔다 (접수·처리는 계속)
+# statement_timeout_s = 60   # 대상의 문장 하나를 기다리는 시간 (초, 1–3600) — 넘기면 같다
 # retry_seconds = 60         # 싣기에 실패한 뒤(연결·판이 다름·…) 이만큼은 다시 연결하지 않는다 (꺼진 서버에 바퀴마다 매달리지 않게)
 
 [recognize]
