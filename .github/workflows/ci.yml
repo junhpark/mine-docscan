@@ -9,8 +9,5 @@ jobs:
     timeout-minutes: 10
     steps:
       - run: |
-          curl -sSfLO https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip
-          sha256sum python-3.12.10-embed-amd64.zip; md5sum python-3.12.10-embed-amd64.zip
-          curl -sSfL https://www.python.org/downloads/release/python-31210/ -o rel.html
-          grep -n -A 8 'embed-amd64.zip"' rel.html | head -30
-          curl -sSfL "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip.sigstore" -o s.json && python3 -c "import json;d=json.load(open('s.json'));print(json.dumps(d)[:400])" || true
+          curl -sSfL "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip.sigstore" -o s.json
+          python3 -c "import json,base64;d=json.load(open('s.json'));m=d['messageSignature']['messageDigest'];print(m['algorithm'], base64.b64decode(m['digest']).hex())"
