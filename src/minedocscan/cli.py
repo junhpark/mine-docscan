@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -744,6 +745,7 @@ def _round_jobs(s: Settings, site, once: bool = False) -> dict:
 def _worth_showing(out: dict) -> bool:
     x, p = out.get("excel") or {}, out.get("publish") or {}
     return bool(out.get("processed") or out.get("received") or out.get("already") or out.get("moved_failed")
+                or (out.get("too_long") and out.get("too_long_changed", True))
                 or x.get("written") or x.get("deleted") or ((x.get("failed") or x.get("failing")) and x.get("failed_changed", True))
                 or x.get("missing_dir") or out.get("excel_error")
                 or x.get("other_site")
@@ -1589,11 +1591,30 @@ COMMANDS = {"info": cmd_info, "publish": cmd_publish, "run": cmd_run, "report": 
             "recognizer": cmd_recognizer}
 
 
+def utf8_streams() -> None:
+    """표준 출력·오류를 UTF-8 로 (tasks/0009 4.4): 윈도우의 러너·작업 스케줄러·파일로 돌린 출력은 cp1252·cp949 라 한글을 찍다
+    UnicodeEncodeError 로 죽는다 — UTF-8 이 아니면 다시 연다 (errors="replace"; 콘솔은 파이썬이 이미 유니코드로 쓴다).
+    pythonw(작업 스케줄러)에서는 둘 다 None 이다 — 무엇이든 쓰는 곳이 죽지 않게 버리는 곳(os.devnull)으로 둔다
+    (serve --log-dir 은 그 전에 로그 파일을 연다)."""
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        if stream is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))  # 프로세스가 끝날 때까지
+            continue
+        enc = (getattr(stream, "encoding", None) or "").lower().replace("-", "").replace("_", "")
+        if enc != "utf8" and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):                               # 이미 닫혔다 · 다시 열 수 없는 흐름 — 그대로
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
     from .config import ConfigError
     from .forms.template import TemplateError
     from .store.db import SchemaVersionError
 
+    utf8_streams()
     args = build_parser().parse_args(argv)
     try:
         return COMMANDS[args.command](args)

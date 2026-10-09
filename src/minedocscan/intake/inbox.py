@@ -29,6 +29,8 @@ from ..imaging.io import IMAGE_EXT, SUPPORTED_EXT, count_pages, imread_gray
 from ..store.order import INTAKE_DIR, document_id
 
 TEMP_SUFFIX = ".part"                    # 복사 중인 임시 파일 — SUPPORTED_EXT 가 아니라 run 이 줍지 않는다
+PATH_MAX = 259                          # 보관 경로의 최대 글자 수: 윈도우의 MAX_PATH(260, 끝의 NUL 포함) — 긴 경로를 켜지 않은 PC 에서
+                                        # 그보다 긴 경로는 만들지도 열지도 못한다 (tasks/0009 4.4). 리눅스에서도 같은 규칙 (같은 보관 폴더)
 ALREADY, FAILED = "_already", "_failed"
 _TS = re.compile(r"^(?P<ts>\d{8}T\d{9}Z)-(?P<doc>[0-9a-f]{16})$")
 
@@ -42,12 +44,10 @@ def check_paths(inbox: Path, archive_root: Path | None, others: dict[str, Path |
     안 된다 (보관 폴더의 파일을 다시 접수하거나, 접수가 작업 폴더를 옮기게 된다). 윈도우에서는 대소문자를 가리지 않고 견준다."""
     if archive_root is None:
         raise InboxError("접수 폴더를 쓰려면 archive_root 가 있어야 합니다 (보관 폴더 — [paths] archive_root)")
-    me = _norm(inbox)
     for name, other in {"archive_root": archive_root, **others}.items():
         if other is None:
             continue
-        o = _norm(other)
-        if me == o or _inside(me, o) or _inside(o, me):
+        if within(inbox, other) or within(other, inbox):
             raise InboxError(f"접수 폴더가 {name} 와 겹칩니다 — 안이거나 그것을 품으면 안 됩니다: {inbox}")
 
 
@@ -57,6 +57,28 @@ def _norm(p: Path) -> str:
 
 def _inside(a: str, b: str) -> bool:
     return a.startswith(b.rstrip(os.sep) + os.sep)
+
+
+def _identity(p: Path) -> tuple[int, int] | None:
+    try:
+        st = os.stat(p)
+    except (OSError, ValueError):
+        return None
+    return (st.st_dev, st.st_ino) if st.st_ino else None
+
+
+def within(path: str | Path, folder: str | Path) -> bool:
+    """path 가 folder 이거나 그 안인가 (tasks/0009 4.4). 먼저 글자로 — 절대 경로·구분자·윈도우의 대소문자(normcase)를 맞춘 뒤 —, 아니면
+    파일의 정체로: path 와 그 위 폴더들 가운데 있는 것이 folder 와 같은 파일(장치·번호)인가 — 같은 폴더를 다른 이름(UNC \\서버\공유 와
+    연결한 드라이브 문자 Z:, 바로 가기)으로 적어도 잡는다. 없는 경로는 있는 위 폴더까지만 본다."""
+    a, b = _norm(path), _norm(folder)
+    if a == b or _inside(a, b):
+        return True
+    target = _identity(Path(folder))
+    if target is None:
+        return False
+    p = Path(os.path.abspath(path))
+    return any(_identity(q) == target for q in (p, *p.parents))
 
 
 # ── 받은 시각 ──────────────────────────────────────────────────────────────
@@ -117,6 +139,8 @@ class Inbox:
         self.sizes: dict[str, int] | None = {} if continuous else None
         self.first_seen: dict[str, float] = {}
         self._last_ms: int | None = None
+        # 보관할 때 쓰는 가장 긴 경로의 앞부분 (받은 시각·문서 ID 는 길이가 늘 같다 — 그 자리에 같은 길이의 글자)
+        self._longest = os.path.join(os.path.abspath(self.archive), INTAKE_DIR, "0000-00", ts_of(0) + "-" + "0" * 16, "")
 
     def files(self) -> list[Path]:
         """보는 파일 — (수정 시각, 이름) 순서."""
@@ -138,12 +162,16 @@ class Inbox:
     def round(self, pipe) -> dict:
         """한 바퀴: 다 쓰인 파일을 접수하고 등록한다. 돌려주는 값 — 수와 문서 ID 만:
         {"received": [문서 ID], "already": n, "failed": [문서 ID] (등록에서 failed), "moved_failed": n (_failed 로),
-         "waiting": n (아직 다 쓰이지 않았다), "retry": n (옮기다 실패 — 다음 바퀴에)}."""
-        out = {"received": [], "already": 0, "failed": [], "moved_failed": 0, "waiting": 0, "retry": 0}
+         "waiting": n (아직 다 쓰이지 않았다), "retry": n (옮기다 실패 — 다음 바퀴에),
+         "too_long": n (보관 경로가 PATH_MAX 를 넘는다 — 접수하지 않고 접수 폴더에 둔다)}."""
+        out = {"received": [], "already": 0, "failed": [], "moved_failed": 0, "waiting": 0, "retry": 0, "too_long": 0}
         seen = set()
         for path in self.files():
             key = str(path)
             seen.add(key)
+            if self.too_long(path.name):                               # 이름을 줄이지 않는다 — 보관한 이름이 source_name 이 되고
+                out["too_long"] += 1                                   # 날짜 규칙이 그것을 다시 읽는다. 사람이 줄이거나 옮긴다
+                continue
             try:
                 verdict = self._ready(path)
                 if verdict == "wait":
@@ -167,6 +195,10 @@ class Inbox:
             self.sizes = {k: v for k, v in self.sizes.items() if k in seen}
             self.first_seen = {k: v for k, v in self.first_seen.items() if k in seen}
         return out
+
+    def too_long(self, name: str) -> bool:
+        """그 이름의 파일을 보관하면 경로(쓰는 동안의 임시 이름까지)가 PATH_MAX 를 넘는가."""
+        return len(self._longest + name + TEMP_SUFFIX) > PATH_MAX
 
     def _age(self, path: Path, mtime: float) -> float:
         now = self.now()

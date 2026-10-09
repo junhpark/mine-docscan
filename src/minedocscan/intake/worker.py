@@ -27,6 +27,7 @@ class Worker:
         self.after = dict(after or {})
         self.status: dict = {"state": "idle"}
         self.rounds = 0
+        self.too_long = 0                                          # 보관 경로가 너무 길어 접수하지 않은 파일의 수 (지난 바퀴)
         self.last: dict | None = None
         self.last_error: str | None = None
         self._hooks = (pipe.on_document, pipe.on_page)
@@ -54,7 +55,9 @@ class Worker:
             if self.inbox is not None:
                 r = self.inbox.round(self.pipe)
                 out.update({"received": r["received"], "already": r["already"], "moved_failed": r["moved_failed"],
-                            "waiting": r["waiting"], "retry": r["retry"]})
+                            "waiting": r["waiting"], "retry": r["retry"], "too_long": r["too_long"],
+                            "too_long_changed": r["too_long"] != self.too_long})
+                self.too_long = r["too_long"]                          # 홈이 읽는다 (경로가 너무 긴 파일 — 접수 폴더에 그대로)
                 failed_at_register = r["failed"]
             else:
                 failed_at_register = []
@@ -121,6 +124,7 @@ def format_round(r: dict) -> str:
         parts.append(f"받은 문서 {len(r['received'])}건 ({', '.join(r['received'])})")
     for k, label in (("already", "이미 있는 파일(_already)"), ("moved_failed", "읽을 수 없는 파일(_failed)"),
                      ("waiting", "아직 쓰이는 중인 파일"), ("retry", "옮기지 못해 다음에 다시 할 파일"),
+                     ("too_long", "보관 경로가 너무 길어 접수하지 않은 파일 (이름을 줄이거나 보관 폴더를 짧은 경로로 — 접수 폴더에 그대로)"),
                      ("duplicates", "다시 스캔 의심 쪽")):
         if r.get(k):
             parts.append(f"{label} {r[k]}")
