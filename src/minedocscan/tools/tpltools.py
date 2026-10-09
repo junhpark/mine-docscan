@@ -31,6 +31,7 @@ COLORS = {"handwritten_number": (200, 80, 0), "handwritten_text": (40, 150, 40),
 SPLIT_COLOR = (0, 200, 255)
 REGION_COLOR = (0, 0, 220)
 PRINT_COLOR = (210, 210, 60)           # preview --print: 인쇄 층의 인쇄 화소 (청록 — 칸 종류의 색과 겹치지 않게)
+REDACT_COLOR = (20, 20, 20)            # 가릴 상자 (redact — tasks/0008 4.9): 검은 점선과 대각선
 COVERED_LIST = 10                      # check: 인쇄에 덮인 칸을 이만큼까지 이름으로, 나머지는 수로
 
 
@@ -67,6 +68,8 @@ def check_template(tdir: str | Path) -> list[str]:
     for reg in tpl.regions:
         cols = [c.get("name") for c in reg.get("columns") or []]
         out += [f"{tpl.name}/{reg.get('name')}: 열 이름 {n!r} 이 겹칩니다" for n in sorted({n for n in cols if cols.count(n) > 1}, key=str)]
+        if "display" in cols:                                # 인쇄된 칸의 값은 행에서 열 이름으로 찾는다 — 행의 display 가 그 값이 된다
+            out.append(f"{tpl.name}/{reg.get('name')}: 열 이름 'display' 는 쓸 수 없습니다 (행의 표시 이름 키와 겹친다 — tasks/0008 4.5)")
         rows = [r.get("row") for r in reg.get("rows") or []]
         out += [f"{tpl.name}/{reg.get('name')}: 행 번호 {n} 가 겹칩니다" for n in sorted({n for n in rows if rows.count(n) > 1}, key=str)]
     for f in tpl.fields:
@@ -87,6 +90,11 @@ def check_template(tdir: str | Path) -> list[str]:
         for b, bb in cells[i + 1:]:
             if min(ba[2], bb[2]) > max(ba[0], bb[0]) and min(ba[3], bb[3]) > max(ba[1], bb[1]):
                 out.append(f"칸이 겹칩니다: {a} ↔ {b}")
+    for r in tpl.redact:                                     # 가릴 상자 (tasks/0008 4.9): 쪽 안이어야 한다 (넓이는 problems 가 본다)
+        b = r.get("bbox") if isinstance(r, dict) else None
+        if size and isinstance(b, list | tuple) and len(b) == 4 and all(isinstance(v, int) for v in b) and \
+                (b[0] < 0 or b[1] < 0 or b[2] > size[0] or b[3] > size[1]):
+            out.append(f"{tpl.name}/redact/{r.get('name')}: 쪽 밖으로 나갑니다 (쪽 {size[0]}×{size[1]} px)")
     out += _print_covered(tpl)
     return out
 
@@ -271,6 +279,14 @@ def draw(tpl: Template, gray: np.ndarray, tint: np.ndarray | None = None) -> tup
         boxes += 1
         extra = ", ".join(x for x in (c.kind, c.col_meta.get("meta_key"), c.col_meta.get("format")) if x)
         _text(img, f"{c.name} ({extra})", x0 + 3, y0 + 14, color, 0.45)
+    for r in tpl.redact:                                     # 가릴 상자 (tasks/0008 4.9) — 점선 테두리와 대각선
+        x0, y0, x1, y1 = (int(v) for v in r["bbox"])
+        for a, b in (((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))):
+            _dashed(img, a, b, REDACT_COLOR, 8)
+        cv2.line(img, (x0, y0), (x1, y1), REDACT_COLOR, 1)
+        cv2.line(img, (x0, y1), (x1, y0), REDACT_COLOR, 1)
+        boxes += 1
+        _text(img, f"redact: {r['name']}", x0 + 3, y0 + 14, REDACT_COLOR, 0.45)
     _legend(img, tint is not None)
     return img, boxes
 
@@ -298,6 +314,9 @@ def _legend(img, printed: bool = False) -> None:
         y += 20
     _dashed(img, (8, y - 5), (22, y - 5), SPLIT_COLOR, 4)
     _text(img, "split (no printed rule)", 28, y, (40, 40, 40), 0.45)
+    y += 20
+    _dashed(img, (8, y - 5), (22, y - 5), REDACT_COLOR, 4)
+    _text(img, "redact (masked-pages)", 28, y, (40, 40, 40), 0.45)
     if printed:
         y += 20
         cv2.rectangle(img, (8, y - 12), (22, y + 2), PRINT_COLOR, -1)

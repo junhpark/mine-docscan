@@ -12,6 +12,7 @@ license = { text = "Proprietary" }
 dependencies = [
   "numpy>=1.26",
   "opencv-python-headless>=4.9",
+  "openpyxl>=3.1",
   "pymupdf>=1.24",
   "pyyaml>=6.0",
   "rapidfuzz>=3.6",
@@ -22,6 +23,8 @@ dev = ["pytest>=8.0", "ruff>=0.5"]
 # 숫자 인식기 학습 (recognizer train). 추론·파이프라인에는 필요 없다 — 추론은 OpenCV 의 cv2.dnn 이 ONNX 를 읽는다.
 # onnxscript 는 torch 의 새 ONNX 내보내기(dynamo)가 쓴다 — 예전 내보내기가 없어진 torch 에서의 대비
 train = ["torch>=2.2", "onnx>=1.15", "onnxscript>=0.1"]
+# 통합 DB(PostgreSQL)로 싣기 (minedocscan publish, watch·serve 의 바퀴 끝 — tasks/0008 4.8). 없어도 다른 명령은 전부 돈다
+postgres = ["psycopg[binary]>=3.1"]
 
 [project.scripts]
 minedocscan = "minedocscan.cli:main"
@@ -36,7 +39,8 @@ addopts = "-q -m 'not train and not slow'"
 markers = [
   "realdata: 실제 현장 데이터가 필요한 회귀 테스트 (MINEDOCSCAN_SITE, MINEDOCSCAN_ARCHIVE_ROOT 가 없으면 건너뜀)",
   "train: 숫자 인식기를 학습하는 테스트 (torch 필요, 몇 분 걸린다). `pytest -m train` 으로만 돈다",
-  "slow: 기본 시험 시간을 지금의 1.25배 안에 두려고 떼어 낸 무거운 시험 (tasks/0007 6절 — 다시 처리의 불변식 흔들기, 합성 접수 시나리오, 정확히 돌린 쪽의 비교, 처리 순서 흔들기, 몇 분). `pytest -m slow` 로만 돈다 — CI 의 slow 작업",
+  "postgres: 통합 DB(PostgreSQL)에 싣는 시험 (tasks/0008 4.8). MINEDOCSCAN_TEST_PG_URL 이 없으면 건너뛴다 — CI 의 postgres 작업 (`pytest -m postgres`)",
+  "slow: 기본 시험 시간을 지금의 1.25배(0007)·1.15배(0008) 안에 두려고 떼어 낸 무거운 시험 (다시 처리의 불변식 흔들기, 합성 접수 시나리오, 정확히 돌린 쪽의 비교, 처리 순서 흔들기, 접수 묶음의 엑셀·싣기 끝에서 끝까지, 가린 그림, 월 경계·표시 이름 묶음, 몇 분). `pytest -m slow` 로만 돈다 — CI 의 slow 작업",
 ]
 
 [tool.ruff]

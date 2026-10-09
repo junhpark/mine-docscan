@@ -20,6 +20,9 @@
                                               #   meter: 열 이름(또는 행 키) start·end·total, tally: 소계 칸은 열·행 메타 subtotal: true
   print_image: print.png                      # 선택. 인쇄 층 (tasks/0006 4.1) — 기준 이미지와 같은 크기의 회색조, 인쇄된 것만.
                                               #   `template print-layer` 가 만들고 이 키는 사람이 적는다. 없으면 모든 것이 지금과 같다
+  display: "…"                               # 선택. 엑셀에 보이는 이름 (tasks/0008 4.5) — 양식·표(region)·열·행·표 밖 필드 어디에나.
+                                              #   없으면 title·name(행은 key). 표시에만 쓴다 (분류·정합·핸들러·field_id·인쇄된 값에 닿지 않는다).
+                                              #   열 이름 display 는 쓰지 못한다 — 인쇄된 칸의 값은 행에서 열 이름으로 찾는다
   fields: [{name, kind, bbox, meta_key?, format?}]     # 표 밖의 자유 필드 (날짜, 작성자, 비고 …)
                                               # format: 손으로 쓰는 칸의 값의 형식 — integer | decimal | time | time_range | reading
                                               #   (forms/formats.py, tasks/0005 4.1). 숫자 칸의 기본은 integer, 글자 칸은 없음
@@ -122,6 +125,8 @@ class Template:
         self.handler_options: dict = spec.get("handler_options", {}) or {}
         self.regions: list[dict] = spec.get("regions", []) or []
         self.fields: list[dict] = spec.get("fields", []) or []
+        # 가릴 상자 (tasks/0008 4.9): 템플릿이 아는데 필드가 아닌 자리 (결재란, 인쇄된 이름·등록번호 열). 기하다 — 판마다 따로 적는다
+        self.redact: list[dict] = spec.get("redact") or []
         self.family: str | None = spec.get("family") or None
         self.concurrent: bool = spec.get("concurrent") is True     # 잘못된 값(문자열 …)은 problems() 가 오류로 잡는다
         self.valid_from: str | None = _iso_date(self.name, "valid_from", spec.get("valid_from"))
@@ -166,6 +171,7 @@ class Template:
             out.append(f"{self.name}: 같은 meta_key 를 가진 필드가 둘 이상입니다: {dup}")
         for reg in self.regions:
             out += self._region_problems(reg)
+        out += _display_problems(self.name, self.spec, (f"{self.name}/fields/{f.get('name')}" for f in self.fields), self.fields)
         if self.handler == "usage":
             for role in ("meter", "shifts"):                # 가동 기록은 쪽 하나에 한 행 — 계기·근무 시각 표는 하나씩만
                 n = sum(reg.get("role") == role for reg in self.regions)
@@ -177,6 +183,29 @@ class Template:
         elif c and not self.family:
             out.append(f"{self.name}: concurrent 는 family 가 있을 때만 씁니다 — 같은 날 섞여 쓰이는 판끼리 같은 family 를 적습니다")
         out += self.print_problems()
+        out += self._redact_problems()
+        return out
+
+    def _redact_problems(self) -> list[str]:
+        """redact: [{name, bbox: [x0, y0, x1, y1]}, …] — 이름은 겹치지 않는 글자, bbox 는 정수 넷이고 넓이가 있다
+        (쪽 안인지는 template check 가 기준 이미지의 크기로 본다)."""
+        v = self.spec.get("redact")
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            return [f"{self.name}: redact 는 상자의 목록이어야 합니다 ([{{name, bbox: [x0, y0, x1, y1]}}, …])"]
+        out, names = [], []
+        for i, r in enumerate(v, 1):
+            if not isinstance(r, dict) or not isinstance(r.get("name"), str) or not r["name"].strip():
+                out.append(f"{self.name}: redact {i}번째 상자: name(빈 문자열이 아닌 글자)과 bbox 가 있어야 합니다")
+                continue
+            names.append(r["name"])
+            b = r.get("bbox")
+            if not (isinstance(b, list | tuple) and len(b) == 4 and all(isinstance(x, int) and not isinstance(x, bool) for x in b)):
+                out.append(f"{self.name}/redact/{r['name']}: bbox 는 정수 네 개 [x0, y0, x1, y1]")
+            elif b[2] <= b[0] or b[3] <= b[1]:
+                out.append(f"{self.name}/redact/{r['name']}: 넓이가 없는 상자입니다 (x1 > x0, y1 > y0)")
+        out += [f"{self.name}: redact 의 이름 {n!r} 이 겹칩니다" for n in sorted({n for n in names if names.count(n) > 1})]
         return out
 
     def print_problems(self) -> list[str]:
@@ -232,6 +261,9 @@ class Template:
             if not isinstance(c.get("idx"), int) or not 0 <= c["idx"] < len(all_xs) - 1:
                 out.append(f"{where}: 컬럼 idx {c.get('idx')} 가 괘선 범위를 벗어납니다")
             out += _format_problems(f"{where}/{c.get('name')}", c)
+        out += _display_problems(where, reg, (f"{where}/{c.get('name')}" for c in columns), columns)
+        if not any(c.get("name") == "display" for c in columns):   # 열 이름이 display 면 행의 display 는 그 열의 인쇄된 값이다
+            out += _display_problems(None, None, (f"{where}/행 {r.get('row')}" for r in rows), rows)   # (template check 가 열 이름을 잡는다)
         hr = reg.get("header_rows", 0)
         keys = set()
         for r in rows:
@@ -255,6 +287,11 @@ class Template:
         if day is None:
             return True
         return (self.valid_from is None or self.valid_from <= day) and (self.valid_to is None or day <= self.valid_to)
+
+    @property
+    def display(self) -> str:
+        """엑셀에 보이는 양식의 이름 (tasks/0008 4.5): display, 없으면 title."""
+        return display_of(self.spec, self.title)
 
     @property
     def has_cells(self) -> bool:
@@ -385,6 +422,21 @@ class Template:
     def review_meta_fields(self) -> dict[str, str]:
         """검수값이 쪽의 메타가 되는 자유 필드 — meta_fields 에서 날짜의 부분(읽기 전용)을 뺀 것."""
         return {n: k for n, k in self.meta_fields().items() if k not in DATE_PARTS}
+
+
+def display_of(spec: dict, fallback: str) -> str:
+    """엑셀에 보이는 이름: display, 없으면 fallback (양식은 title, 표·열·필드는 name, 행은 key — tasks/0008 4.5)."""
+    v = spec.get("display")
+    return v if isinstance(v, str) and v.strip() else fallback
+
+
+def _display_problems(where: str | None, spec: dict | None, wheres, items) -> list[str]:
+    """display 는 빈 문자열이 아닌 글자 (있을 때만). where·spec: 그것 자신, wheres·items: 그 아래의 열·행·필드."""
+    out = []
+    for w, x in ([(where, spec)] if spec is not None else []) + list(zip(wheres, items, strict=False)):
+        if isinstance(x, dict) and x.get("display") is not None and not (isinstance(x["display"], str) and x["display"].strip()):
+            out.append(f"{w}: display 는 빈 문자열이 아닌 글자여야 합니다 (엑셀에 보이는 이름)")
+    return out
 
 
 def region_cells(reg: dict, inset: int = 4) -> list[Cell]:

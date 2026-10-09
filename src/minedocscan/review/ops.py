@@ -7,6 +7,8 @@
                        날짜는 한 번 되묻는다 (confirm 없이 오면 저장하지 않고 경고를 돌려준다). 저장하면 작업 스레드를 깨운다
   page_png(params)     쪽 그림 (page_id 또는 doc+page, w 로 폭) — 원본에서 그때그때 렌더링하고 방향을 알면 세운다. 몇 장만 캐시하고
                        디스크에 쓰지 않는다
+  export_xlsx(kind, params)  엑셀 내려받기 (tasks/0008 4.7): 그 날짜(달)의 모델로 그때 만든다 — 폴더 설정이 없어도 된다, 디스크에 쓰지
+                       않는다, 읽기는 한 트랜잭션. 달력에 없는 날짜 400, 쪽이 없는 날짜 404
 
 운영 대기열(pending 은 양식별 · mismatch · readings · usage-check · meta-check · page-fields)의 남은 수는 build_queue(이름) 의
 total − done (pending 은 total). 홈을 읽을 때마다 대기열을 통째로 만들지 않는다: DB 가 바뀔 때(쪽 처리·검수 저장·결정 저장 —
@@ -34,9 +36,11 @@ PNG_CACHE = 24                           # 쪽 그림 몇 장 (문서 화면의 
 
 class OpsApp:
     def __init__(self, con: sqlite3.Connection, site, settings, reviewer: str, worker=None, watching: bool = True,
-                 wake=None):
+                 wake=None, excel=None, publish=None):
         self.con, self.site, self.settings, self.reviewer = con, site, settings, reviewer
         self.worker, self.watching, self.wake = worker, watching, wake
+        self.excel = excel                       # 자동 내보내기 (export/auto.AutoExport) — 작업 스레드가 쓴다. 화면은 상태만 읽는다
+        self.publish = publish                   # 통합 DB 싣기 (publish/auto.AutoPublish) — 같은 방식
         self._counts: tuple | None = None
         self._png: OrderedDict = OrderedDict()
 
@@ -76,7 +80,9 @@ class OpsApp:
             "FROM doc_page p WHERE p.status = 'duplicate' ORDER BY p.work_date, p.page_id")]
         bad = dict(con.execute("SELECT status, COUNT(*) FROM doc_page WHERE status IN ('unknown_form', 'align_failed', 'error') "
                                "GROUP BY 1").fetchall())
-        status = (self.worker.status if self.worker is not None else {"state": "off"})
+        status = dict(self.worker.status if self.worker is not None else {"state": "off"})
+        if "started" in status:                                 # 바퀴 끝의 일: 몇 초째 (시계는 작업의 것 — 화면에 보내지 않는다)
+            status["elapsed_s"] = max(0, round(self.worker.clock() - status.pop("started")))
         return {"site": self.site.name, "reviewer": self.reviewer, "watching": self.watching,
                 "worker": dict(status), "worker_error": getattr(self.worker, "last_error", None),
                 "todo": {"needs_date": [_doc_brief(d) for d in needs_date], "duplicates": dups,
@@ -85,7 +91,14 @@ class OpsApp:
                          "failed_documents": sum(d["status"] == "failed" for d in docs),
                          "waiting": sum(d["waiting"] for d in docs), "queues": self.remaining()},
                 "recent": [_doc_brief(d) for d in recent],
+                "export": self.export_status(), "publish": self.publish_status(),
                 "templates": {t.name: t.title for t in self.site.templates.values()}}
+
+    def export_status(self) -> dict:
+        """엑셀 자동 내보내기의 상태 (수만): 켜짐·꺼짐(이유), 마지막으로 쓴 시각·파일 수, 쓰지 못한 파일 수, 폴더가 없다."""
+        if self.excel is None:
+            return {"enabled": False, "reason": "no_watch" if not self.watching else "off"}
+        return dict(self.excel.status)
 
     # ── 문서 화면 ───────────────────────────────────────────────────────────
     def doc_json(self, params: dict) -> dict:
@@ -130,6 +143,12 @@ class OpsApp:
             out = decs.save(self.con, path, body["items"], self.reviewer)
         except decs.DecisionError as e:
             raise ApiError(400, str(e)) from e
+        from ..touched import Touched
+
+        t = Touched(documents=set(out["documents"]))            # 처리가 못 하는 문서(원본에 닿지 않는다)도 엑셀의 대기 수가 바뀐다
+        for job in (self.excel, self.publish):
+            if job is not None:
+                job.mark(t)
         if self.wake is not None:
             self.wake.set()                                     # 작업 스레드를 깨운다 — 다음 바퀴를 기다리지 않게
         return {"ok": True, "saved": [{"decision_id": x.decision_id, "target": x.target, "kind": x.kind, "value": x.value}
@@ -138,13 +157,18 @@ class OpsApp:
 
     # ── 쪽 그림 ─────────────────────────────────────────────────────────────
     def page_png(self, params: dict) -> bytes:
-        """쪽 그림 (PNG). page_id 또는 doc+page. w: 폭 (100–2400, 기본 900). 방향을 알면(doc_page.rotation) 세워서 준다."""
+        """쪽 그림 (PNG). page_id 또는 doc+page. w: 폭 (100–2400, 기본 900). 방향을 알면(doc_page.rotation) 세워서 준다.
+        rot: 화면의 "돌려 보기" — 그 위에 시계 방향으로 더 돌린다 (0·90·180·270). 서버에서 돌려야 돌린 그림이 제 칸의 크기를 가진다
+        (CSS 로 돌리면 옆 칸을 덮는다 — tasks/0008 4.10)."""
         try:
             w = int(params.get("w") or 900)
+            turn = int(params.get("rot") or 0)
         except ValueError as e:
-            raise ApiError(400, "w 는 정수여야 합니다") from e
+            raise ApiError(400, "w·rot 는 정수여야 합니다") from e
         if not 100 <= w <= 2400:
             raise ApiError(400, f"w 는 100–2400: {w}")
+        if turn not in (0, 90, 180, 270):
+            raise ApiError(400, f"rot 는 0·90·180·270: {turn}")
         if params.get("page_id"):
             doc, page_no = decs.split_target(str(params["page_id"]))
         else:
@@ -162,7 +186,7 @@ class OpsApp:
         if src is None:
             raise ApiError(409, "원본에 닿지 않습니다")
         rot = self.con.execute("SELECT rotation FROM doc_page WHERE page_id = ?", (f"{doc}-p{page_no}",)).fetchone()
-        rotation = int(rot[0]) if rot is not None and rot[0] else 0
+        rotation = ((int(rot[0]) if rot is not None and rot[0] else 0) + turn) % 360
         key = (str(src), src.stat().st_mtime_ns, page_no, w, rotation)
         if key in self._png:
             self._png.move_to_end(key)
@@ -186,6 +210,49 @@ class OpsApp:
         while len(self._png) > PNG_CACHE:
             self._png.popitem(last=False)
         return png
+
+
+    def publish_status(self) -> dict:
+        """통합 DB 싣기의 상태: 켜짐·꺼짐(이유), 대상(호스트·DB·스키마 — 비밀번호 없이), 마지막 성공 시각, 밀린 범위의 수,
+        마지막 실패의 종류."""
+        if self.publish is None:
+            return {"enabled": False, "reason": "no_watch" if not self.watching else "off"}
+        return dict(self.publish.status)
+
+    # ── 엑셀 내려받기 ───────────────────────────────────────────────────────
+    def export_xlsx(self, kind: str, params: dict) -> tuple[bytes, str]:
+        """(xlsx 바이트, 파일 이름). kind: day(date=YYYY-MM-DD) | month(month=YYYY-MM). 같은 모델로 그때 만든다 (폴더·기록 파일과 무관)."""
+        import io
+
+        from .. import __version__
+        from ..export.daily import daily_book
+        from ..export.model import MODEL_VERSION, is_iso_day
+        from ..export.monthly import monthly_book
+        from ..export.writer import MONTH_RE, now_iso
+        from ..export.xlsx import write_book
+        from ..store.db import read_txn
+
+        if kind == "day":
+            key = str(params.get("date") or "")
+            if not is_iso_day(key):
+                raise ApiError(400, "date 는 달력에 있는 YYYY-MM-DD 여야 합니다")
+            with read_txn(self.con):
+                if not self.con.execute("SELECT 1 FROM doc_page WHERE work_date = ? LIMIT 1", (key,)).fetchone():
+                    raise ApiError(404, "그 날짜의 쪽이 없습니다")
+                book = daily_book(self.con, self.site, key, self.settings.machine_values)
+        else:
+            key = str(params.get("month") or "")
+            if not MONTH_RE.match(key):
+                raise ApiError(400, "month 는 YYYY-MM 이어야 합니다")
+            with read_txn(self.con):
+                days = [r[0] for r in self.con.execute("SELECT DISTINCT work_date FROM doc_page WHERE work_date LIKE ? "
+                                                       "ORDER BY work_date", (f"{key}-%",)) if is_iso_day(r[0])]
+                if not days:
+                    raise ApiError(404, "그 달의 쪽이 없습니다")
+                book = monthly_book(self.con, self.site, key, days, self.settings.machine_values)
+        buf = io.BytesIO()
+        write_book(book, buf, now_iso(), f"minedocscan {__version__} · 모델 {MODEL_VERSION}")
+        return buf.getvalue(), f"{key}.xlsx"
 
 
 def _doc_brief(d: dict) -> dict:

@@ -10,6 +10,10 @@
   MINEDOCSCAN_DB_URL        DB 주소 (기본: sqlite:///<work_root>/minedocscan.db)
   MINEDOCSCAN_REVIEWS       검수 기록 파일 (기본: <site>/reviews/reviews.jsonl — 사이트 팩 안, 추가 전용)
   MINEDOCSCAN_DAMAGED_PDF   손상 PDF(라이브러리가 복구해서 연 파일)의 처리: fail(기본) | warn
+  MINEDOCSCAN_EXCEL_DIR     엑셀 폴더 (watch·serve 가 바퀴 끝에 쓴다 — tasks/0008 4.7)
+  MINEDOCSCAN_PUBLISH_URL   통합 DB(PostgreSQL) — postgresql://사용자:비밀번호@호스트/DB. **환경변수로만** 받는다 (설정 파일에 적지
+                            않는다 — 적으면 ConfigError). 어디에도 찍지 않는다 (호스트·DB 이름만 — publish/core.describe_url)
+  MINEDOCSCAN_PUBLISH_SCHEMA 통합 DB 의 스키마 (기본 minedocscan)
 
 값이 틀리면(TOML 문법, 숫자가 아닌 숫자 값, 범위 밖, 모르는 선택지) ConfigError 하나로 무엇이 틀렸는지 한 줄로 알린다.
 명령줄(cli.main)은 그것을 트레이스백 없이 보여 주고 0 이 아닌 코드로 끝난다.
@@ -50,15 +54,43 @@ class Settings:
     # 진하게 비친 뒷면(30 % ≤ 0.028, 45 % ≤ 0.053)은 겹친다 — unknown_form 으로 남아 사람이 본다. 실제 빈 쪽 표본은 아직 없다
     blank_max_ink: float = 0.02
     # 다시 스캔한 쪽 (tasks/0007 4.6): 같은 날·같은 계열의 앞 순서 적재된 쪽과 서명(imaging/signature.py)의 코사인이 이 이상이면 붙잡는다.
-    # 실제 3일치: 같은 날 다른 종이 최대 0.66(258쌍), 흔들어 다시 정합한 같은 종이 최소 0.91(83쪽) — 그 사이. 합성(표 밖 필드를 지운
-    # 서명): 같은 날 다른 종이 최대 0.77, 다시 찍은 쪽 최소 0.998. 실제 다시 스캔을 본 뒤 다시 정한다 (8절)
+    # 실제 3일치, 지금의 서명(표 밖 필드도 지운다 — tasks/0008 1절 라): 같은 날 다른 종이 최대 0.593(286쌍), 다른 날은 0.853 까지.
+    # 같은 종이를 흔들어 다시 정합하면 중앙 0.99 지만 **2–3 % 가 0.80 아래**다 (순하게 흔들어 최소 0.700, 거칠게 최소 0.284 — 243쪽씩).
+    # 0.70 이면 실데이터에서는 갈리지만 합성(--meta-fields --mix-pages)은 같은 날 다른 종이가 0.771 까지 올라가 기본값은 0.80 그대로.
+    # 현장의 값은 실제 다시 스캔을 본 뒤 정한다 (tasks/0007 8절 4)
     dup_min_sim: float = 0.80
     # 접수 폴더 (tasks/0007 4.7): [paths] inbox, [intake] settle_seconds·give_up_seconds·poll_seconds
     inbox: Path | None = None
     settle_seconds: float = 5.0          # 수정 시각이 이만큼 앞이고 열리는 파일만 가져온다 (스캐너가 다 쓰기를 기다린다)
     give_up_seconds: float = 120.0       # 이만큼 지나도 열리지 않으면 손상 방침대로 등록한다 (읽을 수조차 없으면 _failed 로)
     poll_seconds: float = 3.0            # watch·serve 가 접수 폴더를 훑는 간격
+    # 엑셀 내보내기 (tasks/0008 4.7): [export] excel_dir (또는 MINEDOCSCAN_EXCEL_DIR) — 없으면 자동 내보내기는 꺼져 있다
+    excel_dir: Path | None = None
+    export_sweep_minutes: float = 30.0   # 전체 훑기의 간격 (분). 0 이면 시작할 때만 — 다른 프로세스가 쓴 검수와 놓친 것을 잡는다
+    machine_values: bool = False         # 업무 시트·긴 표에 "기계 값(확정 아님)" 열을 따로 둔다 (기본은 싣지 않는다 — ADR 0008)
+    # 통합 DB 로 싣기 (tasks/0008 4.8): URL 은 환경변수로만 (repr 에도 나오지 않게). enabled 가 None 이면 URL 이 있을 때 켜진다
+    publish_url: str | None = field(default=None, repr=False)
+    publish_schema: str = "minedocscan"
+    publish_enabled: bool | None = None
+    publish_sweep_minutes: float = 30.0  # 전체 훑기의 간격 (분). 0 이면 시작할 때만
+    publish_connect_timeout_s: float = 5.0
+    publish_retry_seconds: float = 60.0  # 연결에 실패한 뒤 이만큼은 다시 연결하지 않는다 (꺼진 서버에 바퀴마다 매달리지 않게)
+    # 연결한 뒤의 시간 제한 (PR #15 검토): 시간 제한이 연결에만 있던 때, 다른 연결의 커밋하지 않은 UPDATE 한 행(DB 도구의 수동 커밋)이
+    # 싣기를 붙잡아 같은 작업 스레드의 접수·처리·엑셀이 60초 넘게 멈췄다 (홈은 "쉬는 중"). 넘기면 그 바퀴의 싣기만 그만두고
+    # 건드린 것을 들고 retry_seconds 뒤에 다시 한다.
+    # 잠금: 실은 표에 쓰는 것은 이 프로그램뿐이라(ADR 0021) 기다릴 잠금은 다른 사람의 긴 트랜잭션·DDL 뿐이다 — 그만큼만 (연결과 같은 5초:
+    # 대상이 잠겨 있는 동안 접수는 retry_seconds(60초)마다 5초씩 늦는다).
+    publish_lock_timeout_s: float = 5.0
+    # 문장 하나: 합성 30일치(18,487행)를 처음 실을 때 문장 670개 중 가장 긴 것이 0.02초(문서 하나의 doc_field COPY, 약 400행) —
+    # 실제 하루치 문서(필드 약 3,700개)면 그 10배쯤이고, 문서·날짜 하나의 문장은 DB 가 커져도 그 범위만 지우고 넣는다.
+    # 60초는 그보다 훨씬 넉넉하게, 그래도 작업 스레드가 1분 넘게 서지 않게 (잠금을 기다리는 시간도 여기에 든다).
+    publish_statement_timeout_s: float = 60.0
     extra: dict = field(default_factory=dict)
+
+    @property
+    def publish_on(self) -> bool:
+        """싣기가 켜져 있나: URL 이 있고 [publish] enabled 가 false 가 아니다."""
+        return bool(self.publish_url) and self.publish_enabled is not False
 
     @property
     def aligned_dir(self) -> Path:
@@ -98,6 +130,10 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
     paths = _table(raw, "paths", path)
     pipe = _table(raw, "pipeline", path)
     intake = _table(raw, "intake", path)
+    export = _table(raw, "export", path)
+    publish = _table(raw, "publish", path)
+    if any(k in publish for k in ("url", "dsn", "password")):
+        raise ConfigError("[publish] 에 URL·비밀번호를 적지 않습니다 — 환경변수 MINEDOCSCAN_PUBLISH_URL 로만 받습니다")
     rec = _table(raw, "recognize", path)
     by_kind = rec.get("by_kind", {}) or {}
     if not isinstance(by_kind, dict):
@@ -124,6 +160,18 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         settle_seconds=_number(intake, "settle_seconds", 5.0, float, "[intake] settle_seconds", lo=0.0),
         give_up_seconds=_number(intake, "give_up_seconds", 120.0, float, "[intake] give_up_seconds", lo=0.0),
         poll_seconds=_number(intake, "poll_seconds", 3.0, float, "[intake] poll_seconds", lo=0.1),
+        excel_dir=_p(export.get("excel_dir")),
+        export_sweep_minutes=_number(export, "sweep_minutes", 30.0, float, "[export] sweep_minutes", lo=0.0),
+        machine_values=_flag(export, "machine_values", False, "[export] machine_values"),
+        publish_schema=str(publish.get("schema", "minedocscan")),
+        publish_enabled=(None if "enabled" not in publish else _flag(publish, "enabled", True, "[publish] enabled")),
+        publish_sweep_minutes=_number(publish, "sweep_minutes", 30.0, float, "[publish] sweep_minutes", lo=0.0),
+        publish_connect_timeout_s=_number(publish, "connect_timeout_s", 5.0, float, "[publish] connect_timeout_s", lo=1.0,
+                                          hi=600.0),
+        publish_retry_seconds=_number(publish, "retry_seconds", 60.0, float, "[publish] retry_seconds", lo=0.0),
+        publish_lock_timeout_s=_number(publish, "lock_timeout_s", 5.0, float, "[publish] lock_timeout_s", lo=1.0, hi=600.0),
+        publish_statement_timeout_s=_number(publish, "statement_timeout_s", 60.0, float, "[publish] statement_timeout_s",
+                                            lo=1.0, hi=3600.0),
         extra=raw,
     )
     env = os.environ
@@ -139,11 +187,22 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         s.reviews = Path(env["MINEDOCSCAN_REVIEWS"])
     if env.get("MINEDOCSCAN_INBOX"):
         s.inbox = Path(env["MINEDOCSCAN_INBOX"])
+    if env.get("MINEDOCSCAN_EXCEL_DIR"):
+        s.excel_dir = Path(env["MINEDOCSCAN_EXCEL_DIR"])
+    if env.get("MINEDOCSCAN_PUBLISH_URL"):
+        s.publish_url = env["MINEDOCSCAN_PUBLISH_URL"]
+    if env.get("MINEDOCSCAN_PUBLISH_SCHEMA"):
+        s.publish_schema = env["MINEDOCSCAN_PUBLISH_SCHEMA"]
     if env.get("MINEDOCSCAN_DAMAGED_PDF"):
         s.damaged_pdf = env["MINEDOCSCAN_DAMAGED_PDF"]
     for k, v in overrides.items():
         if v is not None:
-            setattr(s, k, Path(v) if k in ("archive_root", "work_root", "site", "reviews", "inbox") else v)
+            setattr(s, k, Path(v) if k in ("archive_root", "work_root", "site", "reviews", "inbox", "excel_dir") else v)
+    import re
+
+    if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", s.publish_schema):
+        raise ConfigError("[publish] schema (또는 MINEDOCSCAN_PUBLISH_SCHEMA) 는 영문 소문자·숫자·밑줄 "
+                          f"(영문 소문자나 밑줄로 시작, 63자 안): {s.publish_schema!r}")
     if s.damaged_pdf not in DAMAGED_PDF:
         raise ConfigError(f"[pipeline] damaged_pdf (또는 MINEDOCSCAN_DAMAGED_PDF) 는 {' | '.join(DAMAGED_PDF)}: "
                           f"{s.damaged_pdf!r}")

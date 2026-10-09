@@ -1,7 +1,7 @@
 """DB 연결과 쓰기 도우미.
 
-지금은 SQLite 만 구현되어 있다. 스키마와 upsert 문법(INSERT … ON CONFLICT … DO UPDATE)은
-PostgreSQL 에서도 그대로 통하도록 골랐으므로, 운영용 어댑터는 연결과 자리표시자(? → %s)만 바꾸면 된다.
+작업 DB 는 SQLite 다 — 옮기지 않는다 (ADR 0021). 통합 DB(PostgreSQL)에는 결과의 사본을 싣는다 (publish/ — 대상에 쓰는 곳은
+그 모듈 하나다. 이 모듈의 "쓰기는 upsert() 만"은 작업 DB 의 규칙). 스키마와 upsert 문법은 양쪽에서 통하는 것만 쓴다.
 
 스키마 버전: 컬럼이 바뀌면 SCHEMA_VERSION 을 올린다. 마이그레이션은 만들지 않는다 (ADR 0005).
 버전이 다른 DB 파일은 열지 않고 SchemaVersionError 를 낸다 — `run --fresh` 로 다시 만들면 된다.
@@ -51,6 +51,19 @@ PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
 # 날짜로 만드는 것(xcheck_haul, eq_assignment_obs)은 쪽을 가리키지 않는다 — 그 날짜를 다시 계산해 지운다 (핸들러의 finalize).
 PAGE_TABLES: tuple[str, ...] = ("xcheck_usage", "prod_tally", "eq_usage_daily", "prod_haul", "insp_daily", "doc_page_sig",
                                 "doc_page_meta", "doc_field", "doc_page")
+# 통합 DB 로 싣는 표 (tasks/0008 4.8 — publish/), 부모부터. 싣지 않는 표: doc_page_sig(안에서만 쓴다), doc_review·doc_decision(원본은
+# 파일이다), meta_schema. 새 업무 테이블을 더하면 여기에도 더하고 publish/scopes.py 의 범위(문서·날짜·통째)에 넣는다.
+PUBLISH_TABLES: tuple[str, ...] = ("doc_document", "doc_page", "doc_field", "doc_page_meta", "eq_equipment", "eq_assignment_obs",
+                                   "insp_daily", "prod_haul", "prod_tally", "eq_usage_daily", "xcheck_haul", "xcheck_usage")
+# 싣지 않는 열 — 0007 의 불변식이 빼는 열과 같다 (시각·요청 번호·로컬 경로: 내용이 같아도 --fresh 마다 달라진다). 불변식 시험이 같이 쓴다
+PUBLISH_SKIP_COLUMNS: tuple[str, ...] = ("created_at", "received_at", "work_requested", "work_done", "source_path")
+
+
+def publish_columns(table: str, columns: Iterable[str]) -> list[str]:
+    """싣는 열 (작업 DB 의 열 순서 그대로, PUBLISH_SKIP_COLUMNS 를 뺀 것)."""
+    return [c for c in columns if c not in PUBLISH_SKIP_COLUMNS]
+
+
 BUSY_TIMEOUT_S = 30         # 다른 연결이 쓰는 동안 기다리는 시간 — 쓰는 단위가 쪽 하나(1–2초)라 넉넉하다 (4.8)
 
 
@@ -125,6 +138,21 @@ def write_txn(con: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
         raise
     if con.in_transaction:
         con.commit()
+
+
+@contextmanager
+def read_txn(con: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """읽는 트랜잭션 하나: BEGIN … (끝나면 되돌린다 — 아무것도 쓰지 않는다). 그 안의 읽기는 한 시점을 본다 (WAL) — 표마다 다른
+    시점을 보지 않게 (내보내기·싣기 — tasks/0008 4.1). 이미 열린 트랜잭션 안이면 그것을 그대로 쓴다."""
+    if con.in_transaction:
+        yield con
+        return
+    con.execute("BEGIN")
+    try:
+        yield con
+    finally:
+        if con.in_transaction:
+            con.rollback()
 
 
 def delete_pages(con: sqlite3.Connection, page_ids: list[str]) -> int:

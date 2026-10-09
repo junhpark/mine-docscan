@@ -120,7 +120,7 @@ def make_variant(template_dir: str | Path, scan: str | Path, page: int, name: st
         add.append("concurrent: true")
     return {"template": tpl.name, "variant": name, "out": str(out), "inliers": inliers, "family": family, "rotation": rotation,
             "tables": tables, "fix_by_hand": [t["region"] for t in tables if not t["redetected"]],
-            "existing_needs": add, "existing": str(path)}
+            "existing_needs": add, "existing": str(path), "redact": len(tpl.redact)}
 
 
 def _template_names(*dirs: Path) -> dict[str, str]:
@@ -230,6 +230,9 @@ def format_summary(r: dict) -> str:
         else:
             lines.append(f"  {t['region']}: 사람이 고칠 것 — {t['reason']}. 기존 판의 괘선을 그대로 두었습니다")
     lines.append("표 밖 필드의 bbox 는 그대로입니다 — minedocscan template preview 로 확인합니다 (새 판의 폴더로, --scan 으로 그 쪽 위에).")
+    # redact 는 기하다 — 기존 판의 상자를 그대로 베꼈다 (tasks/0008 4.9). 표가 움직인 판에서는 가릴 자리가 어긋날 수 있다
+    lines.append(f"가릴 자리(redact {r.get('redact', 0)}개)는 기존 판의 것을 그대로 베꼈습니다 — 이 판의 자리에 맞는지 template preview 로 "
+                 "다시 확인하고 고칩니다 (판마다 따로 적는다)")
     if r["existing_needs"]:
         lines.append(f"기존 판의 template.yaml ({r['existing']}) 에 적을 줄 (이 명령은 기존 판을 고치지 않습니다 — 적기 전에는 "
                      "계열에 동시 판이 하나뿐이라 사이트 팩이 읽히지 않습니다):")

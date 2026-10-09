@@ -48,6 +48,16 @@ class SitePack:
             self.templates[t.name] = t
         _check_families(self.templates)
         self.equipment_aliases: dict[str, str] = _equipment_aliases(self.config, self.templates)
+        self.haul_table: dict[str, list[str]] = _haul_table(self.config)
+        self.redact: dict = _redact(self.config)
+        if self.redact["meta_keys"] is not None:            # 틀린 키(오타)는 아무것도 가리지 않는다 — 조용히 넘기지 않는다
+            known = {f.get("meta_key") for t in self.templates.values() for f in t.fields if f.get("meta_key")}
+            unknown = sorted(set(self.redact["meta_keys"]) - known)
+            if unknown:
+                from ..config import ConfigError
+
+                raise ConfigError(f"site.toml 의 [redact] meta_keys 에 템플릿에 없는 메타 키가 있습니다: {', '.join(unknown)} "
+                                  f"(있는 키: {', '.join(sorted(known)) or '없음'})")
         self._labels: dict | None = None
         pat = self.config.get("ingest", {}).get("date_from_filename")
         self._date_re = re.compile(pat) if pat else None
@@ -224,6 +234,8 @@ def variant_key_diff(a: Template, b: Template) -> str | None:
             return f"표 {name} 의 그 밖의 항목"
     if _variant_fields(a) != _variant_fields(b):
         return "필드"
+    if a.spec.get("display") != b.spec.get("display"):          # 엑셀의 시트는 계열마다 하나다 (tasks/0008 4.5)
+        return "양식의 display"
     return None
 
 
@@ -247,6 +259,54 @@ def _variant_rows(reg: dict) -> list[str]:
 
 def _variant_fields(t: Template) -> list[str]:
     return sorted(_canon({k: v for k, v in _with_format(f).items() if k != "bbox"}) for f in t.fields)
+
+
+def _haul_table(config: dict) -> dict[str, list[str]]:
+    """site.toml 의 [haul_table] (월별 엑셀의 운반 표 — tasks/0008 4.4): columns = ["광종|편", …] 열의 순서, slots = ["T01", …]
+    자리의 순서. 거기에 없는 것은 뒤에 붙는다 (빠뜨리지 않는다). 현장의 것이라 코드에 적지 않는다. 틀리면 ConfigError 한 줄
+    (값은 찍지 않는다 — 몇 번째 항목인지만)."""
+    from ..config import ConfigError
+
+    raw = config.get("haul_table") or {}
+    if not isinstance(raw, dict):
+        raise ConfigError("site.toml 의 [haul_table] 은 표여야 합니다 (columns = [...], slots = [...])")
+    out: dict[str, list[str]] = {}
+    for key in ("columns", "slots"):
+        v = raw.get(key, [])
+        if not isinstance(v, list):
+            raise ConfigError(f"site.toml 의 [haul_table] {key} 는 글자의 목록이어야 합니다")
+        for i, x in enumerate(v, 1):
+            if not isinstance(x, str) or not x.strip() or (key == "columns" and x.count("|") != 1):
+                raise ConfigError(f"site.toml 의 [haul_table] {key} {i}번째 항목: "
+                                  + ("\"광종|편\" 꼴의 글자여야 합니다" if key == "columns" else "빈 문자열이 아닌 글자여야 합니다"))
+        if len(set(v)) != len(v):
+            raise ConfigError(f"site.toml 의 [haul_table] {key} 에 겹치는 항목이 있습니다")
+        out[key] = [x.strip() for x in v]
+    unknown = sorted(set(raw) - {"columns", "slots"})
+    if unknown:
+        raise ConfigError(f"site.toml 의 [haul_table] 에 모르는 키가 있습니다: {', '.join(unknown)} (columns, slots)")
+    return out
+
+
+def _redact(config: dict) -> dict:
+    """site.toml 의 [redact] (가린 쪽 그림 — tasks/0008 4.9): meta_keys = ["operator", …] 가릴 메타 키 (없으면 None — 기본은
+    export/masked.DEFAULT_META_KEYS), pad_px = 표 밖 필드·redact 상자를 넓히는 폭 (없으면 None — 기본은 export/masked.DEFAULT_PAD_PX).
+    현장의 것이라 코드에 적지 않는다. 틀리면 ConfigError 한 줄."""
+    from ..config import ConfigError
+
+    raw = config.get("redact") or {}
+    if not isinstance(raw, dict):
+        raise ConfigError("site.toml 의 [redact] 는 표여야 합니다 (meta_keys = [...], pad_px = N)")
+    unknown = sorted(set(raw) - {"meta_keys", "pad_px"})
+    if unknown:
+        raise ConfigError(f"site.toml 의 [redact] 에 모르는 키가 있습니다: {', '.join(unknown)} (meta_keys, pad_px)")
+    keys = raw.get("meta_keys")
+    if keys is not None and (not isinstance(keys, list) or not all(isinstance(k, str) and k.strip() for k in keys)):
+        raise ConfigError("site.toml 의 [redact] meta_keys 는 메타 키(글자)의 목록이어야 합니다 — 예: [\"operator\", \"vehicle_no\"]")
+    pad = raw.get("pad_px")
+    if pad is not None and (not isinstance(pad, int) or isinstance(pad, bool) or not 0 <= pad <= 200):
+        raise ConfigError(f"site.toml 의 [redact] pad_px 는 0–200 의 정수여야 합니다: {pad!r}")
+    return {"meta_keys": [k.strip() for k in keys] if keys is not None else None, "pad_px": pad}
 
 
 def _equipment_aliases(config: dict, templates: dict[str, Template]) -> dict[str, str]:

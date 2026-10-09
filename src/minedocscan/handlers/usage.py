@@ -120,6 +120,14 @@ class UsageHandler(FormHandler):
         recompute_continuity(con, refs, pages)
         return {}
 
+    def export_cells(self, template, fields: dict[str, dict]) -> tuple[dict[str, str], list[str]]:
+        """엑셀의 작업 표(role activities) 글자 칸 (tasks/0008 4.2): 읽지 않는 표다 (ADR 0016) — 검수 대기인 칸은 ● (글씨 있음)로.
+        그대로 두면 ? 가 영원히 남는다. 확정된 값이 있는 칸(사람이 넣었거나 oracle)과 사람이 본 칸(판독 불가)은 그대로."""
+        acts = {reg["name"] for reg in template.regions if reg.get("role") == "activities"}
+        return {f["field_id"]: "present" for f in fields.values()
+                if f["region"] in acts and f["kind"] == "handwritten_text" and f["review_status"] == "pending"
+                and f["reviewed_by"] is None}, []
+
     def machine_final(self, row: dict) -> str | None:
         """기계만으로 정했을 때의 value_final (load 와 같은 규칙): 필드·글자 칸은 기계 값 그대로, 정수 칸은 정수로, 소수·시각 칸은 NULL."""
         if row["region"] == "fields" or row["format"] is None:
@@ -223,8 +231,7 @@ def usage_rows(site, tpl: Template, page: dict, meta: dict, frows: list[dict]) -
                 slot = _meter_slot(r)
                 if slot and r["kind"].startswith("handwritten"):
                     meter[slot] = r
-    shift_rows = [r for reg, role in roles.items() if role == "shifts" for r in by_region.get(reg, [])
-                  if r["kind"].startswith("handwritten") and r["format"] == "time_range"]
+    shift_rows = [r for reg, role in roles.items() for r in by_region.get(reg, []) if is_shift_cell(role, r)]
 
     vals = {s: _state(r) for s, r in meter.items()}
     kind, m = _reading(vals, meter, has_meter=any(role == "meter" for role in roles.values()))
@@ -268,6 +275,12 @@ def usage_rows(site, tpl: Template, page: dict, meta: dict, frows: list[dict]) -
                 "count": as_int(r["value_final"]), "count_raw": as_int(r["value_raw"]), "confidence": r["confidence"],
                 "source_field_id": r["field_id"], "review_status": r["review_status"]})
     return usage, tally
+
+
+def is_shift_cell(role: str | None, row: dict) -> bool:
+    """근무 시각 칸: role shifts 인 표의 손글씨 time_range 칸 (row: doc_field 행). 가동 기록의 근무 시각·readings 대기열·
+    내보내기(근무 시각이 확정인가 — tasks/0008 4.2)가 같은 규칙을 쓴다."""
+    return role == "shifts" and str(row["kind"]).startswith("handwritten") and row["format"] == "time_range"
 
 
 def _meter_slot(r: dict) -> str | None:

@@ -9,7 +9,7 @@
 | [0002](0002-site-pack-outside-repo.md) | 사이트 팩을 저장소 밖에 둔다 | 채택 |
 | [0003](0003-pluggable-recognizer.md) | 인식기는 플러그인, 교체는 수치로 | 채택 |
 | [0004](0004-slot-as-join-key.md) | 교차검증의 조인 키는 자리(slot) | 채택 |
-| [0005](0005-sqlite-first.md) | SQLite 로 시작하고 PostgreSQL 로 옮길 수 있게 | 채택 |
+| [0005](0005-sqlite-first.md) | SQLite 로 시작하고 PostgreSQL 로 옮길 수 있게 | 채택 (보완 → 0021) |
 | [0006](0006-show-discrepancies.md) | 불일치는 고치지 않고 보여 준다 | 채택 |
 | [0007](0007-labels-by-review.md) | 숫자 정답은 검수로 만들고, 그 전에는 교차검증 일치율로 본다 | 채택 |
 | [0008](0008-review-records.md) | 검수 기록은 추가 전용 파일이 원본, 기계 값과 최종 값은 따로, 정답은 눈가림 옮겨 적기 | 채택 |
@@ -25,3 +25,5 @@
 | [0018](0018-concurrent-variants.md) | 같은 날 섞여 쓰이는 판은 괘선 오차로 고른다 (0010 의 보완) | 채택 |
 | [0019](0019-intake-dates-and-decisions.md) | 접수: 날짜 없는 문서는 기다리고, 문서의 결정은 추가 전용 파일에 남겨 다시 처리로 적용한다 | 채택 |
 | [0020](0020-rescanned-pages.md) | 다시 스캔한 쪽은 같은 날·같은 계열 안에서 손글씨 자리의 유사도로, 문서의 순서로 붙잡고 사람이 정한다 | 채택 |
+| [0021](0021-publish-to-the-shared-db.md) | 작업 DB 는 SQLite 그대로, 통합 DB(PostgreSQL)에는 문서·날짜 단위 지문으로 결과의 사본을 싣는다 (0005 의 보완) | 채택 |
+| [0022](0022-exports-are-copies.md) | 내보낸 것은 사본이다 — 한 방향, 확정되지 않은 값은 싣지 않는다, 가린 그림은 템플릿이 아는 자리만 | 채택 |

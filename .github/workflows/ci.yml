@@ -32,14 +32,15 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install -e ".[dev]" "opencv-python-headless==4.9.0.80" "numpy==1.26.4"
-      - run: python -c "import cv2, numpy; print(cv2.__version__, numpy.__version__)"
+      - run: pip install -e ".[dev]" "opencv-python-headless==4.9.0.80" "numpy==1.26.4" "openpyxl==3.1.0"
+      - run: python -c "import cv2, numpy, openpyxl; print(cv2.__version__, numpy.__version__, openpyxl.__version__)"
       - run: pytest
 
   slow:
     # 기본 pytest 에서 떼어 낸 무거운 시험 (-m slow): 다시 처리의 불변식 흔들기(결정·검수를 섞어 넣고 그때마다 처음부터 만든 DB 와 비교),
     # 합성 접수 시나리오(synth --intake 를 끝까지 → 견줄 묶음과 같다), 정확히 돌린 쪽 = 바로 선 쪽, 처리 순서 흔들기 — 기본 시험 시간을
-    # 지금의 1.25배 안에 두려고 (tasks/0007 6절)
+    # 지금의 1.25배 안에 두려고 (tasks/0007 6절). 0008 에서: 접수 묶음의 엑셀 끝에서 끝까지(싣기를 뺀 판), 가린 그림, 월 경계·표시 이름 묶음
+    # (1.15배 — tasks/0008 6절)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,6 +50,30 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev]"
       - run: pytest -m slow
+
+  postgres:
+    # 통합 DB 로 싣기 (tasks/0008 4.8): PostgreSQL 16 서비스 컨테이너에 싣고 불변식(대상의 행 = 작업 DB 의 행)을 본다.
+    # 시험마다 새 스키마. -m postgres 는 slow 인 것(흔들기에 싣기를 끼운 판)도 같이 돈다
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: mdtest
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MINEDOCSCAN_TEST_PG_URL: postgresql://postgres:ci-only@127.0.0.1:5432/mdtest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev,postgres]"
+      - run: pytest -m postgres -s
 
   train:
     # 숫자 인식기 학습 시험 (torch 필요, 몇 분). 합성 셀만으로 학습한 모델의 문턱, torch ↔ OpenCV 출력 일치,

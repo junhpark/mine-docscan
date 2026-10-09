@@ -393,6 +393,7 @@ def _readings(con, site, audit: int | None = None, seed: int = 0):
     (has_value_raw)이 있는 쪽 — audit=N 이면 잉크와 상관없이 날짜별로 고르게 N 쪽. 셀에 기계 값을 싣지 않고, 다른 쪽(앞날)의 값도
     싣지 않는다 (0005 4.7). 항목의 칸에 전부 유효한 검수가 있으면 끝난 쪽."""
     from ..forms.template import meter_slot
+    from ..handlers.usage import is_shift_cell
 
     roles = {t.name: {r["name"]: r["role"] for r in t.regions if r.get("role") in ("meter", "shifts")}
              for t in site.templates.values() if t.handler == "usage"}
@@ -409,7 +410,7 @@ def _readings(con, site, audit: int | None = None, seed: int = 0):
         slot = meter_slot(r["field_name"], r["row_key"]) if role == "meter" else None
         if slot:
             by_page.setdefault(r["page_id"], []).append(((0, order[slot], 0), METER_LABELS[slot], r))
-        elif role == "shifts" and r["format"] == "time_range":
+        elif is_shift_cell(role, r):
             label = _shift_label(site, r, shift_labels)
             by_page.setdefault(r["page_id"], []).append(((1, r["row_no"], r["x0"] or 0), label, r))
     if audit:

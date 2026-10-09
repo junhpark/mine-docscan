@@ -272,10 +272,22 @@ def test_reprocess_invariant_long(world, seed):
     reprocess_fuzz(world, steps=40, seed=seed)
 
 
-def reprocess_fuzz(world, steps: int, seed: int) -> None:
+def reprocess_fuzz(world, steps: int, seed: int, fresh: bool = True, on_touched=None, after_step=None) -> None:
     """결정(날짜 바꾸기 — 다른 문서가 있는 날짜로도, 버리기, 되살리기 — 문서·쪽)과 검수(칸·차량번호·작성자)를 섞어 steps 번 넣고
     그때마다 대기 중인 문서를 처리한(watch 한 바퀴) DB 가 같은 파일·검수·결정으로 처음부터 만든 DB 와 같다. 묶음(conftest.BUNDLES)은
-    2030-01-07 에 일보 문서 셋·점검표 두 쪽·T01 일보 두 쪽, 가동 일보 사흘. 없는 칸(버린 쪽)의 검수도 넣는다 — 되살리면 붙는다."""
+    2030-01-07 에 일보 문서 셋·점검표 두 쪽·T01 일보 두 쪽, 가동 일보 사흘. 없는 칸(버린 쪽)의 검수도 넣는다 — 되살리면 붙는다.
+    fresh=False 면 처음부터 만든 DB 와 견주지 않는다. on_touched: 검수가 건드린 것을 받는 곳 (주면 save(touched=…)),
+    after_step(step): 걸음마다 처리한 뒤에 부른다 — 통합 DB 싣기를 끼운 판 (test_publish_pg.py)."""
+    from minedocscan.touched import Touched
+
+    def save_(review):
+        if on_touched is None:
+            return save(con, site, st, review)
+        t = Touched()
+        out = save(con, site, st, review, touched=t)
+        on_touched(t)
+        return out
+
     import random
 
     from minedocscan.intake import decisions as decs
@@ -308,13 +320,13 @@ def reprocess_fuzz(world, steps: int, seed: int) -> None:
             verdict = rng.choice(["value", "value", "empty", "illegible"])
             fmt = field_format(site, f["template_name"], f["region"], f["field_name"])
             value = rng.choice(samples.get(fmt, samples[None])) if verdict == "value" else ""
-            save(con, site, st, Review(f["field_id"], verdict, value, "jp", reviewed_at=now))
+            save_(Review(f["field_id"], verdict, value, "jp", reviewed_at=now))
             done.append((kind, f["field_id"], verdict, value))
         elif kind == "meta":
             pg = rng.choice(logs)
             _slot, vehicle, operator = rng.choice(SLOTS)
             name, value = rng.choice([("vehicle_no", vehicle), ("operator", operator)])
-            save(con, site, st, Review(field_id_of(pg, name), "value", value, "jp", reviewed_at=now))
+            save_(Review(field_id_of(pg, name), "value", value, "jp", reviewed_at=now))
             done.append((kind, pg, name, value))
         else:
             target = doc if kind.startswith("doc") else page
@@ -328,9 +340,13 @@ def reprocess_fuzz(world, steps: int, seed: int) -> None:
         pipe.process_pending()
         assert pipe.pending_documents() == []
         no_null_dates(con)
-        fresh = fresh_of(st, site, world["scans"], world["root"], f"fresh{step}")
-        assert_same(dump(con), dump(fresh.con), (seed, step, done[-3:]))
-        fresh.con.close()
+        if after_step is not None:
+            after_step(step)
+        if not fresh:
+            continue
+        other = fresh_of(st, site, world["scans"], world["root"], f"fresh{step}")
+        assert_same(dump(con), dump(other.con), (seed, step, done[-3:]))
+        other.con.close()
         shutil.rmtree(world["root"] / f"fresh{step}")
     assert {k for k, *_ in done} == set(kinds) or steps < len(kinds)
     assert con.execute("SELECT COUNT(*) FROM xcheck_haul").fetchone()[0] > 0

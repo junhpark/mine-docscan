@@ -15,8 +15,9 @@
 ## 범위
 
 이 저장소는 **1단계 소프트웨어**다: 스캐너 → 인식 → 데이터베이스. 독립 소프트웨어로 등록할 예정이므로
-혼자서 설치·실행·시험이 되어야 한다. 2단계(통합 DB, 입력 체계, 시각화)는 이 저장소의 업무 테이블
-(`insp_*`, `prod_*`, `xcheck_*`, `eq_*`)을 읽어 가는 별도 작업이다. 2단계 기능을 여기에 넣지 않는다.
+혼자서 설치·실행·시험이 되어야 한다. 2단계(통합 DB, 입력 체계, 시각화)는 이 저장소가 통합 DB(PostgreSQL)에 실은 업무 테이블
+(`insp_*`, `prod_*`, `xcheck_*`, `eq_*`)의 사본을 읽어 가는 별도 작업이다 (ADR 0021). 2단계 기능을 여기에 넣지 않는다.
+작업 DB 는 로컬 SQLite 그대로다. 엑셀·통합 DB·가린 쪽 그림은 DB 에서 만든 **사본**이다 — 한 방향 (ADR 0022).
 
 물질수지 관점: 현장 문서의 값은 서로 맞지 않는다. 1단계는 그 차이를 **고치지 않고 계산해서 보여 준다**
 (`xcheck_*`). 조정(reconciliation)은 2단계의 일이다.
@@ -27,7 +28,7 @@
 pip install -e ".[dev]"
 
 pytest                      # 합성 양식으로 전체 시험 (약 6–7분, 실데이터·torch 불필요)
-pytest -m slow              # 무거운 시험 (다시 처리의 불변식 흔들기, 합성 접수 시나리오, 돌린 쪽의 비교 — CI 의 slow 작업)
+pytest -m slow              # 무거운 시험 (다시 처리의 불변식 흔들기, 합성 접수 시나리오, 돌린 쪽의 비교, 엑셀 끝에서 끝까지, 가린 그림 — CI 의 slow 작업)
 pytest -m train             # 숫자 인식기 학습 시험 (torch 필요: pip install -e ".[train]", 몇 분)
 ruff check .
 
@@ -102,6 +103,15 @@ minedocscan template init <이미지> --name <이름> --rotate 90          # 돌
 minedocscan synth out/intake --intake       # 합성 접수 폴더 OUT/inbox + 견줄 묶음 OUT/baseline, 넣을 결정은 truth.json 의 intake.decisions
                                             # (--rotate-pages, --blank-backs, --rescans 는 따로도)
 
+# 내보내기 (tasks/0008, ADR 0021·0022) — 엑셀·통합 DB·가린 쪽 그림은 DB 의 사본 (한 방향)
+# 설정: [export] excel_dir (또는 MINEDOCSCAN_EXCEL_DIR) 이면 watch·serve 가 바퀴 끝에 바뀐 날짜만 쓴다. 통합 DB 는 MINEDOCSCAN_PUBLISH_URL (환경변수로만)
+minedocscan export excel OUT [--date D | --month M | --from D --to D]   # 일별 daily/<달>/<날짜>.xlsx + 월별 monthly/<달>.xlsx (운반 표) — 바뀐 파일만
+minedocscan export masked-pages OUT --date D [--keep-text]       # 가린 쪽 그림 (쪽 ID.png) — 템플릿이 아는 자리만. 사람이 보고 쓴다
+minedocscan publish [--check | --rebuild]   # 통합 DB 로 싣기: 지문이 다른 문서·날짜만 한 트랜잭션으로 (--check: 같음 0 / 다름 1 / 닿지 못함 2)
+pytest -m postgres                          # 싣기 시험 (MINEDOCSCAN_TEST_PG_URL 이 없으면 건너뜀 — CI 의 postgres 작업)
+minedocscan synth out/demo --display-names  # 합성 템플릿에 표시 이름(display)과 가릴 상자(redact) — template.yaml 만 바뀐다
+                                            # 홈의 내려받기: /export/day.xlsx?date= · /export/month.xlsx?month= (그때 만든다)
+
 minedocscan run DB_scans --skip-existing    # 전체 묶음: 깨진 파일은 failed 로 격리, 한 것은 건너뜀 (템플릿·인식기를 바꾼 뒤엔 --fresh)
 minedocscan report --by-month               # 양식 × 월 진단 (개정판의 흔적)
 minedocscan pages --status unknown_form --thumbs   # 양식을 못 찾은 쪽 + 미리보기 (WORK_ROOT/thumbs)
@@ -127,7 +137,7 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 
 | 위치 | 하는 일 |
 |---|---|
-| `config.py` | 설정 (환경변수 > TOML > 기본값). 경로를 코드에 적지 않는다 |
+| `config.py` | 설정 (환경변수 > TOML > 기본값). 경로를 코드에 적지 않는다. `[export]`·`[publish]` — 통합 DB 의 URL 은 환경변수로만(`repr` 에도 없다) |
 | `imaging/io.py` | 이미지·PDF 읽기/쓰기. **한글 경로 때문에 `cv2.imread/imwrite` 를 직접 쓰지 않는다**. PyMuPDF 로 읽고 렌더링하는 곳은 전부 `PDF_LOCK` 안 (serve 의 두 스레드 — `load_pages` 는 쪽을 내주는 동안 놓는다) |
 | `imaging/grid.py` | 표 괘선 검출 |
 | `imaging/align.py` | ORB + RANSAC 으로 기준 이미지에 정합, 괘선 재검출 오차로 품질 판정. 펴기는 `warp_to_template` 하나 (인쇄 층의 다시 펴기도 같은 그림). `align_upright`: 호모그래피의 회전각이 90° 단위로 0 이 아니면 `np.rot90` 으로 세워 다시 정합(저장하는 호모그래피는 원래 쪽 → 템플릿) |
@@ -138,10 +148,10 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 | `imaging/printlayer.py` | 인쇄 층(ADR 0017): `estimate`(쪽마다 erode 3×3 → 화소마다 밝기의 백분위, 기본 75, 보간 없이 — `method="higher"`), `binary`(`grid.binarize`), `mask`(2 px 넓힘 — 값 유무에서 지우는 자리), `sha`(화소의 해시), `coverage`. DB 를 모른다 |
 | `imaging/cropspec.py` | 인식기에 넘기는 크롭의 규격(`CropSpec`: 해상도 aligned/source·배율·여유)과 자르는 구현 하나 — 파이프라인·내보내기·검수 화면이 같이 쓴다 |
 | `imaging/hires.py` | 원본 쪽 렌더링 (몇 장 캐시). 원본 해상도 크롭은 쪽의 호모그래피로 그 셀만 다시 정합 |
-| `forms/template.py` | 템플릿 로더·검증 (`meta_key`, `format`, 표의 `role`, 나눔 선 `split_ys`/`split_xs`, `subtotal`, `family`/`valid_from`/`valid_to`, `concurrent`). `problems()` 는 오류 전부. 인쇄 층 `print_image`(템플릿 폴더 안의 파일 이름만, PNG, 기준 이미지와 같은 크기 — `print_problems`·`print_layer`·`print_mask`·`print_sha`). YAML 의 문법·날짜 오류도 `TemplateError` (`load_yaml`). 인쇄 층을 쓰는 칸은 `role_value_cell` 한 곳(meter·shifts·tally 표의 형식 있는 손글씨 칸), `uses_print_layer` |
+| `forms/template.py` | 템플릿 로더·검증 (`meta_key`, `format`, 표의 `role`, 나눔 선 `split_ys`/`split_xs`, `subtotal`, `family`/`valid_from`/`valid_to`, `concurrent`). `problems()` 는 오류 전부. 인쇄 층 `print_image`(템플릿 폴더 안의 파일 이름만, PNG, 기준 이미지와 같은 크기 — `print_problems`·`print_layer`·`print_mask`·`print_sha`). YAML 의 문법·날짜 오류도 `TemplateError` (`load_yaml`). 인쇄 층을 쓰는 칸은 `role_value_cell` 한 곳(meter·shifts·tally 표의 형식 있는 손글씨 칸), `uses_print_layer`. 엑셀에 보이는 이름 `display`(`display_of`), 가릴 상자 `redact`(기하 — 판마다) |
 | `forms/formats.py` | 값의 형식(ADR 0015): `integer`·`decimal`·`time`·`time_range`·`reading`. 정규화 한 곳 — 검수 저장·서버·정답 내보내기·평가·핸들러가 같이 쓴다. 화면이 받는 글자와 안내. `dotted_clock`(점으로 쓴 시각 — 화면이 묻는 조건, 정규식과 상한은 `dotted_clock_rule()` 로 서버가 화면에 보낸다 — 화면에 수가 없다) |
 | `forms/equipment.py` | 장비 마스터(점검표 템플릿의 장비 행), `equipment_id`, 장비명 메타 키 `equipment` |
-| `forms/sitepack.py` | 사이트 팩 (템플릿·현장 옵션·페이지 라벨·평가셋 소금값), `templates_for(date)`, 장비명 대응표 `[equipment.aliases]`(마스터에 없는 키면 오류), `known_values(key)`(후보 목록), 대응표의 해시 `equipment_aliases_sha`. 동시 판(ADR 0018): 계열의 겹침은 모두 `concurrent` 일 때만, 계열에 동시 판 하나뿐이면 오류, 판끼리 기하 밖의 전부가 같아야 한다(`variant_key_diff`), 같은 `name` 둘이면 오류, `concurrent_groups(date)`, `answer_key`(정답은 계열로), `variant_families()` |
+| `forms/sitepack.py` | 사이트 팩 (템플릿·현장 옵션·페이지 라벨·평가셋 소금값), `templates_for(date)`, 장비명 대응표 `[equipment.aliases]`(마스터에 없는 키면 오류), `known_values(key)`(후보 목록), 대응표의 해시 `equipment_aliases_sha`. 동시 판(ADR 0018): 계열의 겹침은 모두 `concurrent` 일 때만, 계열에 동시 판 하나뿐이면 오류, 판끼리 기하 밖의 전부가 같아야 한다(`variant_key_diff`), 같은 `name` 둘이면 오류, `concurrent_groups(date)`, `answer_key`(정답은 계열로), `variant_families()`. 판끼리 양식의 `display` 도 같아야 한다. `[haul_table]`(운반 표의 열·자리 순서)·`[redact]`(가릴 메타 키·넓히는 폭) |
 | `forms/classify.py` | 페이지가 어느 양식인지 (그날 유효한 판만 후보). 그날의 동시 판 묶음(`groups`)은 한 후보 — 점수는 최댓값, 1위/2위 여유는 계열 사이, `ClassResult.group` |
 | `recognize/` | 인식 백엔드 인터페이스와 등록소 (`null`, `oracle`, `digits`), 칸 종류별 백엔드(`ByKindRecognizer`, `[recognize.by_kind]`) |
 | `pagemeta.py` | 쪽 메타(`doc_page_meta`): 키마다 최종 값과 출처(검수 > 결정 > 라벨 > 파일명 > 기계 값), 기계 값의 대조, 날짜의 월·일 대조. 날짜의 순서 한 곳 — `page_date`(쪽의 결정 > 문서의 결정 > 쪽 라벨 > 문서 라벨 > 파일명)·`document_date`(ISO 라벨만), 사람의 출처 목록 `HUMAN_SOURCES` |
@@ -149,27 +159,30 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 | `recognize/meta/` | 메타 필드 모델 (ADR 0013): `model.py`(카드·`classes.json`·후보 목록, `[recognize.meta]` → `build_meta_readers`), `choose.py`(CTC 우도로 닫힌 목록에서 고르기, 목록에 없는 값), `calib.py`(온도·기준·묶음 교차 읽기 `cv-reads.jsonl`), `train.py`(`--cv K`, 숫자 모델), `evaluate.py` |
 | `recognize/choice/` | 이름 필드의 닫힌 집합 분류기 (종류 0 = "그 밖"): `model.py`(OpenCV 추론), `train.py`(torch) |
 | `correct/` | 교정 백엔드 인터페이스와 등록소 (`none`) |
-| `handlers/` | 양식의 의미: 셀 → `doc_field` → 업무 테이블 (`generic`, `inspection`, `haul`, `usage`). 숫자 칸의 자동 적재 표는 `base.number_status` (ADR 0012), 정수 칸의 행은 `base.number_row`(운반·작업량), 읽지 않는 형식은 `base.unread_row` |
+| `handlers/` | 양식의 의미: 셀 → `doc_field` → 업무 테이블 (`generic`, `inspection`, `haul`, `usage`). 숫자 칸의 자동 적재 표는 `base.number_status` (ADR 0012), 정수 칸의 행은 `base.number_row`(운반·작업량), 읽지 않는 형식은 `base.unread_row`. 엑셀에서 칸의 상태를 고쳐 말하는 것은 `export_cells`(점검표 — 점검하지 않은 쪽·여백 행의 기계가 못 본 ✓ 칸은 빈 칸, 가동 일보 — 작업 표의 검수 대기 글자 칸은 ●). 근무 시각 칸은 `usage.is_shift_cell` 한 곳 |
 | `handlers/usage.py` | 장비 가동 일보(ADR 0016): 표의 역할 `meter`·`shifts`·`tally`·`activities` → `eq_usage_daily`(쪽 하나에 한 행, 가동 시간과 근거) + `prod_tally`. 업무 행은 `usage_rows` 하나(load·on_review). 값 유무는 `presence`(덩어리 배정 또는 잉크 비율, 인쇄 마스크 — 핸들러와 시험이 같은 함수) |
 | `validate/crosscheck.py` | 양식 간 교차검증, 그날의 실제 배차 관측 (날짜 지정 재계산 가능) |
 | `validate/usage.py` | 가동 일보의 검산 → `xcheck_usage`: 쪽 안(총 = 종료 − 시작, 소계 = 합), 계기의 연속성(같은 장비의 어제 종료 = 오늘 시작). 장비 단위 재계산 |
-| `review/` | 검수: `store.py`(추가 전용 `reviews.jsonl` ↔ `doc_review`, `save()`), `queue.py`(대기열 8종: `haul-numbers`·`mismatch`·`pending`·`page-fields`(`--audit`)·`meta-check`·`checks`·`readings`(계기 + 근무 시각 칸, `--audit`)·`usage-check`, 계기 시작·종료 칸의 `ask_dotted`), `checks.py`(✓ 행의 답 ↔ 두 칸의 판정), `crops.py`(원본/정합, 두 칸 띠), `export.py`(크롭 내보내기, `--meta`), `server.py` + `static/index.html`(표준 라이브러리, 127.0.0.1), `ops.py` + `static/home.html`(운영 화면 — 홈·문서 화면·결정, `serve` 에서만: 남은 수는 DB 가 바뀔 때만 다시 센다, 표본 대기열은 만들지 않는다, `/page.png` 는 원본에서 세워서) |
-| `store/` | `schema.sql`, `upsert()`(`insert_only` — `received_at`), 스키마 버전, WAL·`write_txn`(`BEGIN IMMEDIATE`), 쪽을 가리키는 테이블 `PAGE_TABLES`(지우는 순서). `order.py`: 문서·쪽의 순서(접수한 문서는 뒤, 보관 경로의 성분 — 파이썬에서 견준다), `document_id`(해시) |
-| `intake/` | 접수(ADR 0019): `inbox.py`(다 쓰인 파일만 — 수정 시각 + 열린다, 보관 폴더 `intake/<해-달>/<받은 시각>-<문서 ID>/` 로 복사·확인·등록·커밋 뒤에 치운다, `_already`·`_failed`, 시계 주입), `worker.py`(한 바퀴 = 접수 + 대기 문서 처리, `run_forever`, 작업 상태, 요약은 수와 문서 ID 만), `decisions.py`(추가 전용 `decisions.jsonl` ↔ `doc_decision`, 저장은 전부 검사한 뒤, `dry_run`), `dates.py`(사람이 넣는 날짜) |
-| `pipeline/runner.py` | 단계 순서와 상태 기록만 안다. 등록과 처리(`process_document` — 지우고 다시 만든다, 쪽마다 커밋, 요청 번호 `work_requested > work_done`, `needs_date`·`discarded`), 대기 문서 처리(`process_pending`, 문서의 순서대로), 빈 쪽(`blank_max_ink`), 다시 스캔(`dup_min_sim` — 같은 날·계열의 앞 순서 적재된 쪽, 뒤 문서에 다시 요청). 오류 격리(`failed`/`error`), `--skip-existing`. 동시 판 묶음이면 판마다 정합해 괘선 오차로 고른다(`choose_variant` — 0.5 px 안이면 인라이어, 그다음 이름; `doc_page.variant_errs`). 인쇄 층을 쓰는 양식(`uses_print_layer`)이면 마스크를 칸·핸들러에 넘긴다(`doc_page.print_sha`) |
+| `review/` | 검수: `store.py`(추가 전용 `reviews.jsonl` ↔ `doc_review`, `save()`), `queue.py`(대기열 8종: `haul-numbers`·`mismatch`·`pending`·`page-fields`(`--audit`)·`meta-check`·`checks`·`readings`(계기 + 근무 시각 칸, `--audit`)·`usage-check`, 계기 시작·종료 칸의 `ask_dotted`), `checks.py`(✓ 행의 답 ↔ 두 칸의 판정), `crops.py`(원본/정합, 두 칸 띠), `export.py`(크롭 내보내기, `--meta`), `server.py` + `static/index.html`(표준 라이브러리, 127.0.0.1), `ops.py` + `static/home.html`(운영 화면 — 홈·문서 화면·결정, `serve` 에서만: 남은 수는 DB 가 바뀔 때만 다시 센다, 표본 대기열은 만들지 않는다, `/page.png` 는 원본에서 세워서, 엑셀·싣기의 상태, 엑셀 내려받기 `/export/day.xlsx`·`/export/month.xlsx`). `store.save(touched=…)`·`ReviewApp.on_touched` — 검수가 건드린 날짜·문서·장비를 작업 스레드에 (깨우지 않는다) |
+| `store/` | `schema.sql`, `upsert()`(`insert_only` — `received_at`), 스키마 버전, WAL·`write_txn`(`BEGIN IMMEDIATE`)·`read_txn`(한 시점을 읽는다 — 내보내기·싣기), 쪽을 가리키는 테이블 `PAGE_TABLES`(지우는 순서), 싣는 표·싣지 않는 열 `PUBLISH_TABLES`·`PUBLISH_SKIP_COLUMNS`(불변식 시험과 같이 쓴다). `order.py`: 문서·쪽의 순서(접수한 문서는 뒤, 보관 경로의 성분 — 파이썬에서 견준다), `document_id`(해시) |
+| `intake/` | 접수(ADR 0019): `inbox.py`(다 쓰인 파일만 — 수정 시각 + 열린다, 보관 폴더 `intake/<해-달>/<받은 시각>-<문서 ID>/` 로 복사·확인·등록·커밋 뒤에 치운다, `_already`·`_failed`, 시계 주입), `worker.py`(한 바퀴 = 접수 + 대기 문서 처리 + 바퀴 끝의 일(`after` — 엑셀 → 싣기, 처리가 건드린 것을 넘긴다), `run_forever`, 작업 상태, 요약은 수와 문서 ID 만), `decisions.py`(추가 전용 `decisions.jsonl` ↔ `doc_decision`, 저장은 전부 검사한 뒤, `dry_run`), `dates.py`(사람이 넣는 날짜) |
+| `pipeline/runner.py` | 단계 순서와 상태 기록만 안다. 등록과 처리(`process_document` — 지우고 다시 만든다, 쪽마다 커밋, 요청 번호 `work_requested > work_done`, `needs_date`·`discarded`), 대기 문서 처리(`process_pending`, 문서의 순서대로), 빈 쪽(`blank_max_ink`), 다시 스캔(`dup_min_sim` — 같은 날·계열의 앞 순서 적재된 쪽, 뒤 문서에 다시 요청). 오류 격리(`failed`/`error`), `--skip-existing`. 동시 판 묶음이면 판마다 정합해 괘선 오차로 고른다(`choose_variant` — 0.5 px 안이면 인라이어, 그다음 이름; `doc_page.variant_errs`). 인쇄 층을 쓰는 양식(`uses_print_layer`)이면 마스크를 칸·핸들러에 넘긴다(`doc_page.print_sha`). 건드린 것(`touched` — 마무리한 날짜·장비, 처리·실패한 문서, 지운 옛 failed 문서)을 남긴다 |
 | `evaluate/` | CER·필드 정확도·자동 적재율·자동 적재 오류율(`status_raw`), 값 유무 정밀도·재현율, 날짜 분할(`split.py`), 비율의 구간(`stats.py`), 쪽 메타(`meta.py`), ✓ 판정(`checks.py`), 실데이터 회귀(검수 없이, 기준에 없던 묶음은 따로 알림) |
 | `pipeline/lock.py` | 파이프라인은 한 번에 하나 (DB 옆 `pipeline.lock` 에 배타 트랜잭션 — 죽은 프로세스의 잠금이 남지 않는다). 명령이 잡는다 |
 | `report.py` | DB 현황 요약 (회귀 테스트가 비교하는 수치), `by_month`, `list_pages`. 인쇄 층으로 잰 쪽(`print_layer`)과 계열별 판(`variants` — `variant_summary`)은 그런 쪽이 있을 때만, 점으로 쓴 시각일 수 있는 쪽(`usage_dotted_suspect`)은 가동 기록이 있으면(0 이어도) 키가 생긴다. 낡은 장비 ID(`stale_equipment_ids` — 리포트 밖, 회귀가 비교하지 않는다, 가동 기록·작업량 행이 있을 때만) |
-| `tools/synth.py` | 합성 양식·스캔·정답 생성기 (같은 seed 면 바이트까지 같다, 행렬 개정판 선택, `low_cells` 낮은 칸 양식, `usage_logs` 가동 일보, `print_layers` 합성 쪽에서 추정한 인쇄 층, `usage_variants` 판 B, `rotate_pages`·`blank_backs`·`rescans`·`intake` — 따로 쓰는 난수, 기존 선택의 바이트는 그대로) |
+| `tools/synth.py` | 합성 양식·스캔·정답 생성기 (같은 seed 면 바이트까지 같다, 행렬 개정판 선택, `low_cells` 낮은 칸 양식, `usage_logs` 가동 일보, `print_layers` 합성 쪽에서 추정한 인쇄 층, `usage_variants` 판 B, `rotate_pages`·`blank_backs`·`rescans`·`intake` — 따로 쓰는 난수, 기존 선택의 바이트는 그대로, `display_names` 표시 이름과 가릴 상자 — template.yaml 만) |
 | `tools/synth_usage.py` | 합성 가동 일보 두 종: 계기(소수·시각·빈 칸), 하루 두 장, 빠진 날, 잘못 적은 시작, 총·소계 어긋남, 대응표에 없는 이름, 작업량 표 위의 메모. 근무 시각 칸의 인쇄된 "~"(선으로 그린다). 판 B(`build_usage_log("b")` — 작업 표·계기 표만 10 px 아래, 줄 간격 ×1.01). 난수는 따로 |
-| `tools/tpltools.py` | `template preview`(칸·필드·형식·역할을 그린 PNG, `--print` 는 인쇄 층 위에, 저장소 밖에만), `template check`(오류를 전부 — 인쇄 층의 크기, 인쇄에 절반 넘게 덮인 표 칸; 쓰이지 않는 `print_image` 는 참고 줄) |
+| `tools/tpltools.py` | `template preview`(칸·필드·형식·역할을 그린 PNG, `--print` 는 인쇄 층 위에, 저장소 밖에만), `template check`(오류를 전부 — 인쇄 층의 크기, 인쇄에 절반 넘게 덮인 표 칸, 열 이름 `display`, 쪽 밖·넓이 없는 `redact` 상자; 쓰이지 않는 `print_image` 는 참고 줄). preview 는 `redact` 상자도 그린다 |
 | `tools/printlayer.py` | `template print-layer`: 그 양식으로 분류된 쪽(loaded·classified_only)을 날짜별로 고르게 최대 40장 — 정합 그림, 없으면 호모그래피로 다시 펴고, 분류 전용 쪽은 직접 정합(인라이어만). 3장 미만 거절·5장 미만 경고·백분위 75 미만이면 괘선을 잡는 데만 쓰라고 경고. DB 는 읽기 전용, `print.png` 만 쓴다. 요약은 수와 칸 이름만 |
-| `tools/variant.py` | `template variant`: 표 영역(+60 px) 밖의 특징점만으로 편 그림이 새 기준 이미지(`header_homography`), 표마다 기존 괘선을 ±min(40 px, 이웃 표까지의 절반 — 붙은 표가 같이 쓰는 경계선(3 px 안)은 빼고 잰다) 안에서 다시 잡아 짝짓는다. 열·행·필드는 그대로, 기존 판은 고치지 않는다 |
+| `tools/variant.py` | `template variant`: 표 영역(+60 px) 밖의 특징점만으로 편 그림이 새 기준 이미지(`header_homography`), 표마다 기존 괘선을 ±min(40 px, 이웃 표까지의 절반 — 붙은 표가 같이 쓰는 경계선(3 px 안)은 빼고 잰다) 안에서 다시 잡아 짝짓는다. 열·행·필드는 그대로, 기존 판은 고치지 않는다. `redact` 는 그대로 베끼고 다시 확인하라고 알린다 |
 | `tools/synth_meta.py` | 메타 필드 합성: 사람마다 다른 획(기울기·굵기·크기·간격)의 네 자리 차량번호·이름·월·일, 크롭 폴더 (메타 모델의 학습·시험용) |
 | `tools/synth_cells.py` | 어려운 합성 숫자 칸: 값·X 표·덧칠·메모·이웃 칸 글씨를 크롭 규격대로 (숫자 인식기의 학습·시험용) |
 | `tools/handfont.py` | 합성 손글씨의 획 정의 (숫자 꼴 몇 가지, 소수점·콜론·물결표·붙임표, 메모용 이어 쓴 글자). OpenCV 내장 글꼴을 쓰지 않는다 |
 | `tools/thumbs.py` | 쪽 미리보기 (1/4, WORK_ROOT/thumbs — 방향을 알면 세워서, 파일 이름에 문서 ID) |
 | `tools/mktemplate.py` | 새 양식의 템플릿 뼈대(`template init`)와 표 더하기(`template add-region` → `add_region`: 인쇄 층이 있으면 그것에서 괘선, `regions` 블록 끝에 글자로 끼워 넣고 다시 읽어 확인, 아니면 되돌린다). 둘이 같은 뼈대 `region_skeleton`(`--role` 의 자리표시)을 쓴다 |
+| `export/` | 내보내기 (tasks/0008, ADR 0022 — DB 의 사본, 작업 DB 에 쓰지 않는다): `model.py`(DB → 책·시트·칸 — 순수 함수, 칸의 상태 `field_cell` 한 곳, 시트 이름, 내용의 해시), `labels.py`(한글 머리글·표시 한 곳), `business.py`(업무 시트 — 확정일 때만 값, `(잠정)`), `daily.py`·`monthly.py`(일별·월별, 운반 표 — 자리 미정·문서 없음·모름, 합계는 확정된 줄만), `xlsx.py`(모델 → xlsx, 수식이 되지 않게), `writer.py`(기록 파일 `.minedocscan-export.json`, 바뀐 것만, 원자적으로, 기록에 있는 것만 지운다, OUT 을 만들지 않는다), `auto.py`(바퀴 끝 — 더러운 날짜, 전체 훑기, 시계 주입), `masked.py`(가린 쪽 그림 — 템플릿이 아는 자리만) |
+| `publish/` | 통합 DB 로 싣기 (ADR 0021 — 대상에 쓰는 곳은 여기 하나): `ddl.py`(schema.sql → 대상의 표 — 형을 넓혀, 외래 키 없이), `scopes.py`(범위 문서·날짜·통째와 지문 — 순수 함수), `core.py`(한 트랜잭션의 갈아 끼우기, `pub_state`·`pub_meta`, `--check`·`--rebuild`, 연결 함수 `connect` — 시험이 바꿔 끼운다, URL·비밀번호를 찍지 않는다, 트랜잭션마다 `lock_timeout`·`statement_timeout`·연결에 TCP keepalive), `auto.py`(바퀴 끝 — 더러운 범위, 충돌이면 전체 훑기, `retry_seconds`). psycopg 는 여기서만 |
+| `touched.py` | 처리·검수가 건드린 것(날짜·문서·지운 문서·장비) — 엑셀·싣기가 다시 볼 범위. 장비는 가동 기록이 있는 모든 날짜로 넓힌다 (계기의 연속성) |
 | `cli.py` | `minedocscan` 명령 |
 
 ## 작업 규칙
@@ -191,14 +204,22 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
   `preview` 는 저장소 안을 거절한다. 예외는 합성 양식으로 시험 중에 만든 것뿐이다 (저장소에 넣지 않는다).
 - 카드·로그·오류 메시지·리포트에 이름·차량번호를 찍지 않는다 — 종류의 수와 분포만. 값은 검수 화면(127.0.0.1)에서만 본다.
 - 문서·코드·커밋 메시지·이슈에 실제 이름이나 차량번호를 예시로 쓰지 않는다. 합성 데이터의 값(`T01`, `V-101`, `ALPHA`)을 쓴다.
-- API 키·비밀값은 환경변수로만 받는다. `.env`, `minedocscan.toml` 은 커밋되지 않는다.
+- API 키·비밀값은 환경변수로만 받는다. `.env`, `minedocscan.toml` 은 커밋되지 않는다. 통합 DB 의 URL(`MINEDOCSCAN_PUBLISH_URL`)은 어디에도 찍지 않는다 —
+  로그·요약·오류·`info`·홈에는 호스트·DB·스키마만, 드라이버의 오류 글은 싣지 않는다 (예외의 종류만).
+- 엑셀 폴더·가린 쪽 그림은 현장 데이터다 — 저장소 밖에 (`export excel`·`masked-pages` 는 저장소 안을 거절한다). 시험의 산출물을 저장소에 넣지 않는다.
+  엑셀·화면의 갈무리를 문서·PR·이슈에 붙이지 않는다. 가린 그림은 템플릿이 아는 자리만 가렸다 — 가렸다고 저장소·이슈에 넣어도 되는 것이 아니다.
 
 **코드 규약**
 - Python 3.11+, `ruff` (줄 길이 110). 주석·독스트링·문서는 한국어, 식별자는 영어.
 - 좌표는 전부 템플릿 좌표계(기준 이미지 픽셀, 200 dpi). 페이지 좌표를 따로 들고 다니지 않는다.
-- DB 쓰기는 `store.db.upsert()` 만 쓴다. 같은 문서를 다시 돌려도 행이 늘지 않아야 한다(멱등).
+- DB 쓰기는 `store.db.upsert()` 만 쓴다. 같은 문서를 다시 돌려도 행이 늘지 않아야 한다(멱등). 이것은 작업 DB 의 규칙이다 — 통합 DB 에 쓰는 곳은
+  `publish/core.py` 하나다 (지문이 다른 범위를 한 트랜잭션으로 갈아 끼운다).
+- **내보내기는 작업 DB 에 쓰지 않는다** (읽기 트랜잭션 하나 — `store.db.read_txn`). **확정되지 않은 값을 확정된 것처럼 싣지 않는다** — 칸의 상태는
+  `export/model.field_cell` 한 곳, 업무 행의 값은 그 칸이 전부 확정일 때만, 합계는 확정된 줄만, 기계 값은 `machine_values` 일 때만 따로 둔 열에 (ADR 0022).
+  내보내기·싣기는 파이프라인의 결과를 바꾸지 않는다 — 알리는 것(touched)만 더한다.
 - 스키마는 SQLite 와 PostgreSQL 에서 같이 도는 문법만 쓴다. 날짜는 ISO 문자열, 불리언은 0/1.
-  컬럼이 바뀌면 `store/db.py` 의 `SCHEMA_VERSION` 을 올린다 (마이그레이션 없음, 예전 DB 는 `--fresh`).
+  컬럼이 바뀌면 `store/db.py` 의 `SCHEMA_VERSION` 을 올린다 (마이그레이션 없음, 예전 DB 는 `--fresh` — 통합 DB 는 `publish --rebuild`).
+  업무 테이블을 더하면 `PUBLISH_TABLES` 와 `publish/scopes.py` 의 범위에도. 싣기의 표현·범위를 바꾸면 `PUBLISH_VERSION` 을 올린다.
 - 기계 값(`value_raw`, `has_value_raw`, `trips_raw`, `confidence`, `backend`)은 검수가 건드리지 않는다. 업무 테이블은 검수를 적용한 최종 필드 행에서 만든다 (ADR 0008).
 - 검수 기록의 원본은 사이트 팩의 `reviews/reviews.jsonl` 이다. 지우거나 덮어쓰지 않는다. 테스트에서는 `reviews` 경로를 `tmp_path` 로 돌린다.
 - 결정 기록(`reviews/decisions.jsonl` — 날짜·버리기·되살리기·keep)도 추가 전용 원본이고 `doc_decision` 은 사본이다. 결정은 업무 테이블을 직접
@@ -310,13 +331,27 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
   경고 없음이었다. 스캔한 날은 작업한 날이 아니다 → 날짜를 모르면 처리하지 않고 기다린다(`needs_date`), 사람이 종이의 날짜를 넣는다 (ADR 0019).
 - **B5 가로 양식은 스캐너(급지 폭 216 mm)에 짧은 변부터 들어가 90° 돌아 있다.** 그대로도 전부 분류·`loaded` 지만 값 유무가 16–32칸(10,274칸 중)
   조용히 달라진다. 호모그래피에서 방향을 읽어(83쪽 × 네 방향 전부 맞았다) 정확히 세워 다시 정합하면 바로 선 쪽과 바이트까지 같다 (`align_upright`).
-- **같은 종이를 다시 스캔하면 두 번 들어간다** (업무 행 두 배, 교차검증에 가짜 `missing_matrix` 200행). 손글씨 자리의 서명으로 같은 날 안에서는 갈린다
-  (다른 종이 최대 0.66, 흔들어 다시 정합한 같은 종이 최소 0.91) — 다른 날의 다른 종이는 0.84 까지 올라간다(같은 사람이 같은 차로 같은 칸에 쓴다).
+- **같은 종이를 다시 스캔하면 두 번 들어간다** (업무 행 두 배, 교차검증에 가짜 `missing_matrix` 200행). 손글씨 자리의 서명으로 같은 날 안에서는 대부분 갈린다
+  (다른 종이 최대 0.59, 흔들어 다시 정합한 같은 종이 중앙 0.99) — 그러나 **다시 스캔의 2–3 % 는 0.80 아래**다(순하게 최소 0.70, 거칠게 최소 0.28 —
+  기준 0.80 은 그만큼 놓친다). 다른 날의 다른 종이는 0.85 까지 올라간다(같은 사람이 같은 차로 같은 칸에 쓴다) — 같은 날 안에서만 견준다.
+  0.70 이면 실데이터는 갈리지만 합성은 같은 날 다른 종이가 0.77 까지 올라가 기본값은 0.80 그대로, 현장의 값은 실제 다시 스캔 뒤 (tasks/0008 1절 라).
   합성 글씨는 같은 날 모든 일보의 머리 칸이 화소까지 같아 서명에서 **표 밖 필드도 지운다** (ADR 0020).
 - 양면 스캔의 빈 뒷면은 `unknown_form` 이 된다. 어두운 화소 비율로 갈린다 (실제 쪽 최소 0.046, 흰 종이·티·그림자 ≤ 0.011) — 양식을 못 찾은 쪽에서만 본다.
 - 문서 하나를 한 트랜잭션으로 처리하면 30쪽에 30–70초 동안 화면의 저장이 막힌다 → 쪽마다 커밋 (1–2초).
 - 접수 폴더에서 먼저 치우고 등록하면 그 사이에 끊길 때 문서가 사라진다 → 등록·커밋한 뒤에 치운다. OpenCV 4.9 는 잘린 JPEG 도 디코딩한다
   → JPEG 는 끝 표시(FF D9)까지 있어야 다 쓰인 것이다.
+- **엑셀**: 실제 하루치(30쪽, 필드 3,713개)를 양식 모양 시트 + 업무 표로 쓰면 시트 12장·칸 38,513개, 0.3초·123 KB — 처리가 끝날 때마다 써도 된다.
+  그러나 **같은 내용을 두 번 쓰면 xlsx 의 바이트가 다르다** (zip 안의 만든 시각) → "바뀌었나"는 모델의 해시로 본다. 날짜 하나를 읽어 해시를 내는 데 45 ms.
+- 운반의 업무 행(1,500행, 값 있는 칸 133개)은 지금 전부 검수 대기이고 그 행에도 기계 값이 들어 있다 — 엑셀은 출처·신뢰도가 보이지 않고 현장은 옮겨 적는다
+  → 확정되지 않은 값은 싣지 않는다 (`?`). 실제 템플릿의 열 이름은 전부 영문 식별자다 → 표시 이름은 템플릿의 `display`.
+- **PostgreSQL**: `schema.sql` 은 PostgreSQL 16 에서 그대로 돌지만 `REAL` 은 4바이트, `INTEGER` 는 32비트다 — 되읽으면 `classify_margin`·`ink` 가 다르다
+  → 싣는 쪽은 `DOUBLE PRECISION`·`BIGINT` 로 넓힌다. 조회문은 그대로 돌지 않는다 (`?` 자리표시자·행 객체 154곳, `SUM(비교식)`, `PRAGMA`) — 그리고 0007 의
+  처리 단위(쪽마다 커밋·WAL·잠금 파일·`--fresh`)는 로컬 SQLite 를 전제로 한다 → 작업 DB 는 그대로, 통합 DB 에는 싣는다 (ADR 0021).
+- **싣기는 작업 스레드에서 돈다 — 대상이 기다리게 하면 접수가 선다.** 시간 제한이 연결에만 있던 때, 다른 연결의 커밋하지 않은 `UPDATE` 한 행(DB 도구의
+  수동 커밋)이 60초 넘게 새 스캔의 접수를 멈췄고 홈은 "쉬는 중"·"밀린 범위 0"이었다 → 트랜잭션마다 `lock_timeout`·`statement_timeout`, 연결에 TCP keepalive,
+  바퀴 끝의 일 동안 작업 상태 `exporting`·`publishing` (PR #15 검토).
+- 가린 그림: 템플릿은 서명·작성자·차량번호 필드의 자리를 안다 (실제 일곱 양식 모두 표 밖 필드 3–5개). 행렬 양식 머리의 인쇄된 이름, 점검표의 인쇄된
+  등록번호 열, 작업 표의 글자 칸에 쓴 이름은 필드가 아니다 → 템플릿의 `redact` 상자와 글자 칸은 기본으로 가린다. 그래도 템플릿이 모르는 자리는 남는다.
 
 ## 하지 말 것
 
@@ -329,3 +364,5 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
   판 B 는 줄 간격까지 달라 평행 이동으로 풀리지 않고, 모든 양식의 수치가 바뀐다. 판은 템플릿이다 (ADR 0018).
 - 날짜 없는 쪽을 적재하지 않는다. 손으로 쓴 월·일이나 파일의 시각으로 날짜를 정하지 않는다 (ADR 0019). `run --date` 를 만들지 않는다.
 - 다시 스캔 의심을 기계가 스스로 버리거나 합치지 않는다. 사람이 정할 때까지 적재하지 않는다 (ADR 0020).
+- 작업 DB 를 PostgreSQL 로 옮기지 않는다 — 통합 DB 에는 싣는다 (ADR 0021). 통합 DB 의 실은 표에 다른 것이 쓰게 하지 않는다 (2단계는 자기 표에 쓰고 뷰로 합친다).
+- 엑셀을 읽어 들이지 않는다 — 엑셀은 사본이다 (ADR 0022). 엑셀에 확정되지 않은 값을 확정된 것처럼 싣지 않는다.

@@ -26,12 +26,23 @@
   .wait { color:var(--warn); font-size:12px; margin-left:6px; }
   .pages { display:grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap:12px; }
   .page { background:#fff; border:1px solid var(--line); border-radius:6px; padding:8px; }
-  .page img { width:100%; height:auto; border:1px solid var(--line); background:#fff; transition: transform .15s; }
+  .page img { display:block; width:100%; height:auto; border:1px solid var(--line); background:#fff; cursor:zoom-in; }
   .page .meta { font-size:13px; color:var(--muted); margin:6px 0; }
   .page.duplicate { border-color: var(--warn); }
   .page.discarded img { opacity:.35; }
   .pair { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
   .pair img { width:100%; border:1px solid var(--line); }
+  /* 크게 보기 (tasks/0008 4.10): 원본에서 폭 1,600 px 이상으로 다시 받아 화면 가득. 누르면 원래 크기(1:1)와 맞추기를 오간다 */
+  .zoom { position:fixed; inset:0; z-index:10; background:#262626; display:flex; flex-direction:column; }
+  .zoom[hidden] { display:none; }
+  .zoom .zbar { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; padding:8px 14px; background:#fff; border-bottom:1px solid var(--line); }
+  .zoom .zbody { flex:1; overflow:auto; display:grid; gap:10px; padding:10px; align-content:start; justify-items:center; }
+  .zoom .zbody.two { grid-template-columns: 1fr 1fr; }
+  .zoom .zbody figure { margin:0; text-align:center; color:#ddd; font-size:13px; min-width:0; }
+  .zoom .zbody img { display:block; max-width:100%; background:#fff; cursor:zoom-in; }   /* 맞추기 = 폭에 맞춘다 (세로는 넘기며 본다) */
+  .zoom .zbody.actual img { max-width:none; cursor:zoom-out; }
+  .zoom .zact { padding:8px 14px; background:#fff; border-top:1px solid var(--line); }
+  .zoom .zact:empty { display:none; }
   button { font: inherit; padding:4px 10px; border:1px solid var(--line); background:#fff; border-radius:4px; cursor:pointer; }
   button.main { border-color: var(--accent); }
   input.date { font-size:22px; width: 12ch; padding:3px 8px; border:2px solid var(--line); border-radius:6px; }
@@ -41,6 +52,7 @@
   .muted { color:var(--muted); font-size:13px; }
   .status-failed, .status-needs_date { color: var(--bad); }
   .status-needs_review { color: var(--warn); }
+  a.xl { font-size:12px; margin-left:4px; }
   kbd { font: 12px ui-monospace, monospace; border:1px solid var(--line); border-bottom-width:2px; border-radius:3px; padding:0 5px; background:#fafafa; }
 </style>
 </head>
@@ -54,6 +66,15 @@
   <div class="msg" id="msg"></div>
   <div id="view"></div>
 </main>
+<div class="zoom" id="zoom" hidden role="dialog" aria-label="크게 보기">
+  <div class="zbar"><b id="ztitle"></b>
+    <button id="zturn" hidden>돌려 보기 <kbd>R</kbd></button>
+    <button id="zfit">원래 크기 / 맞추기</button>
+    <span class="muted">그림을 누르면 원래 크기 · <kbd>Esc</kbd> 닫기</span>
+    <button id="zclose">닫기</button></div>
+  <div class="zbody" id="zbody"></div>
+  <div class="zact" id="zact"></div>
+</div>
 <script>
 (function () {
   'use strict';
@@ -73,9 +94,35 @@
     const w = h.worker || {};
     const err = h.worker_error ? ' · 지난 바퀴 오류 ' + h.worker_error : '';
     if (w.state === 'processing') return '작업: 처리 중 — 문서 ' + esc(w.document_id) + ' ' + (w.page_no || 0) + '/' + (w.n_pages || '?') + '쪽' + err;
+    // 바퀴 끝의 일 (tasks/0008 4.7·4.8): 오래 걸리면 몇 초째인지 — 그동안 접수·처리는 다음 바퀴를 기다린다
+    if (w.state === 'exporting' || w.state === 'publishing')
+      return '작업: ' + (w.state === 'exporting' ? '엑셀 쓰는 중' : '통합 DB 에 싣는 중') + ' — ' + (w.elapsed_s || 0) + '초째' + err;
     return '작업: 쉬는 중' + err;
   }
   function docLink(d) { return '<a href="/doc?id=' + encodeURIComponent(d.document_id) + '">' + esc(d.source_name) + '</a>'; }
+  // 엑셀 내려받기 (tasks/0008 4.7): 그 날짜·달의 파일을 그때 만들어 준다 — 날짜가 있는 문서에만
+  function xlsxLinks(day) {
+    if (!day) return '';
+    return ' <a class="xl" href="/export/day.xlsx?date=' + encodeURIComponent(day) + '" title="그 날짜의 엑셀">엑셀</a>'
+      + ' <a class="xl" href="/export/month.xlsx?month=' + encodeURIComponent(day.slice(0, 7)) + '" title="그 달의 엑셀">월</a>';
+  }
+  // 통합 DB 싣기 (tasks/0008 4.8): 대상은 호스트·DB·스키마만 (비밀번호 없이 — 서버가 그렇게 준다)
+  function publishText(p) {
+    if (!p || !p.enabled) return '통합 DB: ' + ({no_driver: '꺼짐 (psycopg 없음)', disabled: '꺼짐 ([publish] enabled = false)', no_watch: '꺼짐 (--no-watch)'}[p && p.reason] || '꺼짐 (MINEDOCSCAN_PUBLISH_URL 없음)');
+    let t = '통합 DB ' + esc(p.target) + '/' + esc(p.schema) + ': ' + (p.last_ok_at ? '마지막 ' + esc(p.last_ok_at) : '실은 적 없음');
+    const WHY = {lock_timeout: '대상의 잠금을 기다리다 그만둠', statement_timeout: '대상의 시간 제한을 넘김', connect: '닿지 못함',
+                 connection_lost: '싣는 가운데 연결이 끊김'};
+    if (p.last_error) t += ' · <span class="status-failed">싣지 못함 (' + esc(WHY[p.last_error] || p.last_error) + ', 밀린 범위 ' + p.behind + ')</span>';
+    if (p.skipped) t += ' · <span class="status-failed">실을 수 없는 값이 있어 건너뛴 범위 ' + p.skipped + '</span>';
+    return t;
+  }
+  function exportText(x) {
+    if (!x || !x.enabled) return '엑셀: ' + ({refused: '꺼짐 (저장소·접수 폴더 안이라 쓰지 않습니다)', no_watch: '꺼짐 (--no-watch)'}[x && x.reason] || '꺼짐 (excel_dir 없음)');
+    let t = '엑셀: ' + (x.last_at ? '마지막 ' + esc(x.last_at) + ' · ' + x.written + '개 씀' + (x.deleted ? ', ' + x.deleted + '개 지움' : '') : '쓴 적 없음');
+    if (x.failed) t += ' · <span class="status-failed">쓰지 못함 ' + x.failed + '개 (다음 바퀴에 다시)</span>';
+    if (x.missing_dir) t += ' · <span class="status-failed">폴더가 없습니다</span>';
+    return t;
+  }
   function statusCell(d) {
     return '<span class="status-' + esc(d.status) + '">' + esc(STATUS[d.status] || d.status) + '</span>'
       + (d.waiting && d.status !== 'received' ? '<span class="wait">다시 처리 대기</span>' : '');
@@ -106,7 +153,7 @@
     try { h = await getJSON('/api/home'); } catch (e) { msg(e.message); return; }
     templates = h.templates || {};
     $('site').textContent = (h.site || '') + ' · 검수자 ' + (h.reviewer || '');
-    $('worker').innerHTML = workerText(h);
+    $('worker').innerHTML = workerText(h) + ' · ' + exportText(h.export) + ' · ' + publishText(h.publish);
     const t = h.todo;
     const q = t.queues || {};
     let out = '<h2>할 일</h2><div class="box todo">';
@@ -140,7 +187,7 @@
     out += '<h2>최근 문서</h2><div class="box"><table><tr><th>받은 시각</th><th>파일명</th><th>쪽</th><th>날짜</th><th>상태</th></tr>';
     for (const d of h.recent) {
       out += '<tr><td>' + esc(d.received_at) + '</td><td>' + docLink(d) + '</td><td class="n">' + esc(d.n_pages)
-        + '</td><td>' + esc(d.work_date || '') + '</td><td>' + statusCell(d) + '</td></tr>';
+        + '</td><td>' + esc(d.work_date || '') + xlsxLinks(d.work_date) + '</td><td>' + statusCell(d) + '</td></tr>';
     }
     out += '</table></div>';
     $('view').innerHTML = out;
@@ -155,27 +202,26 @@
     document.title = 'minedocscan 문서 ' + d.document_id;
     let out = '<h2>' + esc(d.source_name) + ' <span class="muted">' + esc(d.document_id) + '</span></h2>';
     out += '<div class="box">받은 시각 ' + esc(d.received_at) + ' · 쪽 ' + esc(d.n_pages) + ' · 날짜 <b>' + esc(d.work_date || '없음') + '</b>'
-      + (d.date_source ? ' <span class="muted">(' + esc(d.date_source) + ')</span>' : '') + ' · ' + statusCell(d)
+      + (d.date_source ? ' <span class="muted">(' + esc(d.date_source) + ')</span>' : '') + xlsxLinks(d.work_date) + ' · ' + statusCell(d)
       + (d.error ? '<div class="muted">' + esc(d.error) + '</div>' : '') + '</div>';
     out += '<div class="box">문서의 날짜 <input class="date" id="docdate" inputmode="numeric" placeholder="예: 250326" autocomplete="off"> '
       + '<button class="main" id="savedate">날짜 저장</button> <span class="muted">종이의 날짜를 읽어 넣고 <kbd>Enter</kbd> — 25.03.26 · 250326 · 0326 도 됩니다</span> '
       + (j.decision.discarded ? '<button id="docrestore">문서 되살리기</button>' : '<button id="docdiscard">문서 버리기</button>')
       + (j.watching ? '' : '<div class="muted">처리는 watch 가 합니다 (--no-watch)</div>') + '</div>';
     out += '<div class="pages">';
+    const byNo = {};
     for (const p of j.pages) {
-      const src = p.status ? '/page.png?page_id=' + encodeURIComponent(p.page_id) + '&w=520'
-                           : '/page.png?doc=' + encodeURIComponent(d.document_id) + '&page=' + p.page_no + '&w=520';
+      byNo[p.page_no] = p;
+      const src = pageSrc(d.document_id, p, 520, 0);
       const cls = 'page' + (p.status === 'duplicate' ? ' duplicate' : '') + (p.decision.discarded ? ' discarded' : '');
       out += '<div class="' + cls + '" id="p' + p.page_no + '">';
       if (p.status === 'duplicate' && p.earlier) {
-        out += '<div class="muted">다시 스캔 의심 — 먼저 들어온 쪽(왼쪽)과 유사도 ' + (p.duplicate_sim || 0).toFixed(3) + '</div><div class="pair">'
-          + '<img alt="먼저 들어온 쪽" src="/page.png?page_id=' + encodeURIComponent(p.earlier.page_id) + '&w=520">'
-          + '<img alt="이 쪽" src="' + src + '"></div>'
-          + '<div><button data-dup="later" data-p="' + esc(p.page_id) + '" data-e="' + esc(p.earlier.page_id) + '">같은 종이 — 이 쪽을 버린다</button> '
-          + '<button data-dup="earlier" data-p="' + esc(p.page_id) + '" data-e="' + esc(p.earlier.page_id) + '">같은 종이 — 먼저 쪽을 버리고 이 쪽을 쓴다</button> '
-          + '<button data-dup="keep" data-p="' + esc(p.page_id) + '" data-e="' + esc(p.earlier.page_id) + '">다른 종이 — 둘 다 쓴다</button></div>';
+        out += '<div class="muted">다시 스캔 의심 — 먼저 들어온 쪽(왼쪽)과 유사도 ' + (p.duplicate_sim || 0).toFixed(3) + ' · 그림을 누르면 두 장을 크게</div><div class="pair">'
+          + '<img alt="먼저 들어온 쪽" data-zoom="' + p.page_no + '" src="/page.png?page_id=' + encodeURIComponent(p.earlier.page_id) + '&w=520">'
+          + '<img alt="이 쪽" data-zoom="' + p.page_no + '" src="' + src + '"></div>'
+          + dupButtons(p);
       } else {
-        out += '<img alt="' + p.page_no + '쪽" src="' + src + '" data-rot="0">';
+        out += '<img alt="' + p.page_no + '쪽" data-zoom="' + p.page_no + '" src="' + src + '">';
       }
       out += '<div class="meta">' + p.page_no + '쪽 · ' + esc(templates[p.template_name] || p.template_name || '—') + ' · '
         + esc(PAGE[p.status] || p.status || '처리 전') + (p.work_date ? ' · ' + esc(p.work_date) : '')
@@ -183,7 +229,7 @@
       out += '<div>' + (p.decision.discarded ? '<button data-act="restore" data-p="' + esc(p.page_id) + '">되살리기</button>'
                                              : '<button data-act="discard" data-p="' + esc(p.page_id) + '">이 쪽 버리기</button>')
         + ' <button data-act="date" data-p="' + esc(p.page_id) + '">이 쪽은 다른 날짜</button>'
-        + (p.status ? '' : ' <button data-act="turn">돌려 보기</button>') + '</div></div>';
+        + (p.status ? '' : ' <button data-act="turn" data-n="' + p.page_no + '">돌려 보기</button>') + '</div></div>';
     }
     out += '</div>';
     $('view').innerHTML = out;
@@ -201,10 +247,8 @@
     for (const b of document.querySelectorAll('button[data-act]')) {
       b.onclick = async () => {
         const act = b.dataset.act, target = b.dataset.p;
-        if (act === 'turn') {                        // 방향을 아직 모르는 쪽 (날짜를 기다리는 문서) — 화면에서만 돌린다
-          const img = b.closest('.page').querySelector('img');
-          const r = (Number(img.dataset.rot) + 90) % 360;
-          img.dataset.rot = r; img.style.transform = 'rotate(' + r + 'deg)';
+        if (act === 'turn') {                        // 방향을 아직 모르는 쪽 (날짜를 기다리는 문서) — 화면에서만 돌린다 (서버가 돌린 그림을 준다)
+          turn(Number(b.dataset.n));
           return;
         }
         let items;
@@ -218,16 +262,86 @@
         if (await post(items)) reload();
       };
     }
-    for (const b of document.querySelectorAll('button[data-dup]')) {
+    wireDup(document.getElementById('view'), reload);
+    for (const img of document.querySelectorAll('#view img[data-zoom]')) img.onclick = () => openZoom(Number(img.dataset.zoom));
+
+    // ── 크게 보기 (tasks/0008 4.10) ──
+    const turns = {};                              // 쪽 번호 → 화면에서 더 돌린 각 (날짜를 기다리는 문서)
+    let zoomed = null;
+    function zoomWidth() {                         // 원본에서 다시 받는 폭: 1,600 px 이상, 화면의 실제 화소만큼 (2,400 까지)
+      return Math.min(2400, Math.max(1600, Math.round(window.innerWidth * (window.devicePixelRatio || 1))));
+    }
+    function turn(n) {
+      turns[n] = ((turns[n] || 0) + 90) % 360;
+      const p = byNo[n];
+      const card = document.getElementById('p' + n);
+      if (card) card.querySelector('img').src = pageSrc(d.document_id, p, 520, turns[n]);
+      if (zoomed === n) openZoom(n);
+    }
+    function openZoom(n) {
+      const p = byNo[n];
+      if (!p) return;
+      zoomed = n;
+      const w = zoomWidth();
+      const body = $('zbody');
+      const pair = p.status === 'duplicate' && p.earlier;
+      body.className = 'zbody' + (pair ? ' two' : '');
+      if (pair) {
+        body.innerHTML = '<figure><img alt="먼저 들어온 쪽" src="/page.png?page_id=' + encodeURIComponent(p.earlier.page_id) + '&w=' + w + '">'
+          + '<figcaption>먼저 들어온 쪽 ' + esc(p.earlier.page_id) + '</figcaption></figure>'
+          + '<figure><img alt="이 쪽" src="' + pageSrc(d.document_id, p, w, 0) + '"><figcaption>이 쪽 ' + esc(p.page_id)
+          + ' · 유사도 ' + (p.duplicate_sim || 0).toFixed(3) + '</figcaption></figure>';
+        $('zact').innerHTML = dupButtons(p);
+        wireDup($('zact'), () => { closeZoom(); reload(); });
+      } else {
+        body.innerHTML = '<figure><img alt="' + n + '쪽" src="' + pageSrc(d.document_id, p, w, turns[n] || 0) + '"></figure>';
+        $('zact').innerHTML = '';
+      }
+      $('ztitle').textContent = n + '쪽' + (p.template_name ? ' · ' + (templates[p.template_name] || p.template_name) : '');
+      $('zturn').hidden = !!p.status;              // 방향을 아는 쪽은 이미 세워져 있다
+      for (const img of body.querySelectorAll('img')) img.onclick = () => body.classList.toggle('actual');
+      $('zoom').hidden = false;
+      $('zclose').focus();
+    }
+    function closeZoom() {
+      $('zoom').hidden = true; $('zbody').innerHTML = ''; $('zact').innerHTML = '';
+      zoomed = null; dateBox.focus();
+    }
+    $('zclose').onclick = closeZoom;
+    $('zfit').onclick = () => $('zbody').classList.toggle('actual');
+    $('zturn').onclick = () => { if (zoomed !== null) turn(zoomed); };
+    document.onkeydown = (ev) => {
+      if ($('zoom').hidden) return;
+      if (ev.key === 'Escape') { ev.preventDefault(); closeZoom(); }
+      else if ((ev.key === 'r' || ev.key === 'R') && !$('zturn').hidden) { ev.preventDefault(); turn(zoomed); }
+    };
+    dateBox.focus();
+    if (location.hash) {                           // 홈의 "다시 스캔 의심 쪽" 링크(#p<n>) — 그 쪽으로
+      const target = document.getElementById(location.hash.slice(1));
+      if (target) target.scrollIntoView({ block: 'start' });
+    }
+  }
+
+  function pageSrc(docId, p, w, rot) {             // 쪽 그림: 처리된 쪽은 쪽 ID 로(세워서), 날짜를 기다리는 쪽은 원본의 쪽을
+    return (p.status ? '/page.png?page_id=' + encodeURIComponent(p.page_id)
+                     : '/page.png?doc=' + encodeURIComponent(docId) + '&page=' + p.page_no) + '&w=' + w + (rot ? '&rot=' + rot : '');
+  }
+  function dupButtons(p) {                         // 다시 스캔 의심 쪽의 세 선택 (문서 화면과 크게 보기가 같이 쓴다)
+    const a = ' data-p="' + esc(p.page_id) + '" data-e="' + esc(p.earlier.page_id) + '"';
+    return '<div><button data-dup="later"' + a + '>같은 종이 — 이 쪽을 버린다</button> '
+      + '<button data-dup="earlier"' + a + '>같은 종이 — 먼저 쪽을 버리고 이 쪽을 쓴다</button> '
+      + '<button data-dup="keep"' + a + '>다른 종이 — 둘 다 쓴다</button></div>';
+  }
+  function wireDup(root, after) {
+    for (const b of root.querySelectorAll('button[data-dup]')) {
       b.onclick = async () => {
         const later = b.dataset.p, earlier = b.dataset.e;
         const items = b.dataset.dup === 'later' ? [{ target: later, kind: 'discard' }]
           : (b.dataset.dup === 'earlier' ? [{ target: earlier, kind: 'discard' }]
              : [{ target: later, kind: 'keep' }, { target: earlier, kind: 'keep' }]);
-        if (await post(items)) reload();
+        if (await post(items)) after();
       };
     }
-    dateBox.focus();
   }
 
   if (location.pathname === '/doc') {
