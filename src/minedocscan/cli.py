@@ -247,6 +247,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="첫날의 쪽 몇 장을 다른 흔들기로 다시 찍은 파일을 더한다 (JPEG 재압축·90° 돌린 것 포함 — 다시 스캔한 쪽, tasks/0007)")
     p.add_argument("--display-names", action="store_true",
                    help="합성 템플릿에 표시 이름(display — 엑셀에 보이는 이름)을 넣는다 (tasks/0008). template.yaml 만 바뀐다")
+    p.add_argument("--v2-forms", action="store_true",
+                   help="가상 양식 두 종(유류일지·환경일지, 핸들러 generic)을 날마다 한 장씩 더한다 — 템플릿만으로 "
+                        "새 양식이 들어가는지 보는 확장성 시험 (tasks/0009 4.7)")
+    p.add_argument("--rough", action="store_true",
+                   help="거친 손글씨와 스캔: 획의 굵기·기울기·떨림·연한 잉크·번짐, 쪽의 기울어짐(±1.5°)·잡음·JPEG 압축 — 모든 양식에 "
+                        "(tasks/0009 4.7)")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
@@ -1116,7 +1122,7 @@ def cmd_synth(a) -> int:
     r = generate(a.out, days=days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
                  usage_logs=a.usage_logs, usage_only=a.usage_only, print_layers=a.print_layers,
                  usage_variants=a.usage_variants, rotate_pages=a.rotate_pages, blank_backs=a.blank_backs,
-                 rescans=a.rescans, intake=a.intake, display_names=a.display_names)
+                 rescans=a.rescans, intake=a.intake, display_names=a.display_names, v2_forms=a.v2_forms, rough=a.rough)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")

@@ -170,6 +170,32 @@ def scan_effect(img: np.ndarray, rng, strength: float = 1.0, trace: list | None 
     return out
 
 
+# 거친 스캔 (synth --rough, tasks/0009 4.7 나): scan_effect 뒤에 쪽 전체를 더 기울이고(±1.5°), 잡음·티를 더하고, JPEG 로 한 번 더
+# 거칠게 압축한다 (품질 35–60 — 다시 스캔의 흔들기에서 가장 거친 것 45 의 양옆)
+ROUGH_SKEW_DEG = 1.5
+ROUGH_NOISE = 7.0                 # 잡음의 표준편차 (scan_effect 의 4 위에)
+ROUGH_SPECKS = 0.0004             # 티: 화소의 이 비율에 어두운 점
+ROUGH_JPEG = (35, 61)
+
+
+def rough_scan(img: np.ndarray, rng, trace: list | None = None) -> np.ndarray:
+    """거친 스캔. trace: scan_effect 가 붙인 기하 행렬에 이 회전을 겹친다 (인쇄 층을 만들 쪽을 템플릿 좌표로 되돌리는 데)."""
+    h, w = img.shape
+    paper = int(np.percentile(img, 90))
+    r = cv2.getRotationMatrix2D((w / 2, h / 2), float(rng.uniform(-ROUGH_SKEW_DEG, ROUGH_SKEW_DEG)), 1.0)
+    out = cv2.warpAffine(img, r, (w, h), flags=cv2.INTER_LINEAR, borderValue=paper).astype(np.float32)
+    out += rng.normal(0, ROUGH_NOISE, out.shape).astype(np.float32)
+    n = int(out.size * ROUGH_SPECKS)
+    out[rng.integers(0, h, n), rng.integers(0, w, n)] = rng.uniform(40, 140, n)
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, int(rng.integers(*ROUGH_JPEG))])
+    out = cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
+    if trace:
+        m, _old = trace[-1]
+        trace[-1] = ((np.vstack([r, [0, 0, 1]]) @ np.vstack([m, [0, 0, 1]]))[:2], out)
+    return out
+
+
 # 다시 스캔한 쪽 (tasks/0007 단계 3): 첫날의 몇 번째로 더한 쪽을 (어떻게) — 점검표, 일보 둘, 행렬
 RESCAN_PAGES = ((1, "shake"), (2, "jpeg"), (3, "rotated"), (-1, "shake"))
 RESCAN_JPEG_QUALITY = 45          # 다시 압축하는 품질 — 1절 다의 흔들기(JPEG 45–80)에서 가장 거친 것
@@ -606,13 +632,14 @@ def add_display(name: str, spec: dict) -> dict:
 
 
 def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low: bool = False, meta: bool = False,
-                    usage: bool = False, usage_variants: bool = False, display_names: bool = False) -> Path:
+                    usage: bool = False, usage_variants: bool = False, display_names: bool = False, v2: bool = False) -> Path:
     """합성 사이트 팩(site.toml + 템플릿 세 종)을 쓴다. revision_from(날짜)을 주면 행렬 양식이 두 판이 된다:
     그 전날까지 v1, 그날부터 v2 (같은 계열, 유효 기간으로 가린다). low: 운반 양식 두 종이 낮은 칸.
     meta: 일보에 월·일 필드, 차량번호가 네 자리 숫자인 행렬 머리글 (tasks/0004 단계 2).
     usage: 가동 일보 두 종(tools/synth_usage.py)과 장비명 대응표 [equipment.aliases] (tasks/0005).
     usage_variants: 운행일보의 판 B(synth_usage_log_b)를 더하고 두 판에 family·concurrent: true (tasks/0006 단계 4).
-    display_names: 템플릿에 표시 이름(display)을 넣는다 (tasks/0008 4.5) — template.yaml 만 바뀐다."""
+    display_names: 템플릿에 표시 이름(display)을 넣는다 (tasks/0008 4.5) — template.yaml 만 바뀐다.
+    v2: 가상 양식 두 종(tools/synth_v2.py — tasks/0009 4.7 가). 표시 이름은 그 템플릿에 처음부터 있다."""
     site = Path(site_dir)
     site.mkdir(parents=True, exist_ok=True)
     toml = SITE_TOML
@@ -627,6 +654,10 @@ def write_site_pack(site_dir: str | Path, revision_from: str | None = None, low:
     if usage_variants:
         built.update({name: b() for name, b in synth_usage.VARIANT_BUILDERS.items()})
         synth_usage.concurrent_specs(built)
+    if v2:
+        from . import synth_v2
+
+        built.update({name: b() for name, b in synth_v2.BUILDERS.items()})
     if revision_from:
         last_v1 = (date.fromisoformat(revision_from) - timedelta(days=1)).isoformat()
         built[T_MATRIX] = build_haul_matrix(SLOTS, T_MATRIX, (None, last_v1), low=low)
@@ -950,6 +981,17 @@ def _add_usage_pages(add, plans: list, blanks: dict, rng, stem: str, day: str, a
         truth.append(synth_usage.truth_of(source, day, p))
 
 
+def _add_v2_pages(add, plans: list, blanks: dict, rng, stem: str, answers: list, truth: list) -> None:
+    """그날의 가상 양식 쪽을 묶음에 붙인다 (그리기·스캔 효과 모두 가상 양식의 난수로). 정답과 쪽 정답을 모은다."""
+    from . import synth_v2
+
+    for p in plans:
+        n = add(synth_v2.fill_page(*blanks[p.template], p, rng), p.template, _rng=rng)
+        source = f"{stem}#{n}"
+        answers += synth_v2.answers_of(source, p)
+        truth.append(synth_v2.truth_of(source, p))
+
+
 def _layer_pick(by_day: dict) -> list[tuple[str, int]]:
     """인쇄 층에 쓸 쪽의 자리 (날짜, 그날의 몇째): 날짜순으로 돌아가며 한 장씩, 최대 MAX_PAGES (template print-layer 의 pick_order 와
     같은 차례)."""
@@ -1009,7 +1051,8 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
              meta_fields: bool = False, mix_pages: bool = False, usage_logs: bool = False,
              usage_only: bool = False, print_layers: bool = False, usage_variants: bool = False,
              rotate_pages: bool = False, blank_backs: bool = False, rescans: bool = False,
-             intake: bool = False, display_names: bool = False) -> SynthResult:
+             intake: bool = False, display_names: bool = False, v2_forms: bool = False,
+             rough: bool = False) -> SynthResult:
     """out_dir 에 합성 사이트 팩(site/)과 스캔 문서(scans/), 정답(truth.json, answers.json)을 만든다.
 
     하루에 PDF 한 개: 점검표 1장 → 차량별 일보(일보를 낸 차량 수) → 행렬 1장.
@@ -1039,7 +1082,29 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     OUT/baseline/ 에 견줄 묶음(네 날을 바로 선 채로·날짜 있는 이름·빈 쪽 없이 — scans/ 와 같은 파일). 이 묶음의 PDF 는 쪽을 무손실(화소 그대로 — FlateDecode)로
     담는다. truth["intake"]: 접수 순서, 문서·쪽의 상태(넣을 결정을 적용한 뒤, null 인식기), 넣을 결정(날짜·버리기).
     display_names=True 면 템플릿에 표시 이름(display)을 넣는다 (tasks/0008 4.5) — template.yaml 만 바뀐다.
+    v2_forms=True 면 가상 양식 두 종(tools/synth_v2.py — 유류일지·환경일지, 핸들러 generic)을 날마다 한 장씩 묶음 끝에 붙인다
+    (tasks/0009 4.7 가) — 난수를 따로 쓴다. 정답은 answers.json, 쪽마다 truth["v2"].
+    rough=True 면 거친 손글씨와 거친 스캔 (tasks/0009 4.7 나): 획의 떨림·굵기 변화·연한 잉크·번짐(handfont.roughened), 쪽 전체의
+    기울어짐(±1.5°)·잡음·티·JPEG 재압축(rough_scan) — 모든 양식에. 난수를 따로 쓴다 — 같은 글자를 같은 자리에 쓰고 거칠게만 한다.
+    두 선택 없이는 단계 3 뒤의 바이트 그대로다.
     """
+    args = dict(locals())
+    if not rough:
+        return _generate(**args)
+    from .handfont import roughened
+
+    with roughened(np.random.default_rng([seed, 6006])):                  # 손글씨의 거칠기는 따로 — 쪽의 내용은 그대로
+        return _generate(**args)
+
+
+def _generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "2030-01-07",
+             strength: float = 1.0, matrix_revision: bool = False, low_cells: bool = False,
+             meta_fields: bool = False, mix_pages: bool = False, usage_logs: bool = False,
+             usage_only: bool = False, print_layers: bool = False, usage_variants: bool = False,
+             rotate_pages: bool = False, blank_backs: bool = False, rescans: bool = False,
+             intake: bool = False, display_names: bool = False, v2_forms: bool = False,
+             rough: bool = False) -> SynthResult:
+    """generate 의 본문 (rough 의 손글씨 문맥은 generate 가 연다)."""
     if mix_pages and not meta_fields:
         raise ValueError("mix_pages 는 meta_fields 와 같이 쓴다")
     usage_logs = usage_logs or usage_only
@@ -1053,7 +1118,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     d0 = date.fromisoformat(start)
     revision_from = (d0 + timedelta(days=1)).isoformat() if matrix_revision else None
     site = write_site_pack(root / "site", revision_from=revision_from, low=low_cells, meta=meta_fields, usage=usage_logs,
-                           usage_variants=usage_variants, display_names=display_names)
+                           usage_variants=usage_variants, display_names=display_names, v2=v2_forms)
     scans = root / "scans"
     rng = np.random.default_rng(seed)
     blanks = _blank_forms(low_cells, meta_fields)
@@ -1072,6 +1137,14 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         if usage_variants:                                          # 판을 섞는 난수도 따로 — 쪽의 내용은 그대로다
             usage_blanks.update({name: b() for name, b in synth_usage.VARIANT_BUILDERS.items()})
             synth_usage.assign_variants(usage_plan, np.random.default_rng([seed, 5005, 2]))
+    v2_plan, v2_blanks, v2_truth, rng_v = None, None, [], None
+    if v2_forms:
+        from . import synth_v2
+
+        rng_v = np.random.default_rng([seed, 4004])               # 가상 양식은 따로 — 앞의 쪽의 난수 흐름을 건드리지 않는다
+        v2_blanks = {name: b() for name, b in synth_v2.BUILDERS.items()}
+        v2_plan = [synth_v2.plan_day((d0 + timedelta(days=d)).isoformat(), rng_v) for d in range(days)]
+    rng_r = np.random.default_rng([seed, 6007]) if rough else None           # 거친 스캔 — 따로
     layer_pages = {} if print_layers else None
     rng_i = np.random.default_rng([seed, 7007]) if (rotate_pages or blank_backs) else None   # 접수의 쪽 — 따로
     clean_first: list = []                                                  # rescans·intake: 첫날의 깨끗한 쪽 (원래 쪽 번호와 함께)
@@ -1089,6 +1162,8 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
             if (rescans or intake) and _d == 0:
                 clean_first.append((img, template, f"{_stem}#{len(_pages) + 1}", dict(extra)))
             scanned = scan_effect(img, _rng, strength, _trace)
+            if rough:
+                scanned = rough_scan(scanned, rng_r, _trace)
             if rotate_pages:
                 extra["rotation"] = int(rng_i.choice([0, 90, 180, 270]))
                 scanned = rotate_scan(scanned, extra["rotation"])
@@ -1103,6 +1178,8 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
 
         if usage_only:
             _add_usage_pages(add, usage_plan[d], usage_blanks, rng_u, stem, day, answers, usage_truth, layer_pages)
+            if v2_forms:
+                _add_v2_pages(add, v2_plan[d], v2_blanks, rng_v, stem, answers, v2_truth)
             _write_pdf(scans / f"{stem}.pdf", pages, lossless=intake)
             documents[stem] = page_info
             continue
@@ -1142,6 +1219,8 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
                             "text": str(r["trips"])})
         if usage_logs:
             _add_usage_pages(add, usage_plan[d], usage_blanks, rng_u, stem, day, answers, usage_truth, layer_pages)
+        if v2_forms:
+            _add_v2_pages(add, v2_plan[d], v2_blanks, rng_v, stem, answers, v2_truth)
         _write_pdf(scans / f"{stem}.pdf", pages, lossless=intake)
         documents[stem] = page_info
         day_pages[stem] = (pages, page_info)
@@ -1181,6 +1260,10 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
         truth["usage"] = usage_truth
     if usage_variants:
         truth["usage_variants"] = True
+    if v2_forms:
+        truth["v2"] = v2_truth
+    if rough:
+        truth["rough"] = True
     if rotate_pages:
         truth["rotate_pages"] = True
     if blank_backs:

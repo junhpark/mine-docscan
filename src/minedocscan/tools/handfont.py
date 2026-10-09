@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import math
 
 import cv2
@@ -136,6 +137,26 @@ def draw_word(word: str, height_px: float, style: dict, rng: np.random.Generator
     return _render(strokes, height_px, style, rng)
 
 
+# 거친 손글씨 (synth --rough, tasks/0009 4.7 나): 떨림을 더하고, 획마다 굵기가 다르고, 가끔 연한 잉크와 번짐. 자기 난수로만 —
+# 켜지 않으면 그리는 것이 바이트까지 그대로이고, 켜도 rng 의 흐름은 그대로다 (같은 글자를 같은 자리에 같은 모양으로 쓰고 거칠게만 한다)
+ROUGH_TREMOR = 0.018              # 떨림: 점마다 글자 높이 대비 표준편차 (손떨림 wobble 0.012–0.027 위에 더한다)
+ROUGH_SLANT = 0.2                 # 기울기: 글자마다 더하는 기울임 (±, 기준선에서의 높이 대비)
+ROUGH_THICK = (-1, 3)             # 획마다 굵기에 더하는 화소 (정수, 끝은 빼고)
+ROUGH_LIGHT = (0.3, 0.45, 0.8)    # 연한 잉크: 글자의 이 비율이 잉크 농도 0.45–0.8 배
+ROUGH_BLOT = 0.04                 # 번짐: 글자의 이 비율에 획 위의 한 점이 굵기의 1–2 배 원으로
+_ROUGH: list = []
+
+
+@contextlib.contextmanager
+def roughened(rng: np.random.Generator):
+    """이 안에서 그리는 손글씨는 거칠다 (rng: 거칠기만의 난수)."""
+    _ROUGH.append(rng)
+    try:
+        yield
+    finally:
+        _ROUGH.pop()
+
+
 def _render(strokes: list[Stroke], height_px: float, style: dict, rng: np.random.Generator) -> np.ndarray:
     shear = style["slant"] + float(rng.uniform(-0.12, 0.12))
     ang = math.radians(float(rng.uniform(-10, 10)))
@@ -151,6 +172,11 @@ def _render(strokes: list[Stroke], height_px: float, style: dict, rng: np.random
         xr = x * math.cos(ang) - y * math.sin(ang)
         yr = x * math.sin(ang) + y * math.cos(ang)
         pts_all.append(np.stack([xr, yr], 1) * height_px)
+    rr = _ROUGH[-1] if _ROUGH else None
+    if rr is not None:
+        extra = float(rr.uniform(-ROUGH_SLANT, ROUGH_SLANT))
+        pts_all = [np.stack([q[:, 0] + extra * q[:, 1], q[:, 1]], 1) + rr.normal(0, height_px * ROUGH_TREMOR, q.shape)
+                   for q in pts_all]
     allp = np.concatenate(pts_all)
     m = int(height_px * 0.6) + thick * 2
     x0, y0 = allp[:, 0].min(), allp[:, 1].min()
@@ -159,8 +185,19 @@ def _render(strokes: list[Stroke], height_px: float, style: dict, rng: np.random
     g8 = np.zeros((h, w), np.uint8)
     shift = 4                                                         # 1/16 화소 정밀도로 그린다
     polys = [np.round((q - [x0 - m, y0 - m]) * (1 << shift)).astype(np.int32) for q in pts_all]
-    cv2.polylines(g8, polys, False, 255, thick, cv2.LINE_AA, shift)
-    return g8.astype(np.float32) / 255.0
+    if rr is None:
+        cv2.polylines(g8, polys, False, 255, thick, cv2.LINE_AA, shift)
+        return g8.astype(np.float32) / 255.0
+    for q in polys:
+        cv2.polylines(g8, [q], False, 255, max(1, thick + int(rr.integers(*ROUGH_THICK))), cv2.LINE_AA, shift)
+    if rr.random() < ROUGH_BLOT:
+        q = polys[int(rr.integers(len(polys)))]
+        px, py = (q[int(rr.integers(len(q)))] >> shift).tolist()
+        cv2.circle(g8, (int(px), int(py)), max(2, int(round(thick * float(rr.uniform(1.0, 2.0))))), 255, -1, cv2.LINE_AA)
+    out = g8.astype(np.float32) / 255.0
+    if rr.random() < ROUGH_LIGHT[0]:
+        out *= float(rr.uniform(*ROUGH_LIGHT[1:]))
+    return out
 
 
 def random_variants(rng: np.random.Generator) -> dict[str, int]:
