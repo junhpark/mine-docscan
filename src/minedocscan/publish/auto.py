@@ -6,7 +6,8 @@
 - **전체 훑기**: 시작할 때와 sweep_minutes 마다 (0 이면 시작할 때만).
 - **실패하면** 그 바퀴의 싣기만 건너뛰고 건드린 것을 들고 있다가 다음에 같이 싣는다. 연결에 실패한 뒤 retry_seconds 안의 바퀴는 연결하지
   않는다 (꺼진 서버에 바퀴마다 매달리지 않게). 접수·처리·엑셀은 계속된다. 시계는 주입한다.
-- psycopg 가 없으면 시작할 때 한 번 알리고 끈다. 상태(status)에는 대상의 호스트·DB·스키마와 수, 실패의 종류만 — URL·비밀번호는 없다.
+- psycopg 가 없으면 시작할 때 한 번 알리고 끈다. 사이트 팩에 [site] name 이 없어도 그렇다 (사본의 주인 — tasks/0009 4.1 다: 대상이 다른
+  사이트의 사본이면 그 바퀴의 실패 other_site). 상태(status)에는 대상의 호스트·DB·스키마와 수, 실패의 종류만 — URL·비밀번호는 없다.
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ..forms.sitepack import declared_site_name
 from ..touched import Box, Touched
 from . import core
 from .scopes import Orphans
@@ -44,10 +46,15 @@ class AutoPublish:
         self.reason: str | None = None
         self.fell_back = 0                            # 더러운 범위만 싣다가 전체 훑기로 넘어간 횟수
         self.skipped: set = set()                     # 지금 대상에 없는 건너뛴 범위 — 다시 견준 바퀴에서만 고친다 (더러운 바퀴가 0 으로 덮지 않게)
+        self.site = declared_site_name(settings.site)
         if not settings.publish_url:
             self.reason = "off"
         elif settings.publish_enabled is False:
             self.reason = "disabled"
+        elif self.site is None:
+            self.reason = "no_site_name"
+            self.notice = ("사이트 팩의 site.toml 에 [site] name 이 없어 통합 DB 싣기를 끕니다 — 대상이 어느 사이트의 사본인지 적는 "
+                           "이름입니다")
         elif (connect or core.connect) is core.psycopg_connect:
             try:
                 import psycopg  # noqa: F401
@@ -82,7 +89,7 @@ class AutoPublish:
             return None
         try:
             res = core.run(con, self.settings, full=full, documents=t.documents | t.removed, dates=t.all_dates(con),
-                           connect=self.connect)
+                           connect=self.connect, site=self.site)
         except Exception as e:                                # noqa: BLE001 — 무엇이 실패하든 건드린 것을 들고 있다가 다음에
             # 다시 하는 간격은 실패한 때부터 (시작한 때부터 재면 잠금·문장을 기다린 만큼 간격이 준다)
             self.held, self.last_fail = t, self.clock()
@@ -91,7 +98,7 @@ class AutoPublish:
             msg = str(e) if isinstance(e, core.PublishError | Orphans) else f"싣지 못했습니다 ({type(e).__name__})"
             return Failed(kind, msg, _count(t, full) or 1)
         self.held, self.last_fail = Touched(), None
-        if full:
+        if full or res.full:                          # 표를 새로 만들어 전부 실었거나 키 충돌로 전체 훑기로 넘어갔다 — 전체 훑기를 마친 것
             self.last_sweep = now
         self.fell_back += res.fell_back
         self.skipped = (self.skipped - res.checked_ids) | res.skipped_ids

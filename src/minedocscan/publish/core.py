@@ -6,7 +6,11 @@
 """
 from __future__ import annotations
 
+import contextlib
 import re
+import socket
+import threading
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -30,17 +34,45 @@ from .scopes import (
 KINDS = ("document", "date", "whole")
 
 
+AGAIN = "다음에 다시 합니다"                       # 바퀴 끝의 싣기 — 명령(publish)은 "다시 실행하십시오" (PublishError.for_command)
+
+
 class PublishError(RuntimeError):
-    """싣지 못했다 — 한 줄 (값·비밀값 없이). code: 종료 코드 (2 = 닿지 못했다·드라이버가 없다·판이 다르다)."""
+    """싣지 못했다 — 한 줄 (값·비밀값 없이). code: 종료 코드 (2 = 닿지 못했다·드라이버가 없다·판이 다르다·사이트가 다르다)."""
 
     def __init__(self, message: str, code: int = 2, kind: str = "error"):
         super().__init__(message)
         self.code, self.kind = code, kind
 
+    def for_command(self) -> str:
+        """명령이 찍는 글: 시간 제한·끊김의 '다음에 …'는 바퀴 끝의 싣기의 말이다 — 명령은 다시 하지 않는다."""
+        return str(self).replace(AGAIN, "다시 실행하십시오")
+
 
 class NeedRebuild(PublishError):
     def __init__(self, what: str):
         super().__init__(f"대상의 {what} 이(가) 이 프로그램과 다릅니다 — minedocscan publish --rebuild", 2, "version")
+
+
+# 사본의 주인 (tasks/0009 4.1 다): 실제 DB 를 실어 둔 스키마에 합성 묶음의 작업 폴더로 publish 하면 문서 3·날짜 3 범위를 지우고 합성 행으로
+# 바꿨다 (한 트랜잭션, 묻지 않는다 — URL 이 환경변수에 있는 PC 에서 설명서의 합성 예제를 돌리면 일어난다). 대상의 pub_meta 에 사이트 팩의
+# [site] name 을 두고 다르면 싣지 않는다. 글에 두 이름을 찍지 않는다
+OTHER_SITE = ("대상은 다른 사이트 팩의 사본입니다 — 맞는 대상인지 확인하고, 이 사이트로 바꾸려면 minedocscan publish --rebuild")
+NO_SITE_NAME = ("사이트 팩의 site.toml 에 [site] name 이 없습니다 — 통합 DB·엑셀 폴더가 어느 사이트의 사본인지 적는 이름입니다 "
+                "(폴더 이름으로 대신하지 않습니다). 적기 전에 minedocscan info 가 평가셋의 소금값을 알리면 그것부터 적습니다")
+NOT_OURS = ("대상 스키마에 이 프로그램의 표와 이름이 같은 표가 있지만 pub_meta 가 없습니다 — 이 프로그램이 만든 표가 아니라 지우지 않았습니다. "
+            "다른 스키마([publish] schema)를 쓰거나 그 표를 먼저 치우십시오")
+
+
+def site_name(settings, site: str | None = None) -> str:
+    """싣는 쪽의 사이트 이름: 준 것, 없으면 사이트 팩의 [site] name. 둘 다 없으면 PublishError (종류 no_site_name — 연결하기 전에)."""
+    if site is None and settings is not None:
+        from ..forms.sitepack import declared_site_name
+
+        site = declared_site_name(settings.site)
+    if not site:
+        raise PublishError(NO_SITE_NAME, 2, "no_site_name")
+    return site
 
 
 @dataclass
@@ -68,19 +100,21 @@ class Result:
 # ── 연결 ───────────────────────────────────────────────────────────────────
 _URL = re.compile(r"(?i)postgres(?:ql)?://")
 _NAME = re.compile(r"[A-Za-z0-9._:\-]{1,253}")               # 찍어도 되는 호스트·DB 이름 (그 밖의 글자면 ? — 비밀번호의 조각일 수 있다)
+_KW_NAME = re.compile(r"[A-Za-z0-9._\-]{1,253}")             # 키워드 꼴의 host·dbname — ':' 도 ? (이름:비밀 을 잘못 적었을 수 있다)
 _KW = re.compile(r"(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S+)")
 
 
-def _name(v: str | None, missing: str = "?") -> str:
+def _name(v: str | None, missing: str = "?", ok: re.Pattern = _NAME) -> str:
     v = (v or "").strip("'")
-    return missing if not v else v if _NAME.fullmatch(v) else "?"
+    return missing if not v else v if ok.fullmatch(v) else "?"
 
 
 def describe_url(url: str | None) -> str:
     """찍어도 되는 대상의 이름: 호스트(:포트)/DB — 사용자·비밀번호 없이. postgresql://… 꼴과 libpq 의 키워드 꼴(host=… dbname=…).
     그 밖의 글자는 내지 않는다: URL 의 사용자 정보 뒤(경로·질의)에 '@' 가 있으면 비밀번호에 '/'·'?'·'#' 가 그대로 들어간 것이라
-    어디까지가 비밀인지 모른다 → 읽을 수 없는 URL. 호스트·DB 이름은 글자·숫자·'.-_' 만 (아니면 ?)."""
-    if not url:
+    어디까지가 비밀인지 모른다 → 읽을 수 없는 URL. 사용자 정보('@')가 없는데 호스트 뒤가 숫자 포트가 아니면(postgresql://이름:비밀/db —
+    '@호스트'를 빠뜨렸다) 읽을 수 없는 URL. 호스트·DB 이름은 글자·숫자·'.-_' 만 (아니면 ? — 키워드 꼴은 ':' 도 ?)."""
+    if not url or not url.strip():
         return "(없음)"
     s = url.strip()
     if not _URL.match(s):                                     # 키워드 꼴: 아는 키만 고른다 (password 는 보지 않는다)
@@ -88,12 +122,19 @@ def describe_url(url: str | None) -> str:
         if not kv:
             return "(읽을 수 없는 연결 문자열)"
         port = (kv.get("port") or "").strip("'")
-        return f"{_name(kv.get('host'), 'localhost')}{':' + port if port.isdigit() else ''}/{_name(kv.get('dbname'))}"
+        return (f"{_name(kv.get('host'), 'localhost', _KW_NAME)}{':' + port if port.isdigit() else ''}/"
+                f"{_name(kv.get('dbname'), ok=_KW_NAME)}")
     try:
         u = urlsplit(s)
         if "@" in u.path + u.query + u.fragment:
             return "(읽을 수 없는 URL)"
+        if "@" not in u.netloc:
+            after = u.netloc[u.netloc.find("]") + 1:] if u.netloc.startswith("[") else u.netloc[u.netloc.find(":"):] \
+                if ":" in u.netloc else ""
+            if after and not re.fullmatch(r":\d+", after, re.ASCII):
+                return "(읽을 수 없는 URL)"
         host = _name(u.hostname, "localhost")
+        host = f"[{host}]" if ":" in host else host               # IPv6 는 괄호로 (포트와 갈리게)
         port = f":{u.port}" if u.port else ""
     except ValueError:
         return "(읽을 수 없는 URL)"
@@ -163,16 +204,185 @@ def _connect_fn(fn: Callable | None) -> Callable:
     return fn if fn is not None else globals()["connect"]
 
 
+# ── 우리 쪽의 기다림의 상한 (tasks/0009 4.1 라) ─────────────────────────────────────────
+# 멈춰 버린 서버: 연결은 살아 있는데 서버의 프로세스가 돌지 않으면(가상 머신의 일시 정지, 저장 장치의 멈춤 — 실험에서는 그 백엔드에 SIGSTOP)
+# 서버가 거는 시간 제한도, TCP keepalive 도 작동하지 않는다 (서버의 커널이 답한다). 풀릴 때까지 기다렸다 (153초까지 보고 풀었다) — 그동안
+# 작업 스레드(접수·처리)가 선다. 그래서 문장 하나(execute·COPY·커밋)마다 statement_timeout_s + 30초 안에 돌아오지 않으면
+# ① cancel_safe(timeout=5) — 취소도 새 연결이라 멈춘 서버에서는 기다린다 (그래서 시간 제한을 주고, 다른 스레드에서 그만큼만 기다린다 —
+#    libpq 17 보다 옛 판에서는 cancel_safe 가 시간 제한 없는 cancel 로 돌아간다)
+# ② 그래도 돌아오지 않으면 그 연결의 소켓에 shutdown() — 다른 스레드에서 close()·PQfinish 를 부르지 않는다 (libpq 가 쓰는 중이다).
+#    기다리던 쪽이 끝을 읽고 드라이버가 예외(OperationalError, SQLSTATE 없음)를 낸다 → 종류 connection_lost, 지금의 실패 경로.
+# 서버가 살아 있으면 서버의 statement_timeout 이 30초 먼저 끊는다 — 이 타이머는 서버가 답하지 않을 때만 쏜다.
+WATCH_MARGIN_S = 30.0
+CANCEL_TIMEOUT_S = 5.0
+CANCEL_GRACE_S = 2.0              # 취소가 들었으면(서버가 살아 있다) 문장이 돌아오기를 이만큼 더 기다린 뒤에 소켓을 끊는다
+
+
+class Watchdog:
+    """연결 하나의 감시 타이머 (스레드 하나). `with dog():` 가 문장 하나 — 그 안에서 limit_s 를 넘기면 취소 → 소켓 끊기.
+    fired: 쏜 단계 (None | "cancel" | "shutdown") — 시험과 기록용."""
+
+    def __init__(self, conn, limit_s: float, cancel_timeout_s: float = CANCEL_TIMEOUT_S, grace_s: float = CANCEL_GRACE_S):
+        self.conn, self.limit_s = conn, float(limit_s)
+        self.cancel_timeout_s, self.grace_s = cancel_timeout_s, grace_s
+        self.fired: str | None = None
+        self._cv = threading.Condition()
+        self._gen = 0                       # 문장의 번호
+        self._active: int | None = None     # 지금 도는 문장의 번호 (없으면 None)
+        self._deadline: float | None = None
+        self._closed = False
+        self._thread = threading.Thread(target=self._run, name="publish-watchdog", daemon=True)
+        self._thread.start()
+
+    @contextlib.contextmanager
+    def __call__(self):
+        with self._cv:
+            self._gen += 1
+            self._active, self._deadline = self._gen, time.monotonic() + self.limit_s
+            self._cv.notify_all()
+        try:
+            yield
+        finally:
+            with self._cv:
+                self._active = self._deadline = None
+                self._cv.notify_all()
+
+    def close(self) -> None:
+        with self._cv:
+            self._closed = True
+            self._cv.notify_all()
+        self._thread.join(timeout=self.cancel_timeout_s + self.grace_s + 1)
+
+    def _run(self) -> None:
+        with self._cv:
+            while not self._closed:
+                if self._deadline is None:
+                    self._cv.wait()
+                    continue
+                left = self._deadline - time.monotonic()
+                if left > 0:
+                    self._cv.wait(left)
+                    continue
+                gen, self._deadline = self._active, None
+                self._cv.release()
+                try:
+                    self._fire(gen)
+                finally:
+                    self._cv.acquire()
+
+    def _still(self, gen) -> bool:
+        return self._active is not None and self._active == gen
+
+    def _fire(self, gen) -> None:
+        self.fired = "cancel"
+        done = threading.Event()
+        ok: list[bool] = []
+
+        def cancel():
+            try:
+                fn = getattr(self.conn, "cancel_safe", None)
+                if fn is not None:
+                    fn(timeout=self.cancel_timeout_s)
+                    ok.append(True)
+            except Exception:                                # noqa: BLE001 — CancellationTimeout·연결 실패: 소켓을 끊는다
+                pass
+            finally:
+                done.set()
+
+        threading.Thread(target=cancel, name="publish-cancel", daemon=True).start()
+        done.wait(self.cancel_timeout_s)
+        with self._cv:
+            if ok:                                           # 취소가 서버에 닿았다 — 문장이 곧 돌아온다
+                end = time.monotonic() + self.grace_s
+                while self._still(gen) and not self._closed and time.monotonic() < end:
+                    self._cv.wait(end - time.monotonic())
+            if not self._still(gen):
+                return
+            self.fired = "shutdown"                          # 잠금 안에서 — 그 사이에 돌아온 문장 뒤의 다음 문장을 끊지 않게
+            shutdown_socket(self.conn)
+
+
+def shutdown_socket(conn) -> None:
+    """연결의 소켓에 shutdown() 만 (닫지 않는다 — 기술자는 libpq 의 것이다). 기다리던 쪽이 끝을 읽는다."""
+    try:
+        fd = conn.pgconn.socket
+    except Exception:                                        # noqa: BLE001 — 이미 끊겼다
+        return
+    try:
+        s = socket.socket(fileno=fd)                         # 같은 기술자를 빌린다 (가족·형은 기술자에서)
+    except OSError:
+        return
+    try:
+        s.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    finally:
+        s.detach()                                           # 닫지 않고 돌려준다
+
+
+class _Watched:
+    """커서 하나: execute·executemany·copy 가 문장 하나씩 감시 타이머 안에서."""
+
+    def __init__(self, cur, dog: Watchdog):
+        self._cur, self._dog = cur, dog
+
+    def __enter__(self):
+        self._cur.__enter__()
+        return self
+
+    def __exit__(self, *a):
+        return self._cur.__exit__(*a)
+
+    def execute(self, *a, **kw):
+        with self._dog():
+            return self._cur.execute(*a, **kw)
+
+    def executemany(self, *a, **kw):
+        with self._dog():
+            return self._cur.executemany(*a, **kw)
+
+    def __getattr__(self, name):
+        attr = getattr(self._cur, name)
+        if name != "copy":
+            return attr
+
+        @contextlib.contextmanager
+        def copy(*a, **kw):                                   # COPY 하나(보내기 + 끝의 답)가 문장 하나
+            with self._dog(), attr(*a, **kw) as cp:
+                yield cp
+
+        return copy
+
+
 # ── 대상 ───────────────────────────────────────────────────────────────────
 class Target:
-    """대상의 스키마 하나 (연결 하나). 이 클래스만 대상에 SQL 을 보낸다."""
+    """대상의 스키마 하나 (연결 하나). 이 클래스만 대상에 SQL 을 보낸다. watchdog: 문장마다의 감시 타이머 (없으면 감시하지 않는다 —
+    가짜 연결의 시험)."""
 
-    def __init__(self, conn, schema: str):
+    def __init__(self, conn, schema: str, watchdog: Watchdog | None = None):
         self.conn, self.schema = conn, ddl.check_schema_name(schema)
         self.s = q(self.schema)
+        self.watchdog = watchdog
 
     def cur(self):
-        return self.conn.cursor()
+        c = self.conn.cursor()
+        return c if self.watchdog is None else _Watched(c, self.watchdog)
+
+    def _watch(self):
+        return self.watchdog() if self.watchdog is not None else contextlib.nullcontext()
+
+    def commit(self) -> None:
+        with self._watch():
+            self.conn.commit()
+
+    def rollback(self) -> None:
+        with self._watch():
+            self.conn.rollback()
+
+    def close(self) -> None:
+        if self.watchdog is not None:
+            self.watchdog.close()
+        self.conn.close()
 
     def limit(self, lock_s: float, statement_s: float) -> None:
         """이 트랜잭션의 잠금·문장 시간 제한 (set_config(…, true) = SET LOCAL — 트랜잭션이 끝나면 풀린다: 되돌린 뒤 다시 건다.
@@ -192,9 +402,16 @@ class Target:
             c.execute(f"SELECT key, value FROM {self.s}.{q(META_TABLE)}")
             return dict(c.fetchall())
 
-    def create(self) -> None:
+    def same_name_tables(self) -> int:
+        """이 프로그램의 표와 이름이 같은 표의 수 (pub_meta 가 없을 때 — 이 프로그램이 만든 것이 아니다)."""
+        with self.cur() as c:
+            c.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = %s AND table_name = ANY(%s)",
+                      (self.schema, ddl.owned_tables()))
+            return c.fetchone()[0]
+
+    def create(self, site: str) -> None:
         """표를 만든다. 스키마는 없을 때만 만든다 — CREATE SCHEMA 는 (IF NOT EXISTS 여도) DB 의 CREATE 권한이 있어야 하므로, 관리자가
-        스키마를 만들어 준 전용 계정은 그 스키마 안에만 쓴다."""
+        스키마를 만들어 준 전용 계정은 그 스키마 안에만 쓴다. pub_meta 에 스키마 버전·싣기의 판·사이트 이름."""
         with self.cur() as c:
             c.execute("SELECT 1 FROM information_schema.schemata WHERE schema_name = %s", (self.schema,))
             if c.fetchone() is None:
@@ -202,7 +419,7 @@ class Target:
             for stmt in ddl.create_statements(self.schema):
                 c.execute(stmt)
             c.executemany(f"INSERT INTO {self.s}.{q(META_TABLE)} (key, value) VALUES (%s, %s)",
-                          [("schema_version", str(SCHEMA_VERSION)), ("publish_version", str(PUBLISH_VERSION))])
+                          [("schema_version", str(SCHEMA_VERSION)), ("publish_version", str(PUBLISH_VERSION)), ("site", site)])
 
     def drop(self) -> None:
         """이 프로그램이 만든 표만 지운다 (CASCADE 하지 않는다 — 뷰가 걸려 있으면 드라이버가 거절하고, 부른 쪽이 알린다)."""
@@ -291,27 +508,34 @@ def plan(con, target: Target, full: bool, documents: Iterable[str] = (), dates: 
 
 
 def publish(con, target: Target, full: bool = True, documents: Iterable[str] = (), dates: Iterable[str] = (),
-            check: bool = False, now: Callable[[], str] = _now, fail_after: int | None = None) -> Result:
+            check: bool = False, now: Callable[[], str] = _now, fail_after: int | None = None, *, site: str) -> Result:
     """한 번의 싣기 (한 트랜잭션). check=True 면 쓰지 않고(상태 표도) 다른 범위의 수만 Result 에.
-    작업 DB 는 한 읽기 트랜잭션으로 본다 (store.db.read_txn). fail_after: 시험용 — 그 수의 범위를 넣은 뒤 예외 (한 트랜잭션인지)."""
+    작업 DB 는 한 읽기 트랜잭션으로 본다 (store.db.read_txn). fail_after: 시험용 — 그 수의 범위를 넣은 뒤 예외 (한 트랜잭션인지).
+    site: 싣는 쪽의 사이트 이름 — 대상의 pub_meta 의 site 와 다르면 싣지 않는다 (PublishError other_site, check 도)."""
     res = Result(full=full)
     with read_txn(con):
         bad = orphans(con)
         if bad:
             raise Orphans(bad)
         if not target.exists():
+            if target.same_name_tables():
+                raise PublishError(NOT_OURS, 2, "not_ours")
             if check:
                 keys = all_keys(con)
                 res.replaced = {k: len(keys[k]) for k in KINDS}
                 return res
-            target.create()
+            target.create(site)
             res.created = True
+            # 표를 새로 만들었으면(대상의 표가 지워졌다 …) 더러운 범위만 싣고 끝내지 않는다 — 그 자리에서 전부 (tasks/0009 4.1 바)
+            full = res.full = True
         else:
             v = target.versions()
             if v.get("schema_version") != str(SCHEMA_VERSION):
                 raise NeedRebuild("스키마 버전")
             if v.get("publish_version") != str(PUBLISH_VERSION):
                 raise NeedRebuild("싣기의 판")
+            if v.get("site") != site:
+                raise PublishError(OTHER_SITE, 2, "other_site")
         keys = plan(con, target, full, documents, dates)
         local = all_keys(con)
         todo: list[tuple[Scope, str]] = []
@@ -381,7 +605,7 @@ def open_target(settings, connect: Callable | None = None):
     except Exception as e:                                  # noqa: BLE001 — 연결 실패의 종류만
         raise PublishError(f"통합 DB({describe_url(settings.publish_url)})에 닿지 못했습니다 ({type(e).__name__})", 2,
                            "connect") from None
-    return Target(conn, settings.publish_schema)
+    return Target(conn, settings.publish_schema, Watchdog(conn, _limits(settings)[1] + WATCH_MARGIN_S))
 
 
 def _sqlstate(e: BaseException):
@@ -407,41 +631,43 @@ def _failure(e: BaseException, settings) -> PublishError:
     state, name = _sqlstate(e), type(e).__name__
     if state == "55P03" or name == "LockNotAvailable":
         return PublishError(f"대상의 잠금을 {lock_s:g}초 넘게 기다려 이번 싣기를 그만뒀습니다 — 다른 연결이 대상의 표를 쥐고 있습니다 "
-                            "(커밋하지 않은 DB 도구, 표를 고치는 작업 …). 대상은 싣기 전 그대로이고 다음에 다시 합니다", 2, "lock_timeout")
+                            f"(커밋하지 않은 DB 도구, 표를 고치는 작업 …). 대상은 싣기 전 그대로이고 {AGAIN}", 2, "lock_timeout")
     if state == "57014" or name == "QueryCanceled":
         return PublishError(f"대상에서 문장 하나가 {stmt_s:g}초를 넘어(또는 관리자가 취소해) 이번 싣기를 그만뒀습니다 — "
-                            "대상은 싣기 전 그대로이고 다음에 다시 합니다", 2, "statement_timeout")
+                            f"대상은 싣기 전 그대로이고 {AGAIN}", 2, "statement_timeout")
     if name == "OperationalError" and not state:              # 연결한 뒤에 끊겼다 (keepalive·tcp_user_timeout, 서버가 꺼졌다 …)
-        return PublishError("싣는 가운데 대상과의 연결이 끊겼습니다 — 커밋하지 못한 것은 서버가 되돌리고, 다음에 다시 합니다", 2,
+        return PublishError(f"싣는 가운데 대상과의 연결이 끊겼습니다 — 커밋하지 못한 것은 서버가 되돌리고, {AGAIN}", 2,
                             "connection_lost")
     return PublishError(f"통합 DB 에 싣지 못했습니다 ({name}) — 대상은 싣기 전 그대로입니다", 2, name)
 
 
 def run(con, settings, full: bool = True, documents: Iterable[str] = (), dates: Iterable[str] = (), check: bool = False,
         connect: Callable | None = None, target: Target | None = None, fail_after: int | None = None,
-        rebuild: bool = False) -> Result:
+        rebuild: bool = False, site: str | None = None) -> Result:
     """연결 → 한 트랜잭션으로 싣기 → 커밋. 더러운 범위만 실은 것이 키 충돌로 실패하면 되돌리고 같은 자리에서 전체 훑기로 다시 한다.
     실패하면 되돌리고 PublishError (종류와 수만). check=True 면 쓰지 않는다 (되돌린다). rebuild=True 면 이 프로그램의 표를 지우고
-    다시 만든 뒤 싣는다 — 같은 트랜잭션이라 읽는 쪽은 빈 표를 보지 않고, 실패하면 대상은 그 전 그대로다."""
+    다시 만든 뒤 싣는다 — 같은 트랜잭션이라 읽는 쪽은 빈 표를 보지 않고, 실패하면 대상은 그 전 그대로다.
+    site: 사이트 이름 (없으면 사이트 팩의 [site] name — 그것도 없으면 연결하기 전에 PublishError no_site_name)."""
+    name = site_name(settings, site)
     own = target is None
     t = target or open_target(settings, connect)
     try:
         t.limit(*_limits(settings))                          # 트랜잭션마다 (되돌리면 풀린다)
         if rebuild:
-            _drop_and_create(t, settings)
+            _drop_and_create(t, settings, name)
         try:
-            res = publish(con, t, full=full, documents=documents, dates=dates, check=check, fail_after=fail_after)
+            res = publish(con, t, full=full, documents=documents, dates=dates, check=check, fail_after=fail_after, site=name)
         except Exception as e:
             _rollback(t)
             if full or check or rebuild or not _is_conflict(e):
                 raise
             t.limit(*_limits(settings))
-            res = publish(con, t, full=True, check=False, fail_after=fail_after)
+            res = publish(con, t, full=True, check=False, fail_after=fail_after, site=name)
             res.fell_back = True
         if check:
             _rollback(t)
         else:
-            t.conn.commit()
+            t.commit()
         return res
     except (PublishError, Orphans):
         _rollback(t)
@@ -452,17 +678,25 @@ def run(con, settings, full: bool = True, documents: Iterable[str] = (), dates: 
     finally:
         if own:
             try:
-                t.conn.close()
+                t.close()
             except Exception:                                # noqa: BLE001
                 pass
 
 
-def _drop_and_create(t: Target, settings=None) -> None:
+def _drop_and_create(t: Target, settings, site: str) -> None:
     """이 프로그램이 만든 표만 지우고 다시 만든다 (CASCADE 하지 않는다 — 부른 쪽의 트랜잭션 안에서, 커밋하지 않는다).
+    pub_meta 가 있을 때만 지운다 (사이트가 달라도 — 바꿔 싣는 길이다). pub_meta 가 없는데 이름이 같은 표가 있으면 지우지 않는다
+    (PublishError not_ours — 이 프로그램이 만든 표가 아니다). 둘 다 없으면 그냥 만든다.
     뷰가 걸려 있어 지우지 못하면 PublishError (종류 depends). 표를 읽는 연결이 있으면 DROP 이 잠금을 기다린다 — lock_timeout."""
     try:
-        t.drop()
-        t.create()
+        if t.exists():
+            t.drop()
+        elif t.same_name_tables():
+            raise PublishError(NOT_OURS, 2, "not_ours")
+        t.create(site)
+    except PublishError:
+        _rollback(t)
+        raise
     except Exception as e:                                   # noqa: BLE001
         _rollback(t)
         if type(e).__name__ == "DependentObjectsStillExist" or _sqlstate(e) == "2BP01":
@@ -476,6 +710,6 @@ def _drop_and_create(t: Target, settings=None) -> None:
 
 def _rollback(t: Target) -> None:
     try:
-        t.conn.rollback()
+        t.rollback()
     except Exception:                                        # noqa: BLE001 — 끊긴 연결
         pass

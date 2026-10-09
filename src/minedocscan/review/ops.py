@@ -71,8 +71,11 @@ class OpsApp:
         docs = [dict(r) for r in con.execute(
             "SELECT document_id, received_at, source_name, source_rel, source_path, n_pages, work_date, status, "
             "work_requested, work_done FROM doc_document")]
+        on_day = {(r[0], r[1]) for r in con.execute(
+            "SELECT DISTINCT document_id, work_date FROM doc_page WHERE work_date IS NOT NULL")}
         for d in docs:
             d["waiting"] = d["status"] == "received" or d["work_requested"] > d["work_done"]
+            d["has_day"] = (d["document_id"], d["work_date"]) in on_day
         needs_date = sorted((d for d in docs if d["status"] == "needs_date"), key=row_document_key)
         recent = sorted(docs, key=lambda d: (d["received_at"] or "", row_document_key(d)), reverse=True)[:RECENT]
         dups = [dict(r) for r in con.execute(
@@ -108,6 +111,8 @@ class OpsApp:
             raise ApiError(404, f"없는 문서: {doc}")
         d = dict(row)
         d["waiting"] = d["status"] == "received" or d["work_requested"] > d["work_done"]
+        d["has_day"] = self.con.execute("SELECT 1 FROM doc_page WHERE document_id = ? AND work_date = ? LIMIT 1",
+                                        (doc, d["work_date"])).fetchone() is not None
         rows = {r["page_no"]: dict(r) for r in self.con.execute(
             "SELECT page_id, page_no, template_name, status, work_date, rotation, duplicate_of, duplicate_sim, error, "
             "align_grid_err FROM doc_page WHERE document_id = ? ORDER BY page_no", (doc,))}
@@ -256,5 +261,8 @@ class OpsApp:
 
 
 def _doc_brief(d: dict) -> dict:
+    """has_day: 그 문서의 쪽이 문서 날짜에 있다 — 엑셀 내려받기 연결은 그때만 (쪽이 다 다른 날짜로 간 문서에 404 의 연결을 두지
+    않는다, tasks/0009 4.1 사)."""
     return {"document_id": d["document_id"], "received_at": d["received_at"], "source_name": d["source_name"],
-            "n_pages": d["n_pages"], "work_date": d["work_date"], "status": d["status"], "waiting": d["waiting"]}
+            "n_pages": d["n_pages"], "work_date": d["work_date"], "status": d["status"], "waiting": d["waiting"],
+            "has_day": bool(d.get("has_day"))}

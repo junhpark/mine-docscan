@@ -105,9 +105,9 @@ minedocscan synth out/intake --intake       # 합성 접수 폴더 OUT/inbox + �
 
 # 내보내기 (tasks/0008, ADR 0021·0022) — 엑셀·통합 DB·가린 쪽 그림은 DB 의 사본 (한 방향)
 # 설정: [export] excel_dir (또는 MINEDOCSCAN_EXCEL_DIR) 이면 watch·serve 가 바퀴 끝에 바뀐 날짜만 쓴다. 통합 DB 는 MINEDOCSCAN_PUBLISH_URL (환경변수로만)
-minedocscan export excel OUT [--date D | --month M | --from D --to D]   # 일별 daily/<달>/<날짜>.xlsx + 월별 monthly/<달>.xlsx (운반 표) — 바뀐 파일만
+minedocscan export excel [OUT] [--date D | --month M | --from D --to D]   # OUT 이 없으면 [export] excel_dir. 일별 daily/<달>/<날짜>.xlsx + 월별 monthly/<달>.xlsx (운반 표) — 바뀐 파일만
 minedocscan export masked-pages OUT --date D [--keep-text]       # 가린 쪽 그림 (쪽 ID.png) — 템플릿이 아는 자리만. 사람이 보고 쓴다
-minedocscan publish [--check | --rebuild]   # 통합 DB 로 싣기: 지문이 다른 문서·날짜만 한 트랜잭션으로 (--check: 같음 0 / 다름 1 / 닿지 못함 2)
+minedocscan publish [--check | --rebuild]   # 통합 DB 로 싣기: 지문이 다른 문서·날짜만 한 트랜잭션으로 (--check: 같음 0 / 다름 1 / 닿지 못함·설정 오류·다른 사이트 2)
 pytest -m postgres                          # 싣기 시험 (MINEDOCSCAN_TEST_PG_URL 이 없으면 건너뜀 — CI 의 postgres 작업)
 minedocscan synth out/demo --display-names  # 합성 템플릿에 표시 이름(display)과 가릴 상자(redact) — template.yaml 만 바뀐다
                                             # 홈의 내려받기: /export/day.xlsx?date= · /export/month.xlsx?month= (그때 만든다)
@@ -151,7 +151,7 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 | `forms/template.py` | 템플릿 로더·검증 (`meta_key`, `format`, 표의 `role`, 나눔 선 `split_ys`/`split_xs`, `subtotal`, `family`/`valid_from`/`valid_to`, `concurrent`). `problems()` 는 오류 전부. 인쇄 층 `print_image`(템플릿 폴더 안의 파일 이름만, PNG, 기준 이미지와 같은 크기 — `print_problems`·`print_layer`·`print_mask`·`print_sha`). YAML 의 문법·날짜 오류도 `TemplateError` (`load_yaml`). 인쇄 층을 쓰는 칸은 `role_value_cell` 한 곳(meter·shifts·tally 표의 형식 있는 손글씨 칸), `uses_print_layer`. 엑셀에 보이는 이름 `display`(`display_of`), 가릴 상자 `redact`(기하 — 판마다) |
 | `forms/formats.py` | 값의 형식(ADR 0015): `integer`·`decimal`·`time`·`time_range`·`reading`. 정규화 한 곳 — 검수 저장·서버·정답 내보내기·평가·핸들러가 같이 쓴다. 화면이 받는 글자와 안내. `dotted_clock`(점으로 쓴 시각 — 화면이 묻는 조건, 정규식과 상한은 `dotted_clock_rule()` 로 서버가 화면에 보낸다 — 화면에 수가 없다) |
 | `forms/equipment.py` | 장비 마스터(점검표 템플릿의 장비 행), `equipment_id`, 장비명 메타 키 `equipment` |
-| `forms/sitepack.py` | 사이트 팩 (템플릿·현장 옵션·페이지 라벨·평가셋 소금값), `templates_for(date)`, 장비명 대응표 `[equipment.aliases]`(마스터에 없는 키면 오류), `known_values(key)`(후보 목록), 대응표의 해시 `equipment_aliases_sha`. 동시 판(ADR 0018): 계열의 겹침은 모두 `concurrent` 일 때만, 계열에 동시 판 하나뿐이면 오류, 판끼리 기하 밖의 전부가 같아야 한다(`variant_key_diff`), 같은 `name` 둘이면 오류, `concurrent_groups(date)`, `answer_key`(정답은 계열로), `variant_families()`. 판끼리 양식의 `display` 도 같아야 한다. `[haul_table]`(운반 표의 열·자리 순서)·`[redact]`(가릴 메타 키·넓히는 폭) |
+| `forms/sitepack.py` | 사이트 팩 (템플릿·현장 옵션·페이지 라벨·평가셋 소금값), `templates_for(date)`, 장비명 대응표 `[equipment.aliases]`(마스터에 없는 키면 오류), `known_values(key)`(후보 목록), 대응표의 해시 `equipment_aliases_sha`. 동시 판(ADR 0018): 계열의 겹침은 모두 `concurrent` 일 때만, 계열에 동시 판 하나뿐이면 오류, 판끼리 기하 밖의 전부가 같아야 한다(`variant_key_diff`), 같은 `name` 둘이면 오류, `concurrent_groups(date)`, `answer_key`(정답은 계열로), `variant_families()`. 판끼리 양식의 `display` 도 같아야 한다. `[haul_table]`(운반 표의 열·자리 순서)·`[redact]`(가릴 메타 키·넓히는 폭). 동시 판끼리 `redact` 의 이름 목록도 같아야 한다. 사본의 주인 `declared_name`(적힌 `[site] name` 만 — 폴더 이름으로 대신하지 않는다, `declared_site_name(root)`) |
 | `forms/classify.py` | 페이지가 어느 양식인지 (그날 유효한 판만 후보). 그날의 동시 판 묶음(`groups`)은 한 후보 — 점수는 최댓값, 1위/2위 여유는 계열 사이, `ClassResult.group` |
 | `recognize/` | 인식 백엔드 인터페이스와 등록소 (`null`, `oracle`, `digits`), 칸 종류별 백엔드(`ByKindRecognizer`, `[recognize.by_kind]`) |
 | `pagemeta.py` | 쪽 메타(`doc_page_meta`): 키마다 최종 값과 출처(검수 > 결정 > 라벨 > 파일명 > 기계 값), 기계 값의 대조, 날짜의 월·일 대조. 날짜의 순서 한 곳 — `page_date`(쪽의 결정 > 문서의 결정 > 쪽 라벨 > 문서 라벨 > 파일명)·`document_date`(ISO 라벨만), 사람의 출처 목록 `HUMAN_SOURCES` |
@@ -180,8 +180,8 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 | `tools/handfont.py` | 합성 손글씨의 획 정의 (숫자 꼴 몇 가지, 소수점·콜론·물결표·붙임표, 메모용 이어 쓴 글자). OpenCV 내장 글꼴을 쓰지 않는다 |
 | `tools/thumbs.py` | 쪽 미리보기 (1/4, WORK_ROOT/thumbs — 방향을 알면 세워서, 파일 이름에 문서 ID) |
 | `tools/mktemplate.py` | 새 양식의 템플릿 뼈대(`template init`)와 표 더하기(`template add-region` → `add_region`: 인쇄 층이 있으면 그것에서 괘선, `regions` 블록 끝에 글자로 끼워 넣고 다시 읽어 확인, 아니면 되돌린다). 둘이 같은 뼈대 `region_skeleton`(`--role` 의 자리표시)을 쓴다 |
-| `export/` | 내보내기 (tasks/0008, ADR 0022 — DB 의 사본, 작업 DB 에 쓰지 않는다): `model.py`(DB → 책·시트·칸 — 순수 함수, 칸의 상태 `field_cell` 한 곳, 시트 이름, 내용의 해시), `labels.py`(한글 머리글·표시 한 곳), `business.py`(업무 시트 — 확정일 때만 값, `(잠정)`), `daily.py`·`monthly.py`(일별·월별, 운반 표 — 자리 미정·문서 없음·모름, 합계는 확정된 줄만), `xlsx.py`(모델 → xlsx, 수식이 되지 않게), `writer.py`(기록 파일 `.minedocscan-export.json`, 바뀐 것만, 원자적으로, 기록에 있는 것만 지운다, OUT 을 만들지 않는다), `auto.py`(바퀴 끝 — 더러운 날짜, 전체 훑기, 시계 주입), `masked.py`(가린 쪽 그림 — 템플릿이 아는 자리만) |
-| `publish/` | 통합 DB 로 싣기 (ADR 0021 — 대상에 쓰는 곳은 여기 하나): `ddl.py`(schema.sql → 대상의 표 — 형을 넓혀, 외래 키 없이), `scopes.py`(범위 문서·날짜·통째와 지문 — 순수 함수), `core.py`(한 트랜잭션의 갈아 끼우기, `pub_state`·`pub_meta`, `--check`·`--rebuild`, 연결 함수 `connect` — 시험이 바꿔 끼운다, URL·비밀번호를 찍지 않는다, 트랜잭션마다 `lock_timeout`·`statement_timeout`·연결에 TCP keepalive), `auto.py`(바퀴 끝 — 더러운 범위, 충돌이면 전체 훑기, `retry_seconds`). psycopg 는 여기서만 |
+| `export/` | 내보내기 (tasks/0008, ADR 0022 — DB 의 사본, 작업 DB 에 쓰지 않는다): `model.py`(DB → 책·시트·칸 — 순수 함수, 칸의 상태 `field_cell` 한 곳, 시트 이름, 내용의 해시), `labels.py`(한글 머리글·표시 한 곳), `business.py`(업무 시트 — 확정일 때만 값, `(잠정)`), `daily.py`·`monthly.py`(일별·월별, 운반 표 — 자리 미정·문서 없음·모름, 합계는 확정된 줄만), `xlsx.py`(모델 → xlsx, 수식이 되지 않게), `writer.py`(기록 파일 `.minedocscan-export.json` — 바이트로 읽어 UTF-8 이 아니면 잃은 것으로, 사이트 이름이 다르면 쓰지도 지우지도 않는다, 바뀐 것만, 원자적으로, 기록에 있는 것만 지운다 — 쪽이 없는 작업 DB 면 그것도 지우지 않는다, OUT 을 만들지 않는다), `auto.py`(바퀴 끝 — 더러운 날짜, 전체 훑기, 시계 주입), `masked.py`(가린 쪽 그림 — 템플릿이 아는 자리만) |
+| `publish/` | 통합 DB 로 싣기 (ADR 0021 — 대상에 쓰는 곳은 여기 하나): `ddl.py`(schema.sql → 대상의 표 — 형을 넓혀, 외래 키 없이), `scopes.py`(범위 문서·날짜·통째와 지문 — 순수 함수), `core.py`(한 트랜잭션의 갈아 끼우기, `pub_state`·`pub_meta`, `--check`·`--rebuild`, 연결 함수 `connect` — 시험이 바꿔 끼운다, URL·비밀번호를 찍지 않는다, 트랜잭션마다 `lock_timeout`·`statement_timeout`·연결에 TCP keepalive, 문장마다 감시 타이머 `Watchdog` — 멈춘 서버에 `statement_timeout_s`+30초에 `cancel_safe(5)` 다음 소켓 `shutdown()`, `pub_meta` 의 `site` — 다른 사이트의 대상이면 `other_site`, `--rebuild` 는 `pub_meta` 가 있을 때만 지운다), `auto.py`(바퀴 끝 — 더러운 범위, 충돌이면 전체 훑기, `retry_seconds`). psycopg 는 여기서만 |
 | `touched.py` | 처리·검수가 건드린 것(날짜·문서·지운 문서·장비) — 엑셀·싣기가 다시 볼 범위. 장비는 가동 기록이 있는 모든 날짜로 넓힌다 (계기의 연속성) |
 | `cli.py` | `minedocscan` 명령 |
 
@@ -352,6 +352,14 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
   바퀴 끝의 일 동안 작업 상태 `exporting`·`publishing` (PR #15 검토).
 - 가린 그림: 템플릿은 서명·작성자·차량번호 필드의 자리를 안다 (실제 일곱 양식 모두 표 밖 필드 3–5개). 행렬 양식 머리의 인쇄된 이름, 점검표의 인쇄된
   등록번호 열, 작업 표의 글자 칸에 쓴 이름은 필드가 아니다 → 템플릿의 `redact` 상자와 글자 칸은 기본으로 가린다. 그래도 템플릿이 모르는 자리는 남는다.
+- **사본의 주인**: 실제 DB 를 실어 둔 스키마에 합성 묶음의 작업 폴더로 `publish` 하자 문서 3·날짜 3 범위가 묻지 않고 합성 행으로 바뀌었다
+  (URL 이 환경변수에 있는 PC 에서 합성 예제를 돌리면 일어난다). 엑셀 폴더도 빈 작업 DB 로 훑으면 기록된 파일을 다 지웠다 → 사이트 팩에 적힌
+  `[site] name` 을 대상의 `pub_meta`·기록 파일에 두고 다르면 쓰지도 지우지도 않는다. 쪽이 없는 작업 DB 는 지우지 않는다 (tasks/0009 4.1 다).
+- **멈춰 버린 서버**(연결은 살아 있는데 프로세스가 돌지 않는다 — 실험은 그 백엔드에 `SIGSTOP`)에는 서버의 시간 제한도 keepalive 도 듣지 않는다
+  (서버의 커널이 답한다 — 153초까지 기다렸다) → 우리 쪽의 감시 타이머. 시험은 서버를 멈출 수 없어 **멈추는 TCP 중계**로, 답을 기다리는 동안에
+  멈춘다 (COPY 를 보내는 동안 멈추면 리눅스의 `tcp_user_timeout` 이 먼저 끊어 타이머를 시험하지 못한다).
+- 가린 그림의 넓히는 폭 16 px(합성에서 잰 값)으로는 실제 일보 30쪽 중 약 25쪽에서 작성자 이름의 첫 획이 남았다 — 48 px 로 30쪽 모두 가려졌다.
+  칸 위에 크게 쓴 번호는 그래도 남는다 — 폭이 아니라 그 필드의 상자를 넓힌다.
 
 ## 하지 말 것
 

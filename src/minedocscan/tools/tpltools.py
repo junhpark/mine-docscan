@@ -72,6 +72,7 @@ def check_template(tdir: str | Path) -> list[str]:
             out.append(f"{tpl.name}/{reg.get('name')}: 열 이름 'display' 는 쓸 수 없습니다 (행의 표시 이름 키와 겹친다 — tasks/0008 4.5)")
         rows = [r.get("row") for r in reg.get("rows") or []]
         out += [f"{tpl.name}/{reg.get('name')}: 행 번호 {n} 가 겹칩니다" for n in sorted({n for n in rows if rows.count(n) > 1}, key=str)]
+    out += _haul_overlap(tpl)
     for f in tpl.fields:
         b = f.get("bbox")
         if not (isinstance(b, list | tuple) and len(b) == 4 and all(isinstance(v, int) for v in b)):
@@ -96,6 +97,32 @@ def check_template(tdir: str | Path) -> list[str]:
                 (b[0] < 0 or b[1] < 0 or b[2] > size[0] or b[3] > size[1]):
             out.append(f"{tpl.name}/redact/{r.get('name')}: 쪽 밖으로 나갑니다 (쪽 {size[0]}×{size[1]} px)")
     out += _print_covered(tpl)
+    return out
+
+
+def _haul_overlap(tpl: Template) -> list[str]:
+    """운반 일보(handler haul, role log)의 횟수 표: (광종, 편)이 같은 행이 둘 이상이거나 횟수 열의 shift 가 겹치면 오류 — 한 쪽의 두 행이
+    월별 운반 표의 한 칸에 떨어진다 (tasks/0009 4.1 가: 덮어쓰면 값을 잃는다 — 표는 더하지 않고 "겹침" 으로 적는다)."""
+    opt = tpl.handler_options or {}
+    if tpl.handler != "haul" or opt.get("role", "log") != "log" or not tpl.regions:
+        return []
+    name = opt.get("region") or tpl.regions[0].get("name")
+    reg = next((r for r in tpl.regions if r.get("name") == name), None)
+    if reg is None:
+        return []
+    from ..forms.formats import default_format
+
+    out = []
+    # 핸들러가 적는 그대로 견준다 — 광종·편은 글자로 (level: 1 과 "1" 은 같은 칸), 횟수 열은 형식 integer 인 숫자 칸만 (handlers/haul._table_number)
+    keys = [f"{r.get('material')}|{r.get('level')}" for r in reg.get("rows") or [] if isinstance(r, dict)
+            and r.get("material") is not None and r.get("level") is not None]
+    if any(keys.count(k) > 1 for k in keys):                 # 값(광종·편)은 찍지 않는다 — 수만
+        n = sum(1 for k in set(keys) if keys.count(k) > 1)
+        out.append(f"{tpl.name}/{name}: (광종, 편)이 같은 행이 있습니다 ({n}쌍) — 월별 운반 표의 한 칸에 겹친다")
+    shifts = [c.get("shift") for c in reg.get("columns") or [] if isinstance(c, dict) and c.get("kind") == "handwritten_number"
+              and (c.get("format") or default_format(c["kind"])) == "integer"]
+    if any(shifts.count(x) > 1 for x in shifts):
+        out.append(f"{tpl.name}/{name}: 횟수 열의 shift 가 겹칩니다 (같은 주야의 열이 둘 이상 — 월별 운반 표의 한 칸에 겹친다)")
     return out
 
 

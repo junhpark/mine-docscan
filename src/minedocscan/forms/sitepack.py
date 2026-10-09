@@ -39,6 +39,9 @@ class SitePack:
 
                 raise ConfigError(f"site.toml 을 읽을 수 없습니다 ({cfg_path}): {e}") from e
         self.name: str = self.config.get("site", {}).get("name", self.root.name)
+        # 사본의 주인 (tasks/0009 4.1 다): 적혀 있는 [site] name 만 — 폴더 이름으로 대신하지 않는다 (폴더를 옮기면 바뀌고, 두 사이트 팩의
+        # 폴더가 다 site 일 수 있다). 없으면 자동 내보내기·싣기는 꺼지고 export excel·publish 는 거절한다
+        self.declared_name: str | None = _declared_name(self.config)
         self.templates: dict[str, Template] = {}
         for p in sorted((self.root / "templates").glob("*/template.yaml")):
             t = Template(p)
@@ -65,8 +68,14 @@ class SitePack:
     # ── 평가셋 분할 ────────────────────────────────────────────────────────
     @property
     def split_salt(self) -> str:
-        """[eval] split_salt. 없으면 사이트 이름. 바꾸면 평가셋이 바뀐다 (ADR 0009)."""
+        """[eval] split_salt. 없으면 사이트 이름(적힌 [site] name, 없으면 폴더 이름). 바꾸면 평가셋이 바뀐다 (ADR 0009) — [site] name 을
+        처음 적거나 바꿀 때도 (info 가 알린다)."""
         return str(self.option("eval", "split_salt", None) or self.name)
+
+    @property
+    def split_salt_follows_name(self) -> bool:
+        """[eval] split_salt 가 없어 사이트 이름을 쓰고 있나 — 이름을 바꾸면 test 날짜가 바뀐다 (info 가 알린다, tasks/0009 4.1 다)."""
+        return not self.option("eval", "split_salt", None)
 
     @property
     def test_share(self) -> float:
@@ -191,8 +200,9 @@ def _check_families(templates: dict[str, Template]) -> None:
                 diff = variant_key_diff(a, b)
                 if diff:
                     raise TemplateError(f"계열 '{fam}' 의 동시 판 {a.name} 과 {b.name} 의 키가 다릅니다: {diff} — 동시 판끼리는 "
-                                        "handler·handler_options, 표(이름·role·header_rows·열·행 — 메타까지), 필드(bbox 밖 전부)가 "
-                                        "같아야 합니다 (괘선·bbox·기준 그림·인쇄 층·이름·제목·유효 기간만 다를 수 있다)")
+                                        "handler·handler_options, 표(이름·role·header_rows·열·행 — 메타까지), 필드(bbox 밖 전부), "
+                                        "display, redact 의 이름이 같아야 합니다 (괘선·bbox·redact 의 좌표·기준 그림·인쇄 층·이름·제목·"
+                                        "유효 기간만 다를 수 있다)")
         lone = [t for t in ts if t.concurrent]
         if len(lone) == 1:
             t = lone[0]
@@ -207,7 +217,7 @@ def _check_families(templates: dict[str, Template]) -> None:
                                 f"섞여 쓰이는 판이 아니면 {t.name} 의 concurrent 를 지웁니다")
 
 
-# 동시 판끼리 다를 수 있는 것 (tasks/0006 4.6): 기하(괘선·나눔 선, 필드의 bbox), 기준 그림·인쇄 층, 이름·제목, 유효 기간.
+# 동시 판끼리 다를 수 있는 것 (tasks/0006 4.6): 기하(괘선·나눔 선, 필드의 bbox, redact 의 좌표), 기준 그림·인쇄 층, 이름·제목, 유효 기간.
 # 그 밖은 전부 같아야 한다 — 열·행의 메타(근무조·소계·장소·머리글 …)와 header_rows 가 다르면 같은 field_id 가 다른 뜻의 칸을 가리킨다.
 def variant_key_diff(a: Template, b: Template) -> str | None:
     """동시 판 둘이 처음 다른 항목의 종류 (같으면 None). 값(행 키·머리글·메타 값)은 찍지 않는다 — 표 이름과 항목의 종류만."""
@@ -236,6 +246,10 @@ def variant_key_diff(a: Template, b: Template) -> str | None:
         return "필드"
     if a.spec.get("display") != b.spec.get("display"):          # 엑셀의 시트는 계열마다 하나다 (tasks/0008 4.5)
         return "양식의 display"
+    # 가릴 상자(redact)의 이름 목록 (tasks/0009 4.1 마): 좌표는 판마다 다르지만 가릴 자리는 같아야 한다 — 판 B 에 상자가 없으면
+    # 그 판의 쪽은 결재란·인쇄된 이름이 남은 채로 나간다
+    if sorted(str(r.get("name")) for r in a.redact) != sorted(str(r.get("name")) for r in b.redact):
+        return "redact 의 이름"
     return None
 
 
@@ -279,9 +293,11 @@ def _haul_table(config: dict) -> dict[str, list[str]]:
             if not isinstance(x, str) or not x.strip() or (key == "columns" and x.count("|") != 1):
                 raise ConfigError(f"site.toml 의 [haul_table] {key} {i}번째 항목: "
                                   + ("\"광종|편\" 꼴의 글자여야 합니다" if key == "columns" else "빈 문자열이 아닌 글자여야 합니다"))
-        if len(set(v)) != len(v):
+        # 다듬은 뒤에 겹침을 본다 — "Cu | 1" 과 "Cu|1" 은 같은 열이다 (tasks/0009 4.1 사: 열은 '|' 의 양쪽을 다듬는다)
+        norm = ["|".join(p.strip() for p in x.split("|")) if key == "columns" else x.strip() for x in v]
+        if len(set(norm)) != len(norm):
             raise ConfigError(f"site.toml 의 [haul_table] {key} 에 겹치는 항목이 있습니다")
-        out[key] = [x.strip() for x in v]
+        out[key] = norm
     unknown = sorted(set(raw) - {"columns", "slots"})
     if unknown:
         raise ConfigError(f"site.toml 의 [haul_table] 에 모르는 키가 있습니다: {', '.join(unknown)} (columns, slots)")
@@ -327,3 +343,21 @@ def _equipment_aliases(config: dict, templates: dict[str, Template]) -> dict[str
                               f"(마스터 = 점검표 템플릿의 장비 행 {len(master)}개)")
         out[str(name).strip()] = key
     return out
+
+
+def _declared_name(config: dict) -> str | None:
+    """site.toml 의 [site] name — 글자로 적혀 있을 때만 (앞뒤 공백을 뺀 것). 없거나 빈 글자면 None."""
+    v = (config.get("site") or {}).get("name") if isinstance(config.get("site"), dict) else None
+    return v.strip() if isinstance(v, str) and v.strip() else None
+
+
+def declared_site_name(root) -> str | None:
+    """사이트 팩 폴더의 site.toml 에서 [site] name 만 읽는다 (템플릿을 읽지 않는다 — 싣기가 쓴다). 없거나 읽을 수 없으면 None."""
+    if root is None:
+        return None
+    p = Path(root) / "site.toml"
+    try:
+        with open(p, "rb") as f:
+            return _declared_name(tomllib.load(f))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None

@@ -494,3 +494,142 @@ def test_a_decision_from_the_screen_marks_its_documents(world, tmp_path):
     pipe.process_pending()                                    # 같은 요청 번호로 다시 닿지 않으면 다시 건드리지 않는다
     assert not pipe.touched.documents
     shutil.move(str(moved / "d_2030-01-08.pdf"), world["scans"] / "d_2030-01-08.pdf")
+
+
+# ── 사본의 주인과 더러운 범위의 구멍 (tasks/0009 4.1 다·바) ─────────────────────────────────
+def record_shas(out) -> dict[str, str]:
+    """기록 파일의 파일 → 모델의 해시."""
+    from minedocscan.export.writer import load_record
+
+    files, lost, _site = load_record(out)
+    assert not lost
+    return {k: v["sha"] for k, v in files.items()}
+
+
+def full_export_shas(con, site, root) -> dict[str, str]:
+    """같은 DB 를 새 폴더에 전부 내보낸 것의 해시 — "엑셀 폴더 = 그 DB 를 전부 내보낸 것"의 기준."""
+    fresh = root / "견줄 폴더"
+    fresh.mkdir()
+    r = export_excel(con, site, fresh, full=True)
+    assert not r.failed and r.written
+    return record_shas(fresh)
+
+
+def test_a_folder_of_another_site_is_said_once_and_left_alone(world, tmp_path):
+    """기록 파일이 다른 사이트의 것이면 자동 내보내기는 바퀴마다 아무것도 쓰거나 지우지 않는다: 첫 바퀴만 요약(Result.other_site,
+    "다른 사이트의 폴더"), 다음 바퀴는 None — 홈의 상태에는 늘 보인다. 기록 파일을 지우면(안내대로) 다음 바퀴에 전부 쓴다."""
+    import json
+
+    from minedocscan.export.model import MODEL_VERSION
+    from minedocscan.export.writer import RECORD_NAME
+
+    pipe, site, st = world["pipe"], world["site"], world["st"]
+    con = pipe.con
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    rec = out / RECORD_NAME
+    rec.write_text(json.dumps({"model": MODEL_VERSION, "site": "OTHER-SITE-X", "files": {}}), encoding="utf-8")
+    raw = rec.read_bytes()
+    x = auto(world, out)
+    assert x.enabled and x.status["other_site"] is False
+    worker = Worker(pipe, after={"excel": x})
+    ops = OpsApp(con, site, st, "jp", worker=worker, excel=x)
+    first = x.after_round(con, Touched())                               # 시작할 때의 전체 훑기
+    assert first is not None and first.other_site and (first.written, first.deleted, first.failed) == ([], [], [])
+    assert x.status["other_site"] and ops.home_json()["export"]["other_site"]
+    text = format_round({"processed": 0, "excel": first.as_dict()})
+    assert "다른 사이트의 폴더" in text and "OTHER-SITE-X" not in text and site.declared_name not in text
+    assert x.after_round(con, Touched(everything=True)) is None         # 요약은 처음 한 번
+    assert x.status["other_site"] and x.status["rounds"] == 2
+    r = worker.run_once()
+    assert "excel" not in r and "excel_error" not in r and ops.home_json()["export"]["other_site"]
+    assert [p.name for p in out.rglob("*") if p.is_file()] == [RECORD_NAME] and rec.read_bytes() == raw
+    rec.unlink()                                                        # 이 사이트로 바꾼다
+    r = worker.run_once()
+    assert r["excel"]["written"] == 4 and r["excel"]["record_lost"] and not r["excel"]["other_site"]
+    assert not x.status["other_site"] and same_as_db(con, site, out) == 4
+
+
+def test_a_document_without_pages_reports_its_old_document_date(world, tmp_path):
+    """쪽이 없는 문서(버린 문서)의 문서 날짜를 결정이 D1 → D2 로 옮긴다: 처리 전에는 D1 의 파일에 "다시 처리 대기"가 하나 있고,
+    처리한 뒤 건드린 날짜에 D1·D2 가 다 있어 더러운 바퀴가 D1 의 파일을 다시 쓴다 — 폴더 = 전부 내보낸 것 (4.1 바)."""
+    pipe, site, st, ids = world["pipe"], world["site"], world["st"], world["ids"]
+    con = pipe.con
+    doc, d1, d2 = ids["d_2030-01-08"], "2030-01-08", "2030-01-09"
+    path = st.decisions_path(site.root)
+    decs.save(con, path, [{"target": doc, "kind": "discard"}], "jp")
+    pipe.process_pending()
+    pipe.touched = Touched()
+
+    def doc_state() -> tuple:
+        n = con.execute("SELECT COUNT(*) FROM doc_page WHERE document_id = ?", (doc,)).fetchone()[0]
+        return (n, *con.execute("SELECT status, work_date FROM doc_document WHERE document_id = ?", (doc,)).fetchone())
+
+    assert doc_state() == (0, "discarded", d1)
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    x = auto(world, out)
+    x.after_round(con, Touched())                                       # 시작할 때의 전체 훑기
+    ops = OpsApp(con, site, st, "jp", excel=x)
+    assert ops.post_decision({"items": [{"target": doc, "kind": "date", "value": d2}], "confirm": True})["ok"]
+    r = x.after_round(con, Touched())                                   # 화면이 넘긴 문서: D1 에 "다시 처리 대기" 1
+    assert daily_path(d1) in r.written and daily_path(d2) not in r.written
+    pipe.process_pending()
+    t, pipe.touched = pipe.touched, Touched()
+    assert doc_state() == (0, "discarded", d2)
+    assert {d1, d2} <= t.dates and not t.everything
+    r = x.after_round(con, t)
+    assert daily_path(d1) in r.written                                  # 대기가 0 으로 — 옛 문서 날짜의 파일
+    assert record_shas(out) == full_export_shas(con, site, tmp_path)
+    nothing_missed(world, out)
+
+
+def test_a_changed_equipment_master_rewrites_the_inspection_sheets_of_every_date(world, tmp_path):
+    """점검표 템플릿의 장비 행(모델)을 바꾼 사이트 팩으로 점검표 문서 하나를 다시 처리하면 eq_equipment 가 바뀐다 — 모든 날짜의 점검
+    시트에 나오므로 건드린 것은 "전부"이고, 더러운 바퀴가 다른 날짜(그 문서가 없는 날짜)의 점검 시트도 다시 쓴다 (4.1 바)."""
+    import yaml
+
+    from minedocscan.export import labels as L
+    from minedocscan.forms.equipment import is_equipment_row
+    from minedocscan.forms.sitepack import SitePack
+    from minedocscan.pipeline import Pipeline
+
+    pipe, site, st, ids = world["pipe"], world["site"], world["st"], world["ids"]
+    con = pipe.con
+    # 점검표가 있는 날짜를 둘로: c(점검표 + T01)를 01-08 로 (지금의 사이트 팩으로)
+    decs.save(con, st.decisions_path(site.root), [{"target": ids["c_2030-01-07"], "kind": "date", "value": "2030-01-08"}], "jp")
+    pipe.process_pending()
+    pipe.touched = Touched()
+    insp_days = sorted(r[0] for r in con.execute("SELECT DISTINCT inspection_date FROM insp_daily"))
+    assert insp_days == ["2030-01-07", "2030-01-08"]
+    # 장비 행 하나의 모델만 바꾼 사이트 팩 (키는 그대로 — 같은 장비 ID)
+    root = tmp_path / "site2"
+    shutil.copytree(site.root, root)
+    ty = root / "templates" / "synth_inspection" / "template.yaml"
+    spec = yaml.safe_load(ty.read_text(encoding="utf-8"))
+    row = next(r for r in spec["regions"][0]["rows"] if is_equipment_row(r))
+    row["model"] = new_model = f"{row['model']}-X2"
+    ty.write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    site2 = SitePack(root)
+    st2 = replace(st, site=root)
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    x = AutoExport(replace(st2, excel_dir=out, export_sweep_minutes=0), site2, clock=Clock(),
+                   now=lambda: "2030-02-01T00:00:00Z")
+    assert x.after_round(con, Touched()).written                        # 시작할 때의 전체 훑기 (장비 마스터는 옛 모델)
+    pipe2 = Pipeline(st2, site=site2, con=con)
+    decs.request_work(con, [ids["a_2030-01-07"]])
+    con.commit()
+    assert pipe2.process_pending() >= 1
+    t = pipe2.touched
+    assert t.everything
+    narrow = Touched(dates=set(t.dates), documents=set(t.documents), removed=set(t.removed), refs=set(t.refs))
+    assert "2030-01-08" not in narrow.all_dates(con)                    # "전부"가 아니면 01-08 은 범위 밖이다
+    hid = con.execute("SELECT hid FROM eq_equipment WHERE equipment_key = ?", (str(row["key"]),)).fetchone()[0]
+    assert new_model in hid
+    r = x.after_round(con, t)
+    assert {daily_path(d) for d in insp_days} | {monthly_path("2030-01")} <= set(r.written)
+    for d in insp_days:                                                 # 두 날짜의 점검 시트에 새 모델
+        sheet = read_values(out / daily_path(d))[L.SHEETS["inspection"]]
+        assert any(isinstance(v, str) and new_model in v for row_ in sheet for v in row_), d
+    assert record_shas(out) == full_export_shas(con, site2, tmp_path)

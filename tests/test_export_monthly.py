@@ -13,7 +13,7 @@ import pytest
 from conftest import clone_db
 from minedocscan.config import ConfigError, Settings
 from minedocscan.export import labels as L
-from minedocscan.export.monthly import monthly_book
+from minedocscan.export.monthly import haul_columns, monthly_book
 from minedocscan.export.writer import export_excel, monthly_path
 from minedocscan.export.xlsx import read_values
 from minedocscan.forms.sitepack import SitePack, _haul_table
@@ -179,13 +179,18 @@ def xcheck_rows(b: dict) -> list[dict]:
 
 
 def check_no_log_value_is_lost(con, b: dict, month: str) -> None:
-    """그 달의 일보 운반 행 가운데 값이 있거나 검수 대기인 것의 수 = 운반 표에서 값·검수 대기·판독 불가·● 인 칸의 수."""
+    """그 달의 일보 운반 행 가운데 값이 있거나 검수 대기인 것의 수 = 운반 표에서 값·검수 대기·판독 불가·● 인 칸의 수 + 겹침 칸이 덮는
+    행의 수 (tasks/0009 4.1 가 — 한 쪽에 같은 광종·편·주야의 행이 둘 이상)."""
     n_rows = con.execute("SELECT COUNT(*) FROM prod_haul WHERE source_role = 'log' AND work_date LIKE ? "
                          "AND (has_value = 1 OR review_status = 'pending')", (f"{month}-%",)).fetchone()[0]
+    covered = con.execute(
+        "SELECT COALESCE(SUM(n), 0) FROM (SELECT SUM(has_value = 1 OR review_status = 'pending') AS n FROM prod_haul "
+        "WHERE source_role = 'log' AND work_date LIKE ? GROUP BY page_id, material, level, shift HAVING COUNT(*) > 1)",
+        (f"{month}-%",)).fetchone()[0]
     table, _t, _s = haul_table(b)
     n_cells = sum(1 for (_d, _sh, _t2, col), c in table.items() if col != L.HAUL_TABLE_SUM
                   and c[1] and c[1].split()[0] in ("value", "pending", "illegible", "present"))
-    assert n_rows == n_cells and n_rows > 0
+    assert n_rows == n_cells + covered and n_rows > 0
 
 
 def test_logs_without_a_matrix_go_to_unresolved_blocks(world_db, bundles):
@@ -331,3 +336,114 @@ def test_provisional_mismatches_are_not_flagged_in_the_haul_table(null_run, orac
     assert not any("mismatch" in style for (_v, style) in table.values())
     table, _titles, _ = haul_table(month_book(oracle_run.con, oracle_run.site, "2030-01"))
     assert any("mismatch" in style for (_v, style) in table.values())
+
+
+# ── 겹침 (tasks/0009 4.1 가) ──────────────────────────────────────────────────
+def test_overlapping_haul_rows_are_not_added(oracle_run):
+    """한 일보 쪽에 같은 (광종·편, 주야)의 행이 둘이면(검사 전에 만든 템플릿) 운반 표는 더하지 않고 그 칸에 겹침, 그 줄의 합계를 비운다.
+    범례의 겹침 줄은 그 파일에만 있고, 수의 보존(값·?·판독 불가 칸 + 겹침 칸이 덮는 행 = 일보 행)이 선다. 교차검증 시트는 그대로."""
+    con, site = oracle_run.con, oracle_run.site
+    plain = month_book(con, site, "2030-01")
+    assert not any(r and r[1][1] == "overlap" for r in sheet(plain, L.SUMMARY)["rows"] if len(r) > 1)
+    con = clone_db(oracle_run.con)
+    a, b = con.execute("SELECT h1.haul_id, h2.haul_id FROM prod_haul h1 JOIN prod_haul h2 ON h1.page_id = h2.page_id AND "
+                       "h1.shift = h2.shift AND h1.haul_id < h2.haul_id WHERE h1.source_role = 'log' AND h1.slot IS NOT NULL "
+                       "AND h1.has_value = 1 AND h2.has_value = 1 AND h1.review_status = 'auto' AND h2.review_status = 'auto' "
+                       "LIMIT 1").fetchone()
+    ha = con.execute("SELECT * FROM prod_haul WHERE haul_id = ?", (a,)).fetchone()
+    con.execute("UPDATE prod_haul SET material = ?, level = ? WHERE haul_id = ?", (ha["material"], ha["level"], b))
+    con.commit()
+    xs_before = sheet(month_book(clone_db(oracle_run.con), site, "2030-01"), L.LONG["xcheck_haul"])
+    book = month_book(con, site, "2030-01")
+    table, _t, _s = haul_table(book)
+    key = f"{ha['material']}|{ha['level']}"
+    hit = {k: c for k, c in table.items() if k[0] == ha["work_date"] and k[2] == ha["slot"] and k[1] == SHIFT.get(ha["shift"], ha["shift"])}
+    assert [c for k, c in hit.items() if k[3] != L.HAUL_TABLE_SUM and c[1] and c[1].split()[0] == "overlap"] == [[L.OVERLAP_MARK, "overlap"]]
+    assert [c for k, c in hit.items() if k[3] == L.HAUL_TABLE_SUM] == [[None, "pending"]]   # 그 줄의 합계는 비운다
+    assert [k[3] for k, c in hit.items() if c[1] == "overlap"] == [dict(haul_columns(site, {key}))[key]]   # 그 광종·편의 칸
+    legend = [r for r in sheet(book, L.SUMMARY)["rows"] if len(r) > 1 and r[1][1] == "overlap"]
+    assert legend == [[[None, ""], [L.OVERLAP_MARK, "overlap"], [L.LEGEND_OVERLAP[2], ""]]]
+    check_no_log_value_is_lost(con, book, "2030-01")
+    assert sheet(book, L.LONG["xcheck_haul"]) == xs_before                    # 교차검증 시트는 그대로 (DB 의 교차검증 행)
+
+
+def test_template_check_finds_haul_overlaps(synth, tmp_path):
+    """template check: 운반 일보의 표에서 (광종, 편)이 같은 행이 둘 이상이거나 횟수 열의 shift 가 겹치면 오류 (값은 찍지 않는다)."""
+    import shutil
+
+    import yaml
+
+    from minedocscan.tools.tpltools import check_template
+
+    src = synth.site / "templates" / "synth_haul_log"
+    assert not [p for p in check_template(src) if "겹" in p]
+    for case in ("rows", "shift"):
+        d = tmp_path / case / "synth_haul_log"
+        shutil.copytree(src, d)
+        spec = yaml.safe_load((d / "template.yaml").read_text(encoding="utf-8"))
+        reg = spec["regions"][0]
+        if case == "rows":
+            reg["rows"][1]["material"], reg["rows"][1]["level"] = reg["rows"][0]["material"], reg["rows"][0]["level"]
+        else:
+            night = next(c for c in reg["columns"] if c.get("shift") == "night")
+            night["shift"] = "day"
+        (d / "template.yaml").write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        probs = check_template(d)
+        want = "(광종, 편)이 같은 행" if case == "rows" else "횟수 열의 shift 가 겹칩니다"
+        assert any(want in p for p in probs), probs
+        assert not any(reg["rows"][0]["material"] in p for p in probs if want in p)   # 값은 찍지 않는다
+    # 핸들러가 적는 그대로: 편 1 과 "1" 은 같은 칸 (prod_haul 은 글자로 적는다), 소수 형식의 숫자 열은 횟수 열이 아니다 (행이 되지 않는다)
+    d = tmp_path / "str" / "synth_haul_log"
+    shutil.copytree(src, d)
+    spec = yaml.safe_load((d / "template.yaml").read_text(encoding="utf-8"))
+    reg = spec["regions"][0]
+    reg["rows"][0]["level"], reg["rows"][1]["level"] = 1, "1"
+    reg["rows"][1]["material"] = reg["rows"][0]["material"]
+    night = next(c for c in reg["columns"] if c.get("shift") == "night")
+    night["shift"], night["format"] = "day", "decimal"
+    (d / "template.yaml").write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    probs = check_template(d)
+    assert any("(광종, 편)이 같은 행" in p for p in probs), probs
+    assert not any("횟수 열의 shift" in p for p in probs), probs
+
+
+# ── 작은 것들 (tasks/0009 4.1 사) ──────────────────────────────────────────────────
+def test_haul_table_columns_are_trimmed_around_the_bar_before_the_duplicate_check(oracle_run, tmp_path):
+    """[haul_table] columns 의 항목은 '|' 의 양쪽을 다듬은 뒤에 겹침을 본다 — " ORE | L0 " 과 "ORE|L0" 은 같은 열이다
+    (slots 도 다듬은 뒤에). 다듬은 열은 데이터의 키("광종|편")와 맞아 운반 표의 열 순서를 정한다."""
+    with pytest.raises(ConfigError, match="columns 에 겹치는 항목"):
+        _haul_table({"haul_table": {"columns": [" ORE | L0 ", "ORE|L0"]}})
+    with pytest.raises(ConfigError, match="slots 에 겹치는 항목"):
+        _haul_table({"haul_table": {"slots": [" T03", "T03"]}})
+    assert _haul_table({"haul_table": {"columns": ["ORE | L0"]}}) == {"columns": ["ORE|L0"], "slots": []}
+    root = tmp_path / "site"
+    root.mkdir()
+    (root / "site.toml").write_text('[haul_table]\ncolumns = [" WASTE | L1", "ORE |L0 "]\nslots = [" T03 "]\n',
+                                    encoding="utf-8")
+    pack = SitePack(root)
+    assert pack.haul_table == {"columns": ["WASTE|L1", "ORE|L0"], "slots": ["T03"]}
+    custom = SimpleNamespace(templates=oracle_run.site.templates, haul_table=pack.haul_table)
+    s = sheet(month_book(oracle_run.con, custom, "2030-01"), L.SHEETS["haul_table"])
+    assert [c[0] for c in s["rows"][1]][2:4] == ["WASTE|L1", "ORE|L0"]
+    assert [c[0] for c in s["rows"][0] if c[1] == "title"][0] == "T03"
+
+
+def test_other_shift_names_follow_day_and_night_in_name_order(oracle_run):
+    """월별 운반 표의 주야 순서: 주간 → 야간 → 없음, 그 밖의 이름은 이름 순 (tasks/0009 4.1 사 — 집합을 도는 순서는 프로세스마다
+    달라 같은 DB 인데 파일을 다시 썼다). 쪽마다 한 주야의 행을 다른 이름으로 바꾼다 (한 쪽의 한 칸에 두 행이 떨어지지 않게)."""
+    con = clone_db(oracle_run.con)
+    pages = [r[0] for r in con.execute("SELECT DISTINCT page_id FROM prod_haul WHERE source_role = 'log' ORDER BY page_id")]
+    renames = [("day", "b"), ("night", "a"), ("day", "c2"), ("night", "c10"), ("day", None)]
+    assert len(pages) >= len(renames)
+    for pid, (old, new) in zip(pages, renames, strict=False):
+        n = con.execute("UPDATE prod_haul SET shift = ? WHERE page_id = ? AND source_role = 'log' AND shift = ?",
+                        (new, pid, old)).rowcount
+        assert n > 0, pid
+    con.commit()
+    want = [L.SHIFT["day"], L.SHIFT["night"], None, "a", "b", "c10", "c2"]
+    s = sheet(month_book(con, oracle_run.site, "2030-01"), L.SHEETS["haul_table"])
+    by_day: dict[str, list] = {}
+    for r in s["rows"][2:]:
+        by_day.setdefault(r[0][0], []).append(r[1][0])
+    assert by_day and all(v == want for v in by_day.values()), by_day
+    assert not any(c[1].split()[0] == "overlap" for r in s["rows"] for c in r if c[1])          # 겹침을 만들지 않았다

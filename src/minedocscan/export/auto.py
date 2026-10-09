@@ -6,7 +6,9 @@
 - **전체 훑기**: 시작할 때 한 번, 그 뒤 sweep_minutes 마다 (0 이면 시작할 때만) — 다른 프로세스가 쓴 검수(review serve)와 놓친 것을 잡는다.
   시계는 주입한다 (시험이 잠들지 않게).
 - 쓰지 못한 파일(엑셀이 열고 있다)·없어진 엑셀 폴더는 그 바퀴만 건너뛰고 다음 바퀴에 다시 본다 (폴더를 만들지 않는다). 처리는 계속된다.
-- excel_dir 가 없으면 꺼져 있다. 저장소 안·접수 폴더 안·보관 폴더 안이면 한 줄로 알리고(시작할 때) 켜지 않는다.
+- excel_dir 가 없으면 꺼져 있다. 저장소 안·접수 폴더 안·보관 폴더 안이면 한 줄로 알리고(시작할 때) 켜지 않는다. 사이트 팩에
+  [site] name 이 없어도 그렇다 (사본의 주인 — tasks/0009 4.1 다). 폴더가 다른 사이트의 것이면 바퀴마다 기록 파일만 보고 아무것도 하지 않는다
+  (요약은 처음 한 번, 홈: "다른 사이트의 폴더").
 - status 는 화면이 읽는다 (통째로 바꿔 끼우는 사전): 켜짐·꺼짐과 이유, 마지막으로 쓴 시각과 파일 수, 쓰지 못한 파일 수, 폴더가 없다.
   수만 — 날짜·파일명을 담지 않는다.
 """
@@ -19,6 +21,7 @@ from ..touched import Box, Touched
 from .writer import (
     DAILY_RE,
     MONTHLY_RE,
+    NO_SITE_NAME,
     RECORD_NAME,
     ExportError,
     Result,
@@ -35,7 +38,7 @@ class AutoExport:
         self.sweep_s = max(0.0, float(settings.export_sweep_minutes)) * 60.0
         self.machine_values = settings.machine_values
         self.box = Box()
-        self.reason: str | None = None              # 꺼진 이유: off(설정 없음) | refused(저장소·접수 폴더·보관 폴더 안)
+        self.reason: str | None = None              # 꺼진 이유: off(설정 없음) | refused(저장소·접수 폴더·보관 폴더 안) | no_site_name
         self.notice: str | None = None              # 시작할 때 한 번 알릴 한 줄
         self.last_sweep: float | None = None
         self.last: Result | None = None
@@ -43,13 +46,15 @@ class AutoExport:
         self._retry_months: set[str] = set()
         if self.out is None:
             self.reason = "off"
+        elif not getattr(site, "declared_name", None):
+            self.reason, self.notice = "no_site_name", f"엑셀 자동 내보내기를 켜지 않습니다: {NO_SITE_NAME}"
         else:
             try:
                 check_out_dir(self.out, settings)
             except ExportError as e:
                 self.reason, self.notice = "refused", f"엑셀 자동 내보내기를 켜지 않습니다: {e}"
         self.status: dict = {"enabled": self.enabled, "reason": self.reason, "last_at": None, "written": 0, "deleted": 0,
-                             "failed": 0, "missing_dir": False, "rounds": 0}
+                             "failed": 0, "missing_dir": False, "other_site": False, "rounds": 0}
 
     @property
     def enabled(self) -> bool:
@@ -80,7 +85,8 @@ class AutoExport:
             self.box.put(t)                           # 다음 바퀴에 다시 (부른 쪽이 예외의 종류를 남긴다)
             raise
         self.last = r
-        if r.missing_dir or RECORD_NAME in r.failed:
+        seen_other = self.status["other_site"]
+        if r.missing_dir or r.other_site or RECORD_NAME in r.failed:
             self.box.put(t)                           # 아무것도 하지 못했다 — 다음 바퀴에 같은 범위로
         else:
             if full:
@@ -91,8 +97,11 @@ class AutoExport:
                     self._retry_days.add(m.group(2))
                 elif m := MONTHLY_RE.match(rel):
                     self._retry_months.add(m.group(1))
-        st = dict(self.status, missing_dir=r.missing_dir, failed=len(r.failed), rounds=self.status["rounds"] + 1)
+        st = dict(self.status, missing_dir=r.missing_dir, other_site=r.other_site, failed=len(r.failed),
+                  rounds=self.status["rounds"] + 1)
         if r.written or r.deleted:
             st.update(last_at=self.now(), written=len(r.written), deleted=len(r.deleted))
         self.status = st
+        if r.other_site and seen_other:
+            return None                               # 다른 사이트의 폴더 — 요약은 처음 한 번 (홈에는 늘 보인다)
         return r

@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -132,8 +133,10 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
     intake = _table(raw, "intake", path)
     export = _table(raw, "export", path)
     publish = _table(raw, "publish", path)
-    if any(k in publish for k in ("url", "dsn", "password")):
+    if any(str(k).strip().lower() in ("url", "dsn", "password", "conninfo") for k in publish):   # URL·Password 도 (tasks/0009 4.1 사)
         raise ConfigError("[publish] 에 URL·비밀번호를 적지 않습니다 — 환경변수 MINEDOCSCAN_PUBLISH_URL 로만 받습니다")
+    if export.get("excel_dir") is not None and not isinstance(export["excel_dir"], str):
+        raise ConfigError(f"[export] excel_dir 는 폴더 경로(글자)여야 합니다: {export['excel_dir']!r}")
     rec = _table(raw, "recognize", path)
     by_kind = rec.get("by_kind", {}) or {}
     if not isinstance(by_kind, dict):
@@ -189,7 +192,7 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         s.inbox = Path(env["MINEDOCSCAN_INBOX"])
     if env.get("MINEDOCSCAN_EXCEL_DIR"):
         s.excel_dir = Path(env["MINEDOCSCAN_EXCEL_DIR"])
-    if env.get("MINEDOCSCAN_PUBLISH_URL"):
+    if (env.get("MINEDOCSCAN_PUBLISH_URL") or "").strip():                   # 공백뿐이면 없는 것으로 (tasks/0009 4.1 사)
         s.publish_url = env["MINEDOCSCAN_PUBLISH_URL"]
     if env.get("MINEDOCSCAN_PUBLISH_SCHEMA"):
         s.publish_schema = env["MINEDOCSCAN_PUBLISH_SCHEMA"]
@@ -220,10 +223,14 @@ def _number(table: dict, key: str, default, cast, label: str, lo: float | None =
     v = table.get(key, default)
     if isinstance(v, bool):
         raise ConfigError(f"{label} 는 숫자여야 합니다: {v!r}")
+    if isinstance(v, float) and not math.isfinite(v):                 # TOML 의 nan·inf (int(inf) 는 OverflowError, nan 은 범위 검사를 지나간다)
+        raise ConfigError(f"{label} 는 유한한 숫자여야 합니다: {v!r}")
     try:
         x = cast(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ConfigError(f"{label} 는 숫자여야 합니다: {v!r}") from None
+    if isinstance(x, float) and not math.isfinite(x):                 # 글자 "nan"·"inf" 를 float 로 바꾼 것
+        raise ConfigError(f"{label} 는 유한한 숫자여야 합니다: {v!r}")
     if cast is int and isinstance(v, float) and v != x:
         raise ConfigError(f"{label} 는 정수여야 합니다: {v!r}")
     if (lo is not None and x < lo) or (hi is not None and x > hi):

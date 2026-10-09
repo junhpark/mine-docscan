@@ -181,3 +181,55 @@ def test_number_values_are_normalized(srv):
     assert "isComposing" in html and "ev.repeat" in html and "ev.altKey" in html      # 후보 선택은 Alt+숫자
     assert "ev.code" in html and "Digit[1-9]" in html                              # macOS Option+숫자 (ev.key 는 '™')
     assert "X 표·지운 칸·이웃 칸에서 넘어온 글씨는 비워 두고" in html
+
+
+# ── 건드린 것 (tasks/0009 4.1 자) ──────────────────────────────────────────────
+def test_every_save_route_hands_what_it_touched_to_on_touched(srv):
+    """POST /api/review·/api/reviews·/api/check 가 저장할 때 on_touched 를 부른다 — 그 칸의 쪽의 날짜와 문서를 담은 Touched
+    (serve 의 자동 내보내기·싣기가 다시 볼 범위, tasks/0008 4.7). 거절된 요청(400)은 저장하지 않으므로 부르지 않는다."""
+    from minedocscan.review.checks import row_of
+    from minedocscan.touched import Touched
+
+    base, app, con = srv["url"], srv["app"], srv["pipe"].con
+
+    def where(*fids):
+        rows = [con.execute("SELECT p.work_date, p.document_id FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id "
+                            "WHERE f.field_id = ?", (fid,)).fetchone() for fid in fids]
+        assert all(r is not None and r[0] and r[1] for r in rows)
+        return {r[0] for r in rows}, {r[1] for r in rows}
+
+    def seen(calls):
+        assert calls and all(isinstance(t, Touched) and t for t in calls)
+        assert not any(t.everything or t.removed for t in calls)
+        return set().union(*(t.dates for t in calls)), set().union(*(t.documents for t in calls))
+
+    q = json.loads(_get(base + "/api/queue?name=pending&kind=handwritten_number")[2])
+    cells = [c["field_id"] for i in q["items"] for c in i["cells"]]
+    one, two = cells[-1], cells[-2]
+    check = next(fid for (fid,) in con.execute("SELECT field_id FROM doc_field WHERE kind = 'checkmark' ORDER BY field_id")
+                 if row_of(con, app.site, fid) is not None)
+    calls = []
+    app.on_touched = calls.append
+    try:
+        # 거절: 아무것도 저장하지 않았고 부르지 않았다
+        assert _post(base + "/api/reviews", {"items": [{"field_id": one, "verdict": "value", "value": "4"},
+                                                       {"field_id": two, "verdict": "value", "value": "x"}]})[0] == 400
+        assert _post(base + "/api/check", {"field_id": check, "answer": "maybe"})[0] == 400
+        assert calls == []
+
+        status, out = _post(base + "/api/reviews", {"items": [{"field_id": one, "verdict": "value", "value": "4"},
+                                                              {"field_id": two, "verdict": "empty"}]})
+        assert status == 200 and out["ok"] and len(out["saved"]) == 2
+        assert seen(calls) == where(one, two)
+
+        calls.clear()
+        status, out = _post(base + "/api/check", {"field_id": check, "answer": "yes"})
+        assert status == 200 and out["ok"] and len(out["review_ids"]) == 2
+        assert seen(calls) == where(check)
+
+        calls.clear()
+        status, out = _post(base + "/api/review", {"field_id": one, "verdict": "empty"})
+        assert status == 200 and out["ok"]
+        assert seen(calls) == where(one)
+    finally:
+        app.on_touched = None

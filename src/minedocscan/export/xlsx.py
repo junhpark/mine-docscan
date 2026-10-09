@@ -14,7 +14,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 FILL = {"pending": "FFF2CC", "illegible": "F8CBAD", "printed": "EDEDED", "meta": "DDEBF7", "no_doc": "D9D9D9",
-        "unknown": "E2EFDA", "mismatch": "F4B6B6", "h": "D9E1F2"}
+        "unknown": "E2EFDA", "mismatch": "F4B6B6", "h": "D9E1F2", "overlap": "F8CBAD"}
 _FILLS = {k: PatternFill(fill_type="solid", start_color=v, end_color=v) for k, v in FILL.items()}
 _BOLD, _ITALIC, _TITLE = Font(bold=True), Font(italic=True, color="595959"), Font(bold=True, size=12)
 _MISMATCH = Font(bold=True, color="9C0006")

@@ -70,21 +70,24 @@ def haul_table_sheet(ctx: Ctx, days: list[str]) -> dict | None:
     logs = haul_rows(ctx, days, "log")
     if not logs:
         return None
-    by_slot: dict[tuple, dict] = {}                         # (날짜, 자리) → {(광종|편, 주야): 행}
-    unresolved: dict[str, dict[str, dict]] = {}             # 날짜 → 쪽 → {(광종|편, 주야): 행}
+    # 칸 하나에 행의 목록 — 한 쪽에 같은 (광종|편, 주야)의 행이 둘 이상이면 겹침이다 (template check 가 오류로 내는 템플릿 — 검사 전에 만든
+    # 것). 덮어쓰면 뒤의 행이 앞의 행을 지운다 (합성: 값 칸 71 → 70, 합 309 → 305, 그 줄의 합계는 확정으로 나왔다 — tasks/0009 1절 다)
+    by_slot: dict[tuple, dict] = {}                         # (날짜, 자리) → {(광종|편, 주야): [행]}
+    unresolved: dict[str, dict[str, dict]] = {}             # 날짜 → 쪽 → {(광종|편, 주야): [행]}
     for h in logs:
         k = (f"{h['material']}|{h['level']}", h["shift"])
         if h["slot"] is None:
-            unresolved.setdefault(h["work_date"], {}).setdefault(h["page_id"], {})[k] = h
+            unresolved.setdefault(h["work_date"], {}).setdefault(h["page_id"], {}).setdefault(k, []).append(h)
         else:
-            by_slot.setdefault((h["work_date"], h["slot"]), {})[k] = h
+            by_slot.setdefault((h["work_date"], h["slot"]), {}).setdefault(k, []).append(h)
     matrix_slots = {r[0] for r in ctx.con.execute(
         f"SELECT DISTINCT slot FROM prod_haul WHERE source_role = 'matrix' AND work_date IN ({','.join('?' * len(days))})", days)}
     slots_seen = {s for _d, s in by_slot} | {s for s in matrix_slots if s}
     want = [s for s in site_order(ctx.site, "slots") if s in slots_seen]
     slots = [*want, *sorted(s for s in slots_seen if s not in want)]
     cols = haul_columns(ctx.site, {f"{h['material']}|{h['level']}" for h in logs})
-    shifts = sorted({h["shift"] for h in logs}, key=lambda s: SHIFT_ORDER.get(s, 3))
+    # 주야: 주간 → 야간 → 없음, 그 밖의 이름은 이름 순 (집합을 도는 순서는 프로세스마다 다르다 — 파일을 다시 쓰게 된다)
+    shifts = sorted({h["shift"] for h in logs}, key=lambda s: (SHIFT_ORDER.get(s, 3), "" if s is None else str(s)))
     k_max = max((len(p) for p in unresolved.values()), default=0)
     # 교차검증이 불일치인 칸 — 그 판정이 확정일 때만 (견준 운반 행이 전부 확정 — 교차검증 시트의 "(잠정)" 과 같은 규칙).
     # 잠정인 불일치는 표시하지 않는다 (확정되지 않은 판정을 확정처럼 보이지 않게)
@@ -125,15 +128,25 @@ def haul_table_sheet(ctx: Ctx, days: list[str]) -> dict | None:
     return {"name": L.SHEETS["haul_table"], "rows": rows, "freeze": 2, "filter": False}
 
 
+def has_overlap(sheet: dict | None) -> bool:
+    """운반 표에 겹침 칸이 있나 (범례에 그 줄을 더할 때만 — 겹침이 없는 파일의 모델은 그대로)."""
+    return bool(sheet) and any(len(c) > 1 and c[1] and c[1].split()[0] == "overlap" for r in sheet["rows"] for c in r)
+
+
 def line(got: dict, cols: list[tuple[str, str]], shift, is_mismatch) -> list[list]:
-    """한 블록의 한 줄: 광종·편마다 칸 + 합계 (그 줄이 전부 확정일 때만)."""
+    """한 블록의 한 줄: 광종·편마다 칸 + 합계 (그 줄이 전부 확정이고 겹침이 없을 때만)."""
     out, total, sure_all = [], 0, True
     for key, _name in cols:
-        h = got.get((key, shift))
+        hs = got.get((key, shift))
         flag = " mismatch" if is_mismatch(key) else ""
-        if h is None:                                        # 그 일보에 이 광종·편의 칸이 없다
+        if hs is None:                                       # 그 일보에 이 광종·편의 칸이 없다
             out.append(cell(None, flag.strip()))
             continue
+        if len(hs) > 1:                                      # 겹침: 더하지 않는다 — 그 줄의 합계도 비운다
+            sure_all = False
+            out.append(cell(L.OVERLAP_MARK, "overlap" + flag))
+            continue
+        h = hs[0]
         st = haul_state(h)
         if not sure(st):
             sure_all = False
@@ -193,5 +206,8 @@ def monthly_book(con: sqlite3.Connection, site, month: str, days: list[str], mac
     assign = assignment_sheet(ctx, days)
     if assign is not None:
         assign["name"] = L.LONG["assignment"]
-    sheets = [summary, haul_table_sheet(ctx, days), assign, *longs]
+    table = haul_table_sheet(ctx, days)
+    if has_overlap(table):                                    # 범례의 겹침 줄은 겹침이 있는 파일에만
+        summary["rows"].append([cell(), cell(L.LEGEND_OVERLAP[1], L.LEGEND_OVERLAP[0]), cell(L.LEGEND_OVERLAP[2])])
+    sheets = [summary, table, assign, *longs]
     return finish("monthly", month, [s for s in sheets if s is not None])

@@ -24,7 +24,7 @@ dev = ["pytest>=8.0", "ruff>=0.5"]
 # onnxscript 는 torch 의 새 ONNX 내보내기(dynamo)가 쓴다 — 예전 내보내기가 없어진 torch 에서의 대비
 train = ["torch>=2.2", "onnx>=1.15", "onnxscript>=0.1"]
 # 통합 DB(PostgreSQL)로 싣기 (minedocscan publish, watch·serve 의 바퀴 끝 — tasks/0008 4.8). 없어도 다른 명령은 전부 돈다
-postgres = ["psycopg[binary]>=3.1"]
+postgres = ["psycopg[binary]>=3.2"]
 
 [project.scripts]
 minedocscan = "minedocscan.cli:main"

@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 
 from ..store.db import PRIMARY_KEYS, PUBLISH_TABLES, publish_columns
 
-PUBLISH_VERSION = 1      # 범위·표현·표와 열의 목록의 판 — 바꾸면 올린다 (대상의 판이 다르면 --rebuild)
+PUBLISH_VERSION = 2      # 범위·표현·표와 열의 목록·pub_meta 의 판 — 바꾸면 올린다 (대상의 판이 다르면 --rebuild).
+                         # 2: pub_meta 에 사이트 이름 (tasks/0009 4.1 다)
 DOC_TABLES = ("doc_document", "doc_page", "doc_field", "doc_page_meta", "insp_daily", "prod_haul", "eq_usage_daily",
               "prod_tally", "xcheck_usage")
 DATE_TABLES = {"eq_assignment_obs": "work_date", "xcheck_haul": "work_date"}

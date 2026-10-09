@@ -58,6 +58,19 @@ def inside_git_tree(path: str | Path) -> bool:
     return any((q / ".git").exists() for q in (p, *p.parents))
 
 
+def inside_intake_folders(out: str | Path, settings, what: str = "내보낸 파일") -> str | None:
+    """접수 폴더·보관 폴더 안이면 거절하는 까닭 한 줄 (아니면 None). 엑셀·가린 그림·크롭·틀린 칸 모아 보기가 같이 쓴다
+    (tasks/0009 4.1 마 — 그 전에는 크롭·모아 보기가 저장소 안만 보았다)."""
+    from ..intake.inbox import _inside, _norm
+
+    for key, why in (("inbox", f"접수 폴더 안입니다 — {what}을(를) 스캔으로 접수하게 됩니다"),
+                     ("archive_root", "보관 폴더(스캔 원본) 안입니다 — 보관 폴더에는 intake/ 아래에만 씁니다")):
+        other = getattr(settings, key, None) if settings is not None else None
+        if other is not None and (_norm(out) == _norm(other) or _inside(_norm(out), _norm(other))):
+            return f"{out} 은 {why}"
+    return None
+
+
 def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split: str = "all", kind: str | None = None,
                  res: str = "auto", out_scale: float = 1.5, pad: int | None = None, allow_in_repo: bool = False,
                  include_illegible: bool = False) -> dict:
@@ -68,6 +81,8 @@ def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split
     if inside_git_tree(out) and not allow_in_repo:
         raise ExportError(f"{out} 은 git 작업 트리 안입니다. 크롭에는 현장의 글씨가 들어 있으므로 저장소 밖에 내보내세요 "
                           "(정말 필요하면 --allow-in-repo)")
+    if why := inside_intake_folders(out, settings, "크롭"):
+        raise ExportError(why)
     if split not in ("all", "test", "train"):
         raise ValueError(f"split 은 all | test | train: {split}")
     written = 0
@@ -128,6 +143,8 @@ def export_meta_crops(con: sqlite3.Connection, site, settings, out: str | Path, 
     if inside_git_tree(out) and not allow_in_repo:
         raise ExportError(f"{out} 은 git 작업 트리 안입니다. 크롭에는 현장의 글씨(이름·차량번호)가 들어 있으므로 저장소 밖에 "
                           "내보내세요 (정말 필요하면 --allow-in-repo)")
+    if why := inside_intake_folders(out, settings, "크롭"):
+        raise ExportError(why)
     if split not in ("all", "test", "train"):
         raise ValueError(f"split 은 all | test | train: {split}")
     rows = con.execute(
