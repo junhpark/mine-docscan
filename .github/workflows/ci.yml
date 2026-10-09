@@ -9,13 +9,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - run: |
-          set -e
           curl -sSfLO https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip
-          sha256sum python-3.12.10-embed-amd64.zip
-          ls -l python-3.12.10-embed-amd64.zip
-          unzip -l python-3.12.10-embed-amd64.zip | grep -i -E "dll|_pth|LICENSE" | head -30
+          sha256sum python-3.12.10-embed-amd64.zip; md5sum python-3.12.10-embed-amd64.zip
           curl -sSfL https://www.python.org/downloads/release/python-31210/ -o rel.html
-          grep -i -o -E 'python-3\.12\.10-embed-amd64\.zip.{0,600}' rel.html | grep -o -E '[0-9a-f]{64}' | head -3 || true
-          grep -c 'embed-amd64' rel.html || true
-          curl -sSfL https://www.python.org/ftp/python/ | grep -o -E '3\.12\.[0-9]+/' | sort -uV | tail -4
-          for v in 3.12.11 3.12.12; do curl -s -o /dev/null -w "$v embed: %{http_code}\n" https://www.python.org/ftp/python/$v/python-$v-embed-amd64.zip; done
+          grep -n -A 8 'embed-amd64.zip"' rel.html | head -30
+          curl -sSfL "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip.sigstore" -o s.json && python3 -c "import json;d=json.load(open('s.json'));print(json.dumps(d)[:400])" || true
