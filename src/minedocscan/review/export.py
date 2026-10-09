@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -54,19 +55,27 @@ def check_spec_args(out_scale: float, pad: int | None) -> None:
 
 
 def inside_git_tree(path: str | Path) -> bool:
-    p = Path(path).resolve()
-    return any((q / ".git").exists() for q in (p, *p.parents))
+    """path 가 git 작업 트리 안인가 — 그 경로나 위 폴더에 .git(폴더 또는 작업 트리의 파일)이 있다. 대소문자·구분자는 파일 시스템이
+    가린다 (윈도우는 가리지 않는다). 읽을 수 없는 위 폴더(네트워크 공유의 뿌리 …)는 건너뛴다."""
+    p = Path(os.path.abspath(path))
+    for q in (p, *p.parents):
+        try:
+            if (q / ".git").exists():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def inside_intake_folders(out: str | Path, settings, what: str = "내보낸 파일") -> str | None:
     """접수 폴더·보관 폴더 안이면 거절하는 까닭 한 줄 (아니면 None). 엑셀·가린 그림·크롭·틀린 칸 모아 보기가 같이 쓴다
     (tasks/0009 4.1 마 — 그 전에는 크롭·모아 보기가 저장소 안만 보았다)."""
-    from ..intake.inbox import _inside, _norm
+    from ..intake.inbox import within
 
     for key, why in (("inbox", f"접수 폴더 안입니다 — {what}을(를) 스캔으로 접수하게 됩니다"),
                      ("archive_root", "보관 폴더(스캔 원본) 안입니다 — 보관 폴더에는 intake/ 아래에만 씁니다")):
         other = getattr(settings, key, None) if settings is not None else None
-        if other is not None and (_norm(out) == _norm(other) or _inside(_norm(out), _norm(other))):
+        if other is not None and within(out, other):                     # 대소문자·UNC·연결한 드라이브도 (tasks/0009 4.4)
             return f"{out} 은 {why}"
     return None
 

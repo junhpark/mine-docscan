@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:      # 가지에서 손으로 (윈도우 작업을 PR 없이 — tasks/0009 4.4)
 
 jobs:
   test:
@@ -25,6 +26,21 @@ jobs:
       # 조금 다르다. 묶음의 목록은 윈도우 작업이 묶음을 만들 때 wheels/ 로 검사한다 (tasks/0009 단계 5 — scripts/bundle.py)
       - run: pip install -e ".[postgres]"
       - run: python scripts/licenses.py --installed postgres --check --out THIRD_PARTY_NOTICES.txt
+
+  windows:
+    # 윈도우에서 돈다 (tasks/0009 4.4): 현장 PC 는 윈도우다. 러너의 기본 코드 페이지(cp1252)로 표준 출력을 파일에 묶은 명령, 대소문자·
+    # 관리 공유(\\localhost\C$)로 적은 같은 폴더의 거절, 긴 한글 이름의 보관 경로, 열린 파일 — 기본 pytest 그대로
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev,postgres]"
+      - run: python -c "import sys, locale; print(sys.version, locale.getpreferredencoding(False), sys.stdout.encoding)"
+      - run: pytest --durations=30
 
   lowest:
     # pyproject 의 하한(OpenCV 4.9, numpy 1.26, openpyxl 3.1.0, pypdfium2 4.30)에서도 같은 시험. 위 작업은 최신판만 받는다 —

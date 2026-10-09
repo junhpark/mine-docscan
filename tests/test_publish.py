@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import select
 import socket
 import sqlite3
 import sys
@@ -691,7 +692,9 @@ def test_without_a_site_name_auto_publish_is_off_and_says_so_once(tmp_path, caps
 # ── tasks/0009 4.1 라 — 우리 쪽의 기다림의 상한 (서버 없이: 소켓 한 쌍) ─────────────────────────
 class SocketConn:
     """가짜 대상 연결: 소켓 한 쌍의 한쪽(a)이 '서버로 가는 소켓'이다. 시간 제한을 거는 문장 밖의 문장은 a 에서 답 한 바이트를 기다리고,
-    끝(b"")을 읽으면 드라이버처럼 OperationalError(SQLSTATE 없음). cancel: "hang"(취소도 돌아오지 않는다) | "works"(답이 온다)."""
+    끝(b"")을 읽으면 드라이버처럼 OperationalError(SQLSTATE 없음). cancel: "hang"(취소도 돌아오지 않는다) | "works"(답이 온다).
+    기다리는 것은 psycopg 의 윈도우 대기(waiting.wait_select)와 같이 0.1초마다 다시 거는 select — select 의 OSError 는 OperationalError
+    (윈도우에서 감시 타이머가 깨우는 길이 그것이다 — 윈도우의 shutdown() 은 select·recv 를 깨우지 않는다)."""
 
     def __init__(self, cancel: str = "hang"):
         self.a, self.b = socket.socketpair()
@@ -712,6 +715,13 @@ class SocketConn:
             def execute(self, sql, args=()):
                 if "set_config" in sql:
                     return
+                while True:
+                    try:
+                        r, _w, x = select.select([conn.a], [], [conn.a], 0.1)
+                    except OSError:
+                        raise OperationalError("connection socket closed") from None
+                    if r or x:
+                        break
                 if conn.a.recv(1) == b"":
                     raise OperationalError("server closed the connection unexpectedly")
 
@@ -766,6 +776,15 @@ def test_watchdog_shuts_the_socket_when_the_cancel_hangs():
     finally:
         conn.dispose()
         dog.close()
+
+
+def test_psycopg_waits_with_select_on_windows():
+    """감시 타이머의 윈도우 길(interrupt_waits)은 psycopg 가 윈도우에서 select 로 기다린다는 것에 기댄다 — 그것을 확인한다."""
+    waiting = pytest.importorskip("psycopg.waiting")
+    if sys.platform == "win32":
+        assert waiting.wait is waiting.wait_select
+    core.interrupt_waits(SimpleNamespace())                          # 끊긴 연결에도 조용히 (어느 OS 에서나)
+    core.interrupt_waits(SimpleNamespace(pgconn=SimpleNamespace(socket=-1)))
 
 
 def test_watchdog_cancel_that_works_does_not_shut_the_socket():

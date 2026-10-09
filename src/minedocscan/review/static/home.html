@@ -172,6 +172,8 @@
     if (t.page_errors) out += '<span class="hot">오류 난 쪽 <b>' + t.page_errors + '</b></span>';
     if (t.failed_documents) out += '<span class="hot">실패한 문서 <b>' + t.failed_documents + '</b></span>';
     if (t.waiting) out += '<span>다시 처리 대기 <b>' + t.waiting + '</b></span>';
+    if (t.too_long) out += '<span class="hot" title="보관 경로가 259자를 넘는다 — 파일 이름을 줄이거나 보관 폴더를 짧은 경로로 옮기십시오">'
+      + '경로가 너무 길어 접수하지 않은 파일 <b>' + t.too_long + '</b> (접수 폴더에 그대로)</span>';
     out += '</div><h2>대기열</h2><div class="box todo">';
     for (const [tpl, n] of Object.entries(q.pending || {})) {
       out += '<a href="/?name=pending&template=' + encodeURIComponent(tpl) + '">검수 대기 · ' + esc(templates[tpl] || tpl) + ' <b>' + n + '</b></a>';

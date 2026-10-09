@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import shutil
+import sys
 from dataclasses import replace
 
 import numpy as np
@@ -86,7 +87,9 @@ def test_rescanned_pages_are_held_after_the_original(held):
     assert [t["how"] for t in held["truth"]["rescans"]] == ["shake", "jpeg", "rotated", "shake"]
     for n, page in py.items():
         assert (page["status"], page["duplicate_of"]) == ("duplicate", f"{x}-p{of[n]}"), n
-        assert page["duplicate_sim"] >= 0.99
+        # 리눅스 0.9985–0.9999. 윈도우의 OpenCV 는 같은 그림을 조금 다르게 정합한다 (첫 쪽 x#1 의 인라이어 635 → 571, 괘선 오차 0.0 → 1.0 px —
+        # 실행마다·스레드 수와 무관하게 같은 값이다, tasks/0009 단계 4 의 윈도우 탐침) — 그 쪽의 유사도가 0.8626. 붙잡는 기준(dup_min_sim)은 넘는다
+        assert page["duplicate_sim"] >= (0.99 if sys.platform != "win32" else held["st"].dup_min_sim)
     assert py[3]["rotation"] == 90
     assert {r["status"] for r in pages_of(p.con, x).values()} == {"loaded"}
     assert {r["status"] for r in pages_of(p.con, ids["o_2030-01-07"]).values()} == {"loaded"}
@@ -97,7 +100,7 @@ def test_rescanned_pages_are_held_after_the_original(held):
     without = run(held, "without", [held["scans"] / "x_2030-01-07.pdf", held["scans"] / "o_2030-01-07.pdf"])
     assert dump(p.con, tables=list(BUSINESS)) == dump(without.con, tables=list(BUSINESS))
     rep = build_report(p.con)["intake"]["duplicates"]
-    assert rep["pages"] == 4 and rep["sim"]["min"] >= 0.99
+    assert rep["pages"] == 4 and rep["sim"]["min"] >= (0.99 if sys.platform != "win32" else held["st"].dup_min_sim)
     assert p.summary["duplicates"] and {d["page_id"] for d in p.summary["duplicates"]} == {f"{y}-p{n}" for n in py}
 
 

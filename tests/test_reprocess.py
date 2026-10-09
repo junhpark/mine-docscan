@@ -324,7 +324,8 @@ def test_decision_file_is_append_only_rejects_bad_input_and_survives_fresh(bundl
     assert main(["doc", "discard", f"{d}-p2", "--reviewer", "jp", "--note", "메모", *common]) == 0
     assert "메모" not in capsys.readouterr().out                    # 메모는 출력하지 않는다
     assert path.read_bytes().startswith(first) and len(path.read_bytes().splitlines()) == 2
-    # --fresh: DB 를 지우고 다시 만들어도 같은 파일이면 결정이 그대로 붙는다
+    # --fresh: DB 를 지우고 다시 만들어도 같은 파일이면 결정이 그대로 붙는다 (열어 둔 연결은 닫는다 — 윈도우는 열린 파일을 지우지 못한다)
+    con.close()
     assert main(["run", "--fresh", "--json", *common]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["run"]["decisions"]["imported"] == 2

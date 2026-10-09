@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import re
 import socket
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -213,10 +214,13 @@ def _connect_fn(fn: Callable | None) -> Callable:
 #    libpq 17 보다 옛 판에서는 cancel_safe 가 시간 제한 없는 cancel 로 돌아간다)
 # ② 그래도 돌아오지 않으면 그 연결의 소켓에 shutdown() — 다른 스레드에서 close()·PQfinish 를 부르지 않는다 (libpq 가 쓰는 중이다).
 #    기다리던 쪽이 끝을 읽고 드라이버가 예외(OperationalError, SQLSTATE 없음)를 낸다 → 종류 connection_lost, 지금의 실패 경로.
+#    윈도우의 shutdown() 은 기다리는 select 를 깨우지 않는다 — 그 소켓에 걸린 I/O 를 CancelIoEx 로 취소해 같은 예외로 (interrupt_waits).
 # 서버가 살아 있으면 서버의 statement_timeout 이 30초 먼저 끊는다 — 이 타이머는 서버가 답하지 않을 때만 쏜다.
 WATCH_MARGIN_S = 30.0
 CANCEL_TIMEOUT_S = 5.0
 CANCEL_GRACE_S = 2.0              # 취소가 들었으면(서버가 살아 있다) 문장이 돌아오기를 이만큼 더 기다린 뒤에 소켓을 끊는다
+# 윈도우: 소켓을 끊은 뒤 기다리는 select 를 깨우는 것을 되풀이하는 시간 (psycopg 는 0.1초마다 select 를 다시 건다 — 그 사이에 쏘면 헛방이다)
+INTERRUPT_S = 5.0
 
 
 class Watchdog:
@@ -301,6 +305,11 @@ class Watchdog:
                 return
             self.fired = "shutdown"                          # 잠금 안에서 — 그 사이에 돌아온 문장 뒤의 다음 문장을 끊지 않게
             shutdown_socket(self.conn)
+            if sys.platform == "win32":                      # 윈도우의 shutdown 은 기다리는 select 를 깨우지 않는다 — 걸린 I/O 를 취소한다
+                end = time.monotonic() + INTERRUPT_S
+                while self._still(gen) and not self._closed and time.monotonic() < end:
+                    interrupt_waits(self.conn)
+                    self._cv.wait(0.05)
 
 
 def shutdown_socket(conn) -> None:
@@ -319,6 +328,25 @@ def shutdown_socket(conn) -> None:
         pass
     finally:
         s.detach()                                           # 닫지 않고 돌려준다
+
+
+def interrupt_waits(conn) -> None:
+    """윈도우: 그 소켓에 걸린 I/O 를 취소한다 (CancelIoEx — 닫지 않는다). 윈도우 CI 에서 잰 것 (tasks/0009 단계 4): shutdown() 은 다른
+    스레드의 recv·select·selectors 를 하나도 깨우지 않았다 (15초 그대로 — 소켓 한 쌍과 TCP 둘 다). CancelIoEx 는 select 를 곧바로
+    WSAEINTR(10004)로 돌려보내고 소켓은 열린 채 둔다 — psycopg 의 윈도우 대기(wait_select)는 select 의 OSError 를 OperationalError
+    ("connection socket closed")로 끝낸다: 리눅스에서 shutdown 이 하는 것과 같은 실패 경로. 걸린 것이 없으면 아무 일도 하지 않는다."""
+    try:
+        fd = conn.pgconn.socket
+    except Exception:                                        # noqa: BLE001 — 이미 끊겼다
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CancelIoEx.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        kernel32.CancelIoEx(ctypes.c_void_p(fd), None)
+    except (AttributeError, OSError, ValueError):            # 윈도우가 아니다 · 이상한 기술자
+        pass
 
 
 class _Watched:

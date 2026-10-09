@@ -92,7 +92,8 @@ class OpsApp:
                          "unknown_form": bad.get("unknown_form", 0), "align_failed": bad.get("align_failed", 0),
                          "page_errors": bad.get("error", 0),
                          "failed_documents": sum(d["status"] == "failed" for d in docs),
-                         "waiting": sum(d["waiting"] for d in docs), "queues": self.remaining()},
+                         "waiting": sum(d["waiting"] for d in docs), "queues": self.remaining(),
+                         "too_long": getattr(self.worker, "too_long", 0)},
                 "recent": [_doc_brief(d) for d in recent],
                 "export": self.export_status(), "publish": self.publish_status(),
                 "templates": {t.name: t.title for t in self.site.templates.values()}}
