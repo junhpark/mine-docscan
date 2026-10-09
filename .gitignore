@@ -46,6 +46,10 @@ __pycache__/
 *.egg-info/
 /dist/
 /build/
+# 자가 시험의 결과 (minedocscan selftest — 기본은 지금 폴더에 쓴다)
+/selftest.json
+/selftest.md
+/selftest-out/
 .venv/
 venv/
 .pytest_cache/

@@ -57,6 +57,14 @@ def page_boxes(tpl: Template, meta_keys, pad: int, keep_text: bool = False) -> l
     return out
 
 
+def redact_settings(site) -> tuple[tuple[str, ...] | list[str], int]:
+    """사이트 팩의 [redact] — (가릴 메타 키, 넓히는 폭). 없으면 기본값 (자가 시험이 같은 상자를 다시 그린다)."""
+    cfg = getattr(site, "redact", None) or {}
+    meta_keys = cfg.get("meta_keys") if cfg.get("meta_keys") is not None else DEFAULT_META_KEYS
+    pad = cfg.get("pad_px") if cfg.get("pad_px") is not None else DEFAULT_PAD_PX
+    return meta_keys, pad
+
+
 def mask(gray: np.ndarray, boxes) -> np.ndarray:
     """상자들을 FILL 로 채운 사본 (쪽 밖은 잘라서)."""
     out = gray.copy()
@@ -74,9 +82,7 @@ def export_masked(con: sqlite3.Connection, site, settings, out: Path, date: str 
     (tools/printlayer.page_image — 파이프라인의 정합 그림과 같은 함수). 돌려주는 값: 수만 (이름·값·파일명 없이)."""
     from ..tools.printlayer import page_image
 
-    cfg = getattr(site, "redact", None) or {}
-    meta_keys = cfg.get("meta_keys") if cfg.get("meta_keys") is not None else DEFAULT_META_KEYS
-    pad = cfg.get("pad_px") if cfg.get("pad_px") is not None else DEFAULT_PAD_PX
+    meta_keys, pad = redact_settings(site)
     sql = ("SELECT p.page_id, p.document_id, p.page_no, p.status, p.work_date, p.template_name, p.aligned_image, p.homography, "
            "p.render_dpi, d.source_path, d.source_rel FROM doc_page p JOIN doc_document d ON p.document_id = d.document_id ")
     if page_ids:

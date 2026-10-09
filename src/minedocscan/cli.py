@@ -22,10 +22,12 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 from . import __version__
 from .config import Settings, load_settings
+from .logfile import DailyLog, early_log_dir, redirect
 
 
 def _common(nested: bool = False) -> argparse.ArgumentParser:
@@ -71,12 +73,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--give-up-seconds", type=float,
                    help="이만큼 지나도 열리지 않는 파일은 손상 방침대로 등록한다 (기본 [intake] give_up_seconds = 120)")
 
+    p = sub.add_parser("selftest", help="자가 시험 — 설치한 프로그램이 제대로인지 합성 데이터로 (임시 폴더에서, 약 1–3분). "
+                                        "결과는 OUT/selftest.json·selftest.md (tasks/0009 4.6)")
+    p.add_argument("--out", default=".", help="결과 파일을 쓸 폴더 (기본: 지금 폴더)")
+    p.add_argument("--keep", action="store_true", help="임시 폴더(와 --publish-schema 의 스키마)를 지우지 않고 남긴다")
+    p.add_argument("--publish-schema", metavar="NAME",
+                   help="통합 DB(환경변수 MINEDOCSCAN_PUBLISH_URL)의 이 스키마에 싣고 --check 한 뒤 지운다 — minedocscan_selftest_ "
+                        "로 시작하는 이름만. DB 의 CREATE 권한이 없으면 이 검사만 건너뛴다")
+
     p = sub.add_parser("serve", parents=[common],
                        help="운영 화면 (127.0.0.1) + 접수 폴더 감시: 홈, 문서 화면, 날짜·버리기·다시 스캔 결정, 대기열로 가는 길")
     p.add_argument("--reviewer", help="검수·결정을 남기는 사람 (짧은 영문). 없으면 띄우지 않는다")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--no-watch", action="store_true",
                    help="감시·처리를 하지 않는다 (화면만 — 결정은 남고 처리는 watch 가 한다)")
+    p.add_argument("--log-dir", help="표준 출력·오류를 이 폴더의 serve-YYYYMMDD.log (UTF-8, 날마다 새 파일, 30일 지난 것은 지운다)에 — "
+                                     "작업 스케줄러의 pythonw 처럼 창이 없을 때 (tasks/0009 4.5)")
 
     p = sub.add_parser("export", parents=[common], help="내보내기 — 엑셀(일별·월별). DB 의 사본이다 (tasks/0008)")
     esub = p.add_subparsers(dest="export_command", required=True)
@@ -653,6 +665,23 @@ def cmd_watch(a) -> int:
     return 0
 
 
+def cmd_selftest(a) -> int:
+    """자가 시험 (tasks/0009 4.6). 종료 코드: 0 통과, 1 실패 (어느 검사가 왜 — 한 줄씩), 2 받지 않는 스키마 이름."""
+    from . import selftest
+
+    if a.publish_schema is not None and not selftest.valid_schema(a.publish_schema):
+        print(f"--publish-schema 는 {selftest.SCHEMA_PREFIX} 로 시작하는 영문 소문자·숫자·밑줄 이름만 받습니다 "
+              "(자가 시험이 만들고 지우는 스키마 — 다른 스키마를 건드리지 않게)", file=sys.stderr)
+        return 2
+    out = Path(a.out)
+    print("자가 시험을 시작합니다 — 합성 데이터만, 임시 폴더에서 (망에 닿지 않습니다)", flush=True)
+    r = selftest.run(out, keep=a.keep, publish_schema=a.publish_schema)
+    n = Counter(c["status"] for c in r["checks"])
+    print(f"자가 시험: {'통과' if r['passed'] else '실패'} — 통과 {n['passed']}, 실패 {n['failed']}, 건너뜀 {n['skipped']} "
+          f"({r['seconds']}초). 결과: {out / 'selftest.json'}, {out / 'selftest.md'}")
+    return 0 if r["passed"] else 1
+
+
 def cmd_serve(a) -> int:
     """운영 화면 (tasks/0007 4.9): 한 프로세스에 스레드 둘 — 작업 스레드가 접수·처리 바퀴를 돌고(자기 DB 연결), 화면 스레드는
     단일 스레드 HTTP 서버(자기 연결)다. 화면의 쓰기는 검수 저장과 결정 저장뿐. --no-watch 면 작업 스레드가 없다 (잠금도 잡지 않는다)."""
@@ -665,6 +694,8 @@ def cmd_serve(a) -> int:
     from .review.store import import_into
     from .store.db import open_db
 
+    if a.log_dir and not isinstance(sys.stdout, DailyLog):             # main 이 이미 열었다 (early_log_dir) — 직접 부를 때만 여기서
+        redirect(a.log_dir)
     if not a.reviewer:
         raise SystemExit("검수자를 지정하세요: --reviewer <짧은 영문 식별자>. 검수·결정 기록마다 남습니다.")
     s = _settings(a)
@@ -1588,7 +1619,7 @@ def cmd_publish(a) -> int:
 COMMANDS = {"info": cmd_info, "publish": cmd_publish, "run": cmd_run, "report": cmd_report, "pages": cmd_pages, "eval": cmd_eval,
             "regress": cmd_regress, "template": cmd_template, "synth": cmd_synth, "review": cmd_review,
             "doc": cmd_doc, "watch": cmd_watch, "serve": cmd_serve, "export": cmd_export,
-            "recognizer": cmd_recognizer}
+            "recognizer": cmd_recognizer, "selftest": cmd_selftest}
 
 
 def utf8_streams() -> None:
@@ -1615,6 +1646,10 @@ def main(argv: list[str] | None = None) -> int:
     from .store.db import SchemaVersionError
 
     utf8_streams()
+    argv = sys.argv[1:] if argv is None else list(argv)
+    log_dir = early_log_dir(argv)
+    if log_dir:                                                        # serve --log-dir: 인자를 읽기 전에 (argparse 의 오류도 그 파일에)
+        redirect(log_dir)
     args = build_parser().parse_args(argv)
     try:
         return COMMANDS[args.command](args)

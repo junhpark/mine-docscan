@@ -26,6 +26,8 @@ jobs:
       # 조금 다르다. 묶음의 목록은 윈도우 작업이 묶음을 만들 때 wheels/ 로 검사한다 (tasks/0009 단계 5 — scripts/bundle.py)
       - run: pip install -e ".[postgres]"
       - run: python scripts/licenses.py --installed postgres --check --out THIRD_PARTY_NOTICES.txt
+      # 자가 시험 (tasks/0009 4.6): 설치한 명령 그대로, 저장해 둔 결과 없이 — 3분 안이어야 한다
+      - run: /usr/bin/time -f "selftest %e s" minedocscan selftest --out selftest-out && cat selftest-out/selftest.md
 
   windows:
     # 윈도우에서 돈다 (tasks/0009 4.4): 현장 PC 는 윈도우다. 러너의 기본 코드 페이지(cp1252)로 표준 출력을 파일에 묶은 명령, 대소문자·
@@ -41,6 +43,138 @@ jobs:
       - run: pip install -e ".[dev,postgres]"
       - run: python -c "import sys, locale; print(sys.version, locale.getpreferredencoding(False), sys.stdout.encoding)"
       - run: pytest --durations=30
+
+  windows-install:
+    # 오프라인 설치 묶음 (tasks/0009 4.5 바): 묶음 만들기(인터넷) → 망을 막고 install.ps1 → 새 창처럼 PATH·설정을 레지스트리에서 →
+    # 설치한 minedocscan selftest(3분 안) → 작업 스케줄러의 serve → 같은 묶음으로 다시 설치(올리기) → 손상된 묶음은 멈춘다 → uninstall.ps1.
+    # 현장과 같은 Windows PowerShell 5.1 (shell: powershell). run 블록의 글은 ASCII 로만 쓴다 — 러너가 BOM 없는 임시 .ps1 로 돌려
+    # 5.1 이 cp1252 로 읽는다 (한글의 UTF-8 바이트 일부가 둥근 따옴표가 되어 문법이 깨진다)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 묶음 만들기
+        run: |
+          "APP=$env:RUNNER_TEMP\app" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "DATA=$env:RUNNER_TEMP\data" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          python scripts/bundle.py --out "$env:RUNNER_TEMP\dist"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-Content "$env:RUNNER_TEMP\dist\bundle-report.json"
+          $zip = Get-ChildItem "$env:RUNNER_TEMP\dist\minedocscan-*-win64.zip"
+          "bundle bytes: $($zip.Length)"
+          Expand-Archive $zip.FullName -DestinationPath "$env:RUNNER_TEMP\b"
+      - name: 합성 사이트 팩과 데이터 폴더 (PATH 에 없는 개발용 venv 로 — 설치할 것과 섞이지 않게)
+        run: |
+          python -m venv "$env:RUNNER_TEMP\devenv"
+          & "$env:RUNNER_TEMP\devenv\Scripts\python.exe" -m pip install --quiet -e .
+          & "$env:RUNNER_TEMP\devenv\Scripts\minedocscan.exe" synth "$env:DATA\demo" --days 1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          New-Item -ItemType Directory -Force "$env:DATA\archive", "$env:DATA\work", "$env:DATA\inbox", "$env:DATA\excel" | Out-Null
+      - name: 설치 (망을 막고)
+        run: |
+          $env:PIP_NO_INDEX = '1'; $env:HTTP_PROXY = 'http://127.0.0.1:9'; $env:HTTPS_PROXY = 'http://127.0.0.1:9'
+          $b = (Get-ChildItem "$env:RUNNER_TEMP\b" -Directory)[0].FullName
+          $t0 = Get-Date
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$b\install.ps1" -InstallDir $env:APP -Site "$env:DATA\demo\site" `
+            -Archive "$env:DATA\archive" -Work "$env:DATA\work" -Inbox "$env:DATA\inbox" -ExcelDir "$env:DATA\excel" -Reviewer ci
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          "install seconds: $([int]((Get-Date) - $t0).TotalSeconds)"
+      - name: 새 창처럼 — 사용자 PATH·MINEDOCSCAN_CONFIG, 판, 설치한 자가 시험
+        run: |
+          $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+          $env:MINEDOCSCAN_CONFIG = [Environment]::GetEnvironmentVariable('MINEDOCSCAN_CONFIG', 'User')
+          $exe = (Get-Command minedocscan).Source
+          if (-not $exe.StartsWith("$env:APP\python\Scripts", [StringComparison]::OrdinalIgnoreCase)) { throw "another minedocscan on PATH: $exe" }
+          $b = (Get-ChildItem "$env:RUNNER_TEMP\b" -Directory)[0].FullName
+          $v = (minedocscan --version) -join ''
+          if ($v -ne "minedocscan $((Get-Content "$b\VERSION").Trim())") { throw "version differs: $v" }
+          minedocscan selftest --out "$env:RUNNER_TEMP\selftest"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $r = [IO.File]::ReadAllText("$env:RUNNER_TEMP\selftest\selftest.json", [Text.Encoding]::UTF8) | ConvertFrom-Json
+          "selftest seconds: $($r.seconds)"
+          if ($r.seconds -ge 180) { throw "selftest took $($r.seconds) s (limit 180 s)" }
+      - name: 작업 스케줄러의 serve
+        run: |
+          $task = Get-ScheduledTask -TaskName minedocscan-serve
+          $a = $task.Actions[0]; $s = $task.Settings
+          if (-not $a.Execute.EndsWith('pythonw.exe') -or $a.Arguments -notmatch '--log-dir' -or $a.Arguments -notmatch '--reviewer ci') { throw "action: $($a.Execute) $($a.Arguments)" }
+          if ($task.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger') { throw "trigger: $($task.Triggers[0].CimClass.CimClassName)" }
+          if ($s.RestartCount -ne 3 -or $s.RestartInterval -ne 'PT1M' -or $s.DisallowStartIfOnBatteries -or $s.StopIfGoingOnBatteries -or $s.ExecutionTimeLimit -ne 'PT0S') {
+            throw "settings: $($s.RestartCount) $($s.RestartInterval) $($s.DisallowStartIfOnBatteries) $($s.StopIfGoingOnBatteries) $($s.ExecutionTimeLimit)" }
+          function Home-Ok { try { (Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 http://127.0.0.1:8765/api/home).StatusCode -eq 200 } catch { $false } }
+          $how = 'task'
+          Start-ScheduledTask -TaskName minedocscan-serve
+          $ok = $false; for ($i = 0; $i -lt 45 -and -not $ok; $i++) { Start-Sleep 1; $ok = Home-Ok }
+          if (-not $ok) {
+            "the task did not come up (no interactive logon on the runner, state $((Get-ScheduledTask -TaskName minedocscan-serve).State)) - starting the same command line directly"
+            $how = 'direct'
+            Start-Process -FilePath $a.Execute -ArgumentList $a.Arguments -WorkingDirectory $a.WorkingDirectory | Out-Null
+            for ($i = 0; $i -lt 45 -and -not $ok; $i++) { Start-Sleep 1; $ok = Home-Ok }
+          }
+          Stop-ScheduledTask -TaskName minedocscan-serve -ErrorAction SilentlyContinue
+          Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe'" | Where-Object { $_.ExecutablePath -like "$env:APP\*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+          Start-Sleep 2
+          $log = Get-ChildItem "$env:APP\logs\serve-*.log" | Select-Object -First 1
+          if (-not $log) { throw "no serve log file" }
+          $fs = [IO.File]::Open($log.FullName, 'Open', 'Read', 'ReadWrite')
+          try { $ms = New-Object IO.MemoryStream; $fs.CopyTo($ms); $bytes = $ms.ToArray() } finally { $fs.Close() }
+          $text = (New-Object System.Text.UTF8Encoding $false, $true).GetString($bytes)
+          if (-not $ok) { $text; throw "/api/home did not answer 200" }
+          if ($text -notmatch '[\uAC00-\uD7A3]' -or $text -notmatch 'http://127\.0\.0\.1:8765/') { $text; throw "log is not UTF-8 Korean text with the URL" }
+          "serve started by: $how"
+      - name: 같은 묶음으로 다시 설치 (올리기) — 설정이 그대로
+        run: |
+          $env:PIP_NO_INDEX = '1'; $env:HTTP_PROXY = 'http://127.0.0.1:9'; $env:HTTPS_PROXY = 'http://127.0.0.1:9'
+          $cfg = [Environment]::GetEnvironmentVariable('MINEDOCSCAN_CONFIG', 'User')
+          $before = (Get-FileHash $cfg).Hash
+          $b = (Get-ChildItem "$env:RUNNER_TEMP\b" -Directory)[0].FullName
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$b\install.ps1" -InstallDir $env:APP -Reviewer ci -NoTask -Quiet
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ((Get-FileHash $cfg).Hash -ne $before) { throw "config changed" }
+          & "$env:APP\python\Scripts\minedocscan.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "minedocscan.exe broken after the upgrade swap" }
+          Stop-ScheduledTask -TaskName minedocscan-serve -ErrorAction SilentlyContinue
+      - name: 손상된 묶음은 멈춘다
+        run: |
+          $b = (Get-ChildItem "$env:RUNNER_TEMP\b" -Directory)[0].FullName
+          Copy-Item $b "$env:RUNNER_TEMP\broken" -Recurse
+          $w = Get-ChildItem "$env:RUNNER_TEMP\broken\wheels\minedocscan-*.whl"
+          [IO.File]::AppendAllText($w.FullName, 'x')
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$env:RUNNER_TEMP\broken\install.ps1" -InstallDir "$env:RUNNER_TEMP\app2" -Reviewer ci
+          if ($LASTEXITCODE -eq 0) { throw "installed from a tampered bundle" }
+          if (Test-Path "$env:RUNNER_TEMP\app2\python") { throw "a tampered bundle unpacked python" }
+          $global:LASTEXITCODE = 0
+      - name: 지우기 — 프로그램만
+        run: |
+          $cfg = [Environment]::GetEnvironmentVariable('MINEDOCSCAN_CONFIG', 'User')
+          $b = (Get-ChildItem "$env:RUNNER_TEMP\b" -Directory)[0].FullName
+          powershell -NoProfile -ExecutionPolicy Bypass -File "$b\uninstall.ps1" -InstallDir $env:APP
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (Get-ScheduledTask -TaskName minedocscan-serve -ErrorAction SilentlyContinue) { throw "the task is still there" }
+          if (Test-Path $env:APP) { throw "InstallDir is still there" }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if ($userPath -like "*$env:APP*") { throw "the PATH entry is still there" }
+          if ([Environment]::GetEnvironmentVariable('MINEDOCSCAN_CONFIG', 'User')) { throw "MINEDOCSCAN_CONFIG is still set" }
+          foreach ($keep in @($cfg, "$env:DATA\demo\site", "$env:DATA\archive", "$env:DATA\work", "$env:DATA\inbox", "$env:DATA\excel")) {
+            if (-not (Test-Path $keep)) { throw "uninstall removed what it must keep: $keep" }
+          }
+          "uninstall: program only"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-bundle
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}\dist\minedocscan-*-win64.zip
+            ${{ runner.temp }}\dist\bundle-report.json
+            ${{ runner.temp }}\selftest
 
   lowest:
     # pyproject 의 하한(OpenCV 4.9, numpy 1.26, openpyxl 3.1.0, pypdfium2 4.30)에서도 같은 시험. 위 작업은 최신판만 받는다 —

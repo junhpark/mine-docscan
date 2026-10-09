@@ -233,6 +233,50 @@ def test_a_schema_only_account_can_publish(world, pg):
             c.execute(f'DROP ROLE IF EXISTS "{role}"')
 
 
+def test_the_password_comes_from_pgpass(world, pg, tmp_path, monkeypatch):
+    """비밀번호는 libpq 의 pgpass 에 (tasks/0009 4.5 다): URL 에는 계정·서버·DB 만, 비밀번호는 PGPASSFILE(윈도우의 기본 자리는
+    %APPDATA%\\postgresql\\pgpass.conf)의 줄에서 — 프로그램은 바꾸지 않는다. 서버가 비밀번호를 묻는 설정이면 틀린 줄로는 닿지 못한다."""
+    from urllib.parse import urlsplit
+
+    import psycopg
+
+    role, pw = f"r_{uuid.uuid4().hex[:8]}", f"pw-{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(PG, autocommit=True) as c:
+        c.execute(f"CREATE ROLE \"{role}\" LOGIN PASSWORD '{pw}'")
+        c.execute(f'CREATE SCHEMA "{pg.publish_schema}" AUTHORIZATION "{role}"')
+    u = urlsplit(PG)
+    host, port, db = u.hostname, u.port or 5432, u.path.lstrip("/")
+    url = f"postgresql://{role}@{host}:{port}/{db}"
+    passfile = tmp_path / "pgpass.conf"
+
+    def write(password: str) -> None:
+        passfile.write_text(f"{host}:{port}:{db}:{role}:{password}\n", encoding="utf-8")
+        os.chmod(passfile, 0o600)                                      # libpq 는 남이 읽을 수 있는 파일을 무시한다 (유닉스)
+
+    monkeypatch.setenv("PGPASSFILE", str(passfile))
+    monkeypatch.delenv("PGPASSWORD", raising=False)
+    st = replace(pg, publish_url=url)
+    try:
+        write("wrong")
+        try:
+            psycopg.connect(url, connect_timeout=5).close()
+            asks = False                                               # 신뢰(trust) 설정 — 비밀번호를 묻지 않는다
+        except psycopg.OperationalError:
+            asks = True
+        if asks:
+            with pytest.raises(core.PublishError) as e:
+                core.run(world["pipe"].con, st)
+            assert e.value.kind == "connect" and pw not in str(e.value) and "wrong" not in str(e.value)
+        write(pw)
+        r = core.run(world["pipe"].con, st)
+        assert r.created and r.replaced["document"]
+        assert_same(world["pipe"].con, pg)
+    finally:
+        with psycopg.connect(PG, autocommit=True) as c:
+            c.execute(f'DROP SCHEMA IF EXISTS "{pg.publish_schema}" CASCADE')
+            c.execute(f'DROP ROLE IF EXISTS "{role}"')
+
+
 def test_check_writes_nothing_and_the_lock(world, pg, capsys, monkeypatch):
     from minedocscan.cli import main
     from minedocscan.pipeline.lock import PipelineLock

@@ -26,6 +26,8 @@ settle_seconds = 5           # 수정 시각이 이만큼 지나고 열리는 �
 give_up_seconds = 120        # 이만큼 지나도 다 쓰이지 않았으면(열리지 않는다, PDF 의 끝 표시가 없다) 손상 방침대로 등록한다
                              # (읽을 수조차 없으면 <inbox>/_failed 로)
 poll_seconds = 3             # 접수 폴더를 훑는 간격
+# serve 의 출력은 명령의 선택으로: serve --log-dir DIR — DIR/serve-YYYYMMDD.log (UTF-8, 날마다 새 파일, 30일 지난 것은 지운다).
+# 윈도우 설치(install.ps1)는 작업 스케줄러가 창 없이(pythonw) 띄우는 serve 에 <설치 폴더>\logs 를 준다
 
 # 엑셀 내보내기 (docs/DATA.md, ADR 0022). excel_dir 가 없으면 자동 내보내기는 꺼져 있다 — export excel 은 OUT 을 받는다.
 # watch·serve 가 바퀴 끝(접수 → 처리 → 엑셀 → 싣기)에 바뀐 날짜의 일별·월별 파일만 다시 쓴다 (내용의 해시가 같으면 건드리지 않는다)
