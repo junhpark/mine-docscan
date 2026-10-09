@@ -34,7 +34,7 @@ from .business import (
     xcheck_usage_sheet,
 )
 from .daily import summary_rows
-from .model import cell, finish, form_sheets, head, load_pages, sure
+from .model import Pages, cell, finish, form_sheets, head, load_pages, sure
 
 SHIFT_ORDER = {"day": 0, "night": 1, None: 2}
 
@@ -182,13 +182,16 @@ def day_summary_sheet(ctx: Ctx, month: str, days: list[str], pending: Counter, b
     return {"name": L.SUMMARY, "rows": rows[:legend_at] + table + [[]] + rows[legend_at:]}
 
 
-def monthly_book(con: sqlite3.Connection, site, month: str, days: list[str], machine_values: bool = False) -> dict:
-    """그 달의 월별 파일 모델. days: 그 달에 쪽이 있는 ISO 날짜들. 한 읽기 트랜잭션 안에서 부른다."""
-    pages = load_pages(con, days)
+def monthly_book(con: sqlite3.Connection, site, month: str, days: list[str], machine_values: bool = False,
+                 pages: Pages | None = None) -> dict:
+    """그 달의 월별 파일 모델. days: 그 달에 쪽이 있는 ISO 날짜들. 한 읽기 트랜잭션 안에서 부른다. pages: 이미 읽은 그 날짜들의 쪽
+    (load_pages(con, days) — 일별 파일과 같이 쓴다). 없으면 읽는다."""
+    if pages is None:
+        pages = load_pages(con, days)
     ctx = Ctx(con, site, pages, machine_values)
     pending, by_family = Counter(), Counter()
     for day in days:                                          # 검수 대기 칸의 수 — 일별 파일의 양식 시트와 같은 수
-        fams = form_sheets(site, load_pages(con, [day]))[1]
+        fams = form_sheets(site, pages.day(day))[1]          # 그달에 읽은 행에서 (다시 읽지 않는다)
         pending[day] = sum(fams.values())
         by_family += fams
     waiting = con.execute(

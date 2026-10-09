@@ -271,3 +271,53 @@ def test_dirty_excel_rounds_equal_exporting_the_whole_db(world, bundles, world_d
     assert len(again) == 5 and again == trace[:5]
     print(f"seed {seed}: 흔들기 {took:.1f}s, 다시 넷째 걸음까지 {time.perf_counter() - t1:.1f}s, "
           f"바퀴마다 (쓴, 지운) {[(w, d) for w, d, _h in trace]}, '전부'를 남긴 바퀴 {everything}")
+
+
+def sliced_fuzz(world, out: Path, seed: int) -> list[int]:
+    """조각으로 돈 한 바퀴 = 전체 훑기 (tasks/0009 4.2 가): 걸음마다 검수(건드린 것을 넘기지 않는다 — 다른 프로세스의 검수처럼 훑기만
+    잡는다)·결정(처리가 건드린 것은 넘긴다)을 넣고, 바퀴 하나를 끝까지(달마다 작업 바퀴 하나) 돌린 뒤 폴더 = 그 DB 를 전부 내보낸 것.
+    돌려주는 값: 바퀴마다의 조각 수."""
+    from test_review_store import reprocess_fuzz
+
+    pipe, site, st = world["pipe"], world["site"], world["st"]
+    con = pipe.con
+    decs.save(con, st.decisions_path(site.root), [{"target": world["ids"]["d_2030-01-08"], "kind": "date",
+                                                   "value": "2030-02-08"}], "jp")
+    pipe.process_pending()                                         # 달이 둘 (흔들기가 다시 옮길 수 있다)
+    pipe.touched = Touched()
+    clock = Clock()
+    x = AutoExport(replace(st, excel_dir=out, export_sweep_minutes=1.0), site, clock=clock, now=lambda: "2030-02-01T00:00:00Z")
+    out.mkdir()
+    parts: list[int] = []
+
+    def cycle(first: Touched) -> None:
+        clock.t += 61.0                                            # sweep_minutes(1분)이 지났다 — 새 바퀴
+        r = x.after_round(con, first)
+        assert x.status["sweep"] is not None or x.status["last_sweep_at"], seed
+        n = 1
+        while x.sweep.running:
+            r = x.after_round(con, Touched())
+            n += 1
+            assert n < 20, seed
+        assert r is None or (r.failed, r.kept, r.missing_dir) == ([], 0, False), (seed, r.as_dict())
+        parts.append(n)
+        have = recorded(out)
+        want = exported_whole(con, site, out.parent / f"전부-{len(parts)}", x.machine_values)
+        assert have == want, (seed, len(parts), sorted(k for k in have.keys() | want.keys() if have.get(k) != want.get(k)))
+
+    cycle(Touched())
+
+    def step(n):
+        t, pipe.touched = pipe.touched, Touched()
+        cycle(t)
+
+    reprocess_fuzz(world, steps=STEPS, seed=seed, fresh=False, on_touched=lambda t: None, after_step=step)
+    return parts
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", [21, 22])
+def test_a_sliced_sweep_equals_exporting_the_whole_db(world, tmp_path, seed):
+    """조각(달)마다 한 작업 바퀴로 한 바퀴를 다 돌면 폴더 = 그 DB 를 전부 내보낸 것 — 더러운 범위에 들지 않은 검수(다른 프로세스)도."""
+    parts = sliced_fuzz(world, tmp_path / "엑셀", seed)
+    assert len(parts) == 1 + STEPS and max(parts) >= 2, parts      # 달이 둘 이상인 바퀴가 있었다

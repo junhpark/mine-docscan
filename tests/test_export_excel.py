@@ -712,6 +712,18 @@ def test_refusals_and_non_iso_dates(null_run, tmp_path):
     assert files == {*r.written, RECORD_NAME}                              # 이름 규칙에 맞는 파일만 — 날짜가 경로가 되지 않았다
     assert daily(r.written) == sorted(daily_path(d) for d in days_of(con) if d != '07/01/2030')
     assert {p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_dir()} <= {"daily", "daily/2030-01", "monthly"}
+    # 바퀴 끝의 내보내기도 알린다: 바퀴를 시작할 때(어느 조각에도 들지 않는 날짜 — 한 번), 그 날짜를 건드린 바퀴, 그 달의 조각
+    from minedocscan.export.auto import AutoExport
+    from minedocscan.touched import Touched
+
+    x = AutoExport(Settings(excel_dir=out, export_sweep_minutes=0.0), null_run.site, clock=lambda: 0.0)
+    assert x.after_round(con, Touched()).skipped_dates == 1
+    while x.sweep.running:
+        assert x.after_round(con, Touched()).skipped_dates == 0
+    assert x.after_round(con, Touched(dates={"07/01/2030"})).skipped_dates == 1
+    con.execute("UPDATE doc_page SET work_date = '2030-01-3x' WHERE work_date = '07/01/2030'")
+    con.commit()
+    assert export_excel(con, null_run.site, out, slices=["2030-01"]).skipped_dates == 1
 
 
 def test_export_command_refuses_while_the_pipeline_runs(null_run, tmp_path, capsys):

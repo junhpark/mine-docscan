@@ -215,9 +215,10 @@ class FormHandler:
         DB 를 읽지도 쓰지도 않는다. 기본은 아무것도 고치지 않는다."""
         return {}, []
 
-    def on_review(self, con: sqlite3.Connection, site: SitePack, settings: Settings, field_id: str) -> None:
+    def on_review(self, con: sqlite3.Connection, site: SitePack, settings: Settings, field_id: str) -> set[str] | None:
         """검수를 저장한 직후 호출된다: 이 필드로 만든 업무 행을 파이프라인을 다시 돌리지 않고 갱신한다.
-        기본은 아무것도 하지 않는다 (업무 테이블이 없는 핸들러)."""
+        기본은 아무것도 하지 않는다 (업무 테이블이 없는 핸들러). 다른 쪽의 업무 행도 바꿨으면 그 쪽 ID 들을 돌려준다 — 엑셀·싣기가 그 쪽의
+        날짜·문서도 다시 본다 (가동 일보의 계기 연속성, tasks/0009 4.2 다). 그 칸의 쪽과 날짜는 돌려주지 않아도 store.save 가 더한다."""
         return None
 
 

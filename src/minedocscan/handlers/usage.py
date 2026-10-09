@@ -109,6 +109,7 @@ class UsageHandler(FormHandler):
         기록이 있는 장비와 equipment(지운 기록의 장비, equipment_ref)의 것. 쪽 안의 검산은 적재할 때 쪽마다 적었고 쪽과 같이 지워진다."""
         if dates is None and equipment is None:
             return {"xcheck_usage": check_usage(con, site)}
+        # 범위가 있으면 바뀐 연속성 행의 쪽을 돌려준다 (Pipeline.finalize 가 건드린 것에 더한다 — tasks/0009 4.2 다)
         refs, pages = set(equipment or ()), set()
         for d in sorted(set(dates or ())):
             for r in con.execute("SELECT * FROM eq_usage_daily WHERE work_date = ?", (d,)).fetchall():
@@ -117,8 +118,7 @@ class UsageHandler(FormHandler):
                     pages.add(r["page_id"])
                 else:
                     refs.add(ref)
-        recompute_continuity(con, refs, pages)
-        return {}
+        return {"continuity_pages": recompute_continuity(con, refs, pages)}
 
     def export_cells(self, template, fields: dict[str, dict]) -> tuple[dict[str, str], list[str]]:
         """엑셀의 작업 표(role activities) 글자 칸 (tasks/0008 4.2): 읽지 않는 표다 (ADR 0016) — 검수 대기인 칸은 ● (글씨 있음)로.
@@ -137,9 +137,10 @@ class UsageHandler(FormHandler):
             return None if v is None else str(v)
         return None
 
-    def on_review(self, con, site, settings, field_id: str) -> None:
+    def on_review(self, con, site, settings, field_id: str) -> set[str] | None:
         """검수 직후: 그 쪽의 eq_usage_daily·prod_tally 를 최종 필드 행에서 다시 만든다 (계기·작업량 칸, 장비명·운전자 필드 모두).
-        쪽 메타는 store.save 가 먼저 다시 계산해 두었다 (refresh_page)."""
+        쪽 메타는 store.save 가 먼저 다시 계산해 두었다 (refresh_page). 돌려주는 값: 연속성 행이 바뀐 쪽 (store.save 가 건드린 것에
+        그 쪽의 날짜·문서를 더한다 — 앞뒤 기록이 다른 날짜에 있다, tasks/0009 4.2 다)."""
         f = con.execute("SELECT f.page_id, p.template_name, p.work_date FROM doc_field f JOIN doc_page p "
                         "ON f.page_id = p.page_id WHERE f.field_id = ?", (field_id,)).fetchone()
         if f is None or f["template_name"] not in site.templates:
@@ -151,7 +152,7 @@ class UsageHandler(FormHandler):
         write_page_checks(con, tpl, f["page_id"])
         # 그 장비의 연속성 — 장비명이 바뀌었으면 예전 장비와 새 장비 둘 다 (앞뒤 기록의 검산이 바로 바뀐다)
         refs = {equipment_ref(after)} | ({equipment_ref(before)} if before is not None else set())
-        recompute_continuity(con, refs, {f["page_id"]})
+        return recompute_continuity(con, refs, {f["page_id"]})
 
 
 @dataclass(frozen=True)

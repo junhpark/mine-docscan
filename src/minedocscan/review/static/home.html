@@ -106,6 +106,11 @@
     return ' <a class="xl" href="/export/day.xlsx?date=' + encodeURIComponent(day) + '" title="그 날짜의 엑셀">엑셀</a>'
       + ' <a class="xl" href="/export/month.xlsx?month=' + encodeURIComponent(day.slice(0, 7)) + '" title="그 달의 엑셀">월</a>';
   }
+  // 조각으로 나눈 전체 훑기 (tasks/0009 4.2 가): 도는 중이면 "처음 훑는 중 3/13", 아니면 마지막으로 다 돈 시각
+  function sweepText(j) {
+    if (j.sweep) return ' · ' + (j.sweep.first ? '처음 훑는 중 ' : '훑는 중 ') + j.sweep.done + '/' + j.sweep.total;
+    return j.last_sweep_at ? ' · 전체 훑기 ' + esc(j.last_sweep_at) : '';
+  }
   // 통합 DB 싣기 (tasks/0008 4.8): 대상은 호스트·DB·스키마만 (비밀번호 없이 — 서버가 그렇게 준다)
   function publishText(p) {
     if (!p || !p.enabled) return '통합 DB: ' + ({no_driver: '꺼짐 (psycopg 없음)', disabled: '꺼짐 ([publish] enabled = false)', no_watch: '꺼짐 (--no-watch)',
@@ -116,16 +121,16 @@
                  version: '판이 다름 — publish --rebuild'};
     if (p.last_error) t += ' · <span class="status-failed">싣지 못함 (' + esc(WHY[p.last_error] || p.last_error) + ', 밀린 범위 ' + p.behind + ')</span>';
     if (p.skipped) t += ' · <span class="status-failed">실을 수 없는 값이 있어 건너뛴 범위 ' + p.skipped + '</span>';
-    return t;
+    return t + sweepText(p);
   }
   function exportText(x) {
     if (!x || !x.enabled) return '엑셀: ' + ({refused: '꺼짐 (저장소·접수 폴더 안이라 쓰지 않습니다)', no_watch: '꺼짐 (--no-watch)',
                                            no_site_name: '꺼짐 (사이트 팩에 [site] name 없음)'}[x && x.reason] || '꺼짐 (excel_dir 없음)');
     let t = '엑셀: ' + (x.last_at ? '마지막 ' + esc(x.last_at) + ' · ' + x.written + '개 씀' + (x.deleted ? ', ' + x.deleted + '개 지움' : '') : '쓴 적 없음');
-    if (x.failed) t += ' · <span class="status-failed">쓰지 못함 ' + x.failed + '개 (다음 바퀴에 다시)</span>';
+    if (x.failed) t += ' · <span class="status-failed">쓰지 못함 ' + x.failed + '개 (열려 있는 파일 — 잠시 뒤에 다시)</span>';
     if (x.missing_dir) t += ' · <span class="status-failed">폴더가 없습니다</span>';
     if (x.other_site) t += ' · <span class="status-failed">다른 사이트의 폴더 (쓰지도 지우지도 않음)</span>';
-    return t;
+    return t + sweepText(x);
   }
   function statusCell(d) {
     return '<span class="status-' + esc(d.status) + '">' + esc(STATUS[d.status] || d.status) + '</span>'

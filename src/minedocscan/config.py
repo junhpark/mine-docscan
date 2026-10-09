@@ -68,6 +68,9 @@ class Settings:
     # 엑셀 내보내기 (tasks/0008 4.7): [export] excel_dir (또는 MINEDOCSCAN_EXCEL_DIR) — 없으면 자동 내보내기는 꺼져 있다
     excel_dir: Path | None = None
     export_sweep_minutes: float = 30.0   # 전체 훑기의 간격 (분). 0 이면 시작할 때만 — 다른 프로세스가 쓴 검수와 놓친 것을 잡는다
+    # 바꾸지 못한 엑셀 파일(윈도우에서 엑셀이 열고 있다)을 다시 해 보는 간격 (tasks/0009 4.2 라: 바퀴마다(3초) 모델을 만들고 임시 파일을 쓰고
+    # 실패하고 한 줄을 찍었다 — 20초에 8줄). 그 사이의 바퀴는 그 파일의 모델을 만들지 않는다
+    export_retry_seconds: float = 60.0
     machine_values: bool = False         # 업무 시트·긴 표에 "기계 값(확정 아님)" 열을 따로 둔다 (기본은 싣지 않는다 — ADR 0008)
     # 통합 DB 로 싣기 (tasks/0008 4.8): URL 은 환경변수로만 (repr 에도 나오지 않게). enabled 가 None 이면 URL 이 있을 때 켜진다
     publish_url: str | None = field(default=None, repr=False)
@@ -165,6 +168,7 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         poll_seconds=_number(intake, "poll_seconds", 3.0, float, "[intake] poll_seconds", lo=0.1),
         excel_dir=_p(export.get("excel_dir")),
         export_sweep_minutes=_number(export, "sweep_minutes", 30.0, float, "[export] sweep_minutes", lo=0.0),
+        export_retry_seconds=_number(export, "retry_seconds", 60.0, float, "[export] retry_seconds", lo=0.0),
         machine_values=_flag(export, "machine_values", False, "[export] machine_values"),
         publish_schema=str(publish.get("schema", "minedocscan")),
         publish_enabled=(None if "enabled" not in publish else _flag(publish, "enabled", True, "[publish] enabled")),

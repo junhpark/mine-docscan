@@ -192,25 +192,51 @@ def _days_between(a: str | None, b: str | None) -> int | None:
         return None
 
 
-def recompute_continuity(con: sqlite3.Connection, refs: set[str | None] | None = None, pages: set[str] = frozenset()) -> int:
-    """연속성 검산을 다시 계산한다. refs=None 이면 전부. 아니면 그 장비들(과 pages 의 쪽 — 장비를 모르게 된 쪽 포함)만."""
+def recompute_continuity(con: sqlite3.Connection, refs: set[str | None] | None = None, pages: set[str] = frozenset()) -> set[str]:
+    """연속성 검산을 다시 계산한다. refs=None 이면 전부. 아니면 그 장비들(과 pages 의 쪽 — 장비를 모르게 된 쪽 포함)만.
+    돌려주는 값: 다시 계산하기 전과 뒤로 견주어 **바뀐 행의 쪽** — 행이 걸린 쪽(page_id)과 가리키는 쪽(other_page_id), 생긴 행·없어진 행·
+    값이 바뀐 행 모두 (tasks/0009 4.2 다: 엑셀·싣기의 더러운 범위. 장비의 모든 날짜로 넓히면 칸 하나가 84일을 더럽혔다 — 연속성은
+    같은 장비의 이웃한 기록만 잇는다). 장비 이름을 고쳐 장비가 바뀐 경우도 옛 장비·새 장비의 사슬을 둘 다 견주므로 둘 다 잡는다."""
+    def snapshot() -> dict[tuple, dict]:
+        if refs is None:
+            q, args = "SELECT * FROM xcheck_usage WHERE check_kind = 'continuity'", ()
+        else:
+            conds, args = [], []
+            for col, vals in (("equipment_ref", sorted(want)), ("page_id", sorted(pages))):
+                if vals:
+                    conds.append(f"{col} IN ({','.join('?' * len(vals))})")
+                    args += vals
+            if not conds:
+                return {}
+            q = f"SELECT * FROM xcheck_usage WHERE check_kind = 'continuity' AND ({' OR '.join(conds)})"
+        return {(r["page_id"], r["check_kind"], r["item"]): dict(r) for r in con.execute(q, args)}
+
+    want = {r for r in refs if r is not None} if refs is not None else set()
+    before = snapshot()
     if refs is None:
         con.execute("DELETE FROM xcheck_usage WHERE check_kind = 'continuity'")
         records = _records(con)
     else:
-        refs = {r for r in refs if r is not None}
-        for col, vals in (("equipment_ref", sorted(refs)), ("page_id", sorted(pages))):   # 빈 IN () 은 PostgreSQL 이 받지 않는다
+        for col, vals in (("equipment_ref", sorted(want)), ("page_id", sorted(pages))):   # 빈 IN () 은 PostgreSQL 이 받지 않는다
             if vals:
                 con.execute(f"DELETE FROM xcheck_usage WHERE check_kind = 'continuity' AND {col} IN "
                             f"({','.join('?' * len(vals))})", vals)
-        records = [r for r in _records(con) if r["ref"] in refs or (r["ref"] is None and r["page_id"] in pages)]
+        records = [r for r in _records(con) if r["ref"] in want or (r["ref"] is None and r["page_id"] in pages)]
     groups: dict = {}
     for r in records:
         groups.setdefault(r["ref"], []).append(r)
     rows = [row for ref, rs in groups.items() for row in (continuity_rows(rs) if ref is not None else
                                                           [x for r in rs for x in continuity_rows([r])])]
     upsert(con, "xcheck_usage", rows)
-    return len(rows)
+    after = snapshot()
+    changed: set[str] = set()
+    for key in set(before) | set(after):
+        a, b = before.get(key), after.get(key)
+        if a != b:
+            for row in (a, b):
+                if row is not None:
+                    changed |= {p for p in (row["page_id"], row["other_page_id"]) if p}
+    return changed
 
 
 def write_page_checks(con: sqlite3.Connection, tpl: Template | None, page_id: str) -> int:

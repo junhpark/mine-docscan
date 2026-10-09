@@ -365,8 +365,9 @@ def cmd_info(a) -> int:
     lines = [f"minedocscan {__version__}"] + [f"  {k}: {v}" for k, v in data["settings"].items()]
     lines.append("백엔드: " + ", ".join(f"{k}={v}" for k, v in data["backends"].items()))
     data["export"] = {"excel_dir": str(s.excel_dir) if s.excel_dir else None, "sweep_minutes": s.export_sweep_minutes,
-                      "machine_values": s.machine_values}                       # 엑셀 (tasks/0008 4.7)
-    lines.append(f"엑셀 폴더: {s.excel_dir} (전체 훑기 {s.export_sweep_minutes:g}분마다"
+                      "retry_seconds": s.export_retry_seconds, "machine_values": s.machine_values}   # 엑셀 (tasks/0008 4.7)
+    lines.append(f"엑셀 폴더: {s.excel_dir} (전체 훑기 {s.export_sweep_minutes:g}분마다 — 달마다 한 조각, "
+                 f"바꾸지 못한 파일은 {s.export_retry_seconds:g}초 뒤에 다시"
                  + (", 기계 값 열 있음" if s.machine_values else "") + ")" if s.excel_dir
                  else "엑셀 폴더: 없음 ([export] excel_dir 또는 MINEDOCSCAN_EXCEL_DIR) — 자동 내보내기 꺼짐")
     from .publish.core import describe_url
@@ -628,7 +629,7 @@ def cmd_watch(a) -> int:
     try:
         pipe = Pipeline(s, site=site, recognizer=recognizer, meta_readers=meta_readers)
         worker = Worker(pipe, _open_inbox(s, pipe.con, continuous=not a.once, settle=a.settle_seconds,
-                                          give_up=a.give_up_seconds), after=_round_jobs(s, site))
+                                          give_up=a.give_up_seconds), after=_round_jobs(s, site, once=a.once))
         if a.once:
             r = worker.run_once()
         else:
@@ -726,13 +727,14 @@ def _screen_apps(con, site, s: Settings, reviewer: str, worker, wake, watching: 
     return ops, app
 
 
-def _round_jobs(s: Settings, site) -> dict:
+def _round_jobs(s: Settings, site, once: bool = False) -> dict:
     """watch·serve 의 바퀴 끝의 일 (tasks/0008 4.7·4.8): 엑셀 내보내기 → 통합 DB 싣기 (꺼져 있으면 아무것도 하지 않는다 — 상태만
-    화면에). 켤 수 없으면(저장소·접수 폴더 안, psycopg 가 없다) 시작할 때 한 줄로 알린다."""
+    화면에). 켤 수 없으면(저장소·접수 폴더 안, psycopg 가 없다) 시작할 때 한 줄로 알린다. once: watch --once — 다음 바퀴가 없으므로
+    전체 훑기를 조각으로 나누지 않는다 (나누면 실행마다 첫 달만 훑는다)."""
     from .export.auto import AutoExport
     from .publish.auto import AutoPublish
 
-    jobs = {"excel": AutoExport(s, site), "publish": AutoPublish(s)}
+    jobs = {"excel": AutoExport(s, site, once=once), "publish": AutoPublish(s, once=once)}
     for job in jobs.values():
         if job.notice:
             print(job.notice, file=sys.stderr)
@@ -742,7 +744,8 @@ def _round_jobs(s: Settings, site) -> dict:
 def _worth_showing(out: dict) -> bool:
     x, p = out.get("excel") or {}, out.get("publish") or {}
     return bool(out.get("processed") or out.get("received") or out.get("already") or out.get("moved_failed")
-                or x.get("written") or x.get("deleted") or x.get("failed") or x.get("missing_dir") or out.get("excel_error")
+                or x.get("written") or x.get("deleted") or ((x.get("failed") or x.get("failing")) and x.get("failed_changed", True))
+                or x.get("missing_dir") or out.get("excel_error")
                 or x.get("other_site")
                 or x.get("kept") or x.get("skipped_dates")
                 or p.get("error") or any((p.get("replaced") or {}).values()) or any((p.get("removed") or {}).values())

@@ -1,0 +1,317 @@
+{
+ "criteria": {
+  "excel_unchanged_slice_max_s": {
+   "value": 4.093,
+   "limit": 5.0,
+   "ok": true
+  },
+  "publish_unchanged_slice_max_s": {
+   "value": 2.403,
+   "limit": 5.0,
+   "ok": true
+  },
+  "excel_unchanged_rss_mb": {
+   "value": 188.2,
+   "limit": 300.0,
+   "ok": true
+  },
+  "publish_auto_unchanged_rss_mb": {
+   "value": 9.1,
+   "limit": 300.0,
+   "ok": true
+  },
+  "publish_first_rss_mb": {
+   "value": 8.3,
+   "limit": 300.0,
+   "ok": true
+  },
+  "publish_nochange_rss_mb": {
+   "value": 8.9,
+   "limit": 300.0,
+   "ok": true
+  },
+  "meter_review_dirty_dates": {
+   "value": 2,
+   "limit": 3,
+   "ok": true
+  },
+  "publish_first_vs_before": {
+   "value": 1.07,
+   "limit": 1.5,
+   "ok": true
+  },
+  "publish_nochange_vs_before": {
+   "value": 1.08,
+   "limit": 1.5,
+   "ok": true
+  }
+ },
+ "db": {
+  "days": 252,
+  "source_days": 5,
+  "seed": 0,
+  "density": 5,
+  "source_rows_per_day": 1034,
+  "documents": 252,
+  "pages": 13610,
+  "rows": 1246198,
+  "rows_by_table": {
+   "doc_field": 859450,
+   "prod_haul": 185020,
+   "eq_usage_daily": 6300,
+   "prod_tally": 105840,
+   "insp_daily": 3024,
+   "xcheck_haul": 23592,
+   "xcheck_usage": 12350,
+   "eq_assignment_obs": 958
+  },
+  "months": 12,
+  "meter_records": 5040,
+  "copy_s": 32.4,
+  "finalize_s": 7.1,
+  "rows_per_day": 4945
+ },
+ "postgres": "16.14",
+ "before": {
+  "label": "before",
+  "db": {
+   "days": 252,
+   "source_days": 5,
+   "seed": 0,
+   "density": 5,
+   "source_rows_per_day": 1034,
+   "documents": 252,
+   "pages": 13610,
+   "rows": 1246198,
+   "rows_by_table": {
+    "doc_field": 859450,
+    "prod_haul": 185020,
+    "eq_usage_daily": 6300,
+    "prod_tally": 105840,
+    "insp_daily": 3024,
+    "xcheck_haul": 23592,
+    "xcheck_usage": 12350,
+    "eq_assignment_obs": 958
+   },
+   "months": 12,
+   "meter_records": 5040,
+   "copy_s": 32.4,
+   "finalize_s": 7.1,
+   "rows_per_day": 4945
+  },
+  "jobs": {
+   "baseline": {
+    "rss_mb": 72.4,
+    "rss_over_baseline_mb": 0.0
+   },
+   "excel_first": {
+    "rounds_s": [
+     190.582
+    ],
+    "files": 264,
+    "rss_mb": 263.3,
+    "rss_over_baseline_mb": 190.9
+   },
+   "excel_unchanged": {
+    "rounds_s": [
+     76.514
+    ],
+    "files": 264,
+    "rss_mb": 257.7,
+    "rss_over_baseline_mb": 185.3
+   },
+   "excel_meter": {
+    "dirty_dates": 252,
+    "round_s": 79.459,
+    "written": 2,
+    "rss_mb": 258.8,
+    "rss_over_baseline_mb": 186.4
+   },
+   "export_cmd": {
+    "s": 204.53,
+    "files": 264,
+    "rss_mb": 263.2,
+    "rss_over_baseline_mb": 190.8
+   },
+   "publish_first": {
+    "s": 49.46,
+    "rows": 1246198,
+    "replaced": 505,
+    "rss_mb": 1370.3,
+    "rss_over_baseline_mb": 1297.9
+   },
+   "publish_nochange": {
+    "s": 20.68,
+    "rows": 0,
+    "replaced": 0,
+    "rss_mb": 1358.3,
+    "rss_over_baseline_mb": 1285.9
+   },
+   "publish_auto_unchanged": {
+    "rounds_s": [
+     21.19
+    ],
+    "rss_mb": 1358.4,
+    "rss_over_baseline_mb": 1286.0
+   },
+   "publish_meter": {
+    "dirty_dates": 252,
+    "round_s": 28.02,
+    "replaced": 1,
+    "rss_mb": 1360.2,
+    "rss_over_baseline_mb": 1287.8
+   }
+  },
+  "postgres": "16.14"
+ },
+ "after": {
+  "label": "after",
+  "db": {
+   "days": 252,
+   "source_days": 5,
+   "seed": 0,
+   "density": 5,
+   "source_rows_per_day": 1034,
+   "documents": 252,
+   "pages": 13610,
+   "rows": 1246198,
+   "rows_by_table": {
+    "doc_field": 859450,
+    "prod_haul": 185020,
+    "eq_usage_daily": 6300,
+    "prod_tally": 105840,
+    "insp_daily": 3024,
+    "xcheck_haul": 23592,
+    "xcheck_usage": 12350,
+    "eq_assignment_obs": 958
+   },
+   "months": 12,
+   "meter_records": 5040,
+   "copy_s": 32.4,
+   "finalize_s": 7.1,
+   "rows_per_day": 4945
+  },
+  "jobs": {
+   "baseline": {
+    "rss_mb": 72.5,
+    "rss_over_baseline_mb": 0.0
+   },
+   "excel_first": {
+    "rounds_s": [
+     13.867,
+     13.137,
+     14.684,
+     14.878,
+     15.414,
+     14.815,
+     16.114,
+     14.23,
+     14.738,
+     15.454,
+     14.6,
+     11.279
+    ],
+    "files": 264,
+    "rss_mb": 265.9,
+    "rss_over_baseline_mb": 193.4
+   },
+   "excel_unchanged": {
+    "rounds_s": [
+     3.406,
+     3.414,
+     3.746,
+     3.357,
+     3.575,
+     3.357,
+     3.79,
+     3.494,
+     3.862,
+     4.093,
+     3.786,
+     3.346
+    ],
+    "files": 264,
+    "rss_mb": 260.7,
+    "rss_over_baseline_mb": 188.2
+   },
+   "excel_meter": {
+    "dirty_dates": 2,
+    "round_s": 7.94,
+    "written": 2,
+    "rss_mb": 259.9,
+    "rss_over_baseline_mb": 187.4
+   },
+   "export_cmd": {
+    "s": 178.1,
+    "files": 264,
+    "rss_mb": 265.7,
+    "rss_over_baseline_mb": 193.2
+   },
+   "publish_first": {
+    "s": 52.98,
+    "rows": 1246198,
+    "replaced": 505,
+    "rss_mb": 80.8,
+    "rss_over_baseline_mb": 8.3
+   },
+   "publish_nochange": {
+    "s": 22.39,
+    "rows": 0,
+    "replaced": 0,
+    "rss_mb": 81.4,
+    "rss_over_baseline_mb": 8.9
+   },
+   "publish_auto_unchanged": {
+    "rounds_s": [
+     2.121,
+     2.081,
+     1.975,
+     2.214,
+     2.085,
+     2.094,
+     2.053,
+     2.069,
+     2.112,
+     2.403,
+     1.955,
+     1.512,
+     0.258
+    ],
+    "rss_mb": 81.6,
+    "rss_over_baseline_mb": 9.1
+   },
+   "publish_meter": {
+    "dirty_dates": 2,
+    "round_s": 1.025,
+    "replaced": 1,
+    "rss_mb": 86.4,
+    "rss_over_baseline_mb": 13.9
+   }
+  },
+  "postgres": "16.14"
+ },
+ "report_only": {
+  "excel_first_slices_s": [
+   13.867,
+   13.137,
+   14.684,
+   14.878,
+   15.414,
+   14.815,
+   16.114,
+   14.23,
+   14.738,
+   15.454,
+   14.6,
+   11.279
+  ],
+  "export_cmd_s": {
+   "before": 204.53,
+   "after": 178.1
+  }
+ },
+ "machine": {
+  "cpus": 4,
+  "python": "3.11.15"
+ }
+}

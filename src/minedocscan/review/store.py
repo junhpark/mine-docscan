@@ -263,21 +263,14 @@ def save(con: sqlite3.Connection, site, settings, review: Review, touched=None) 
     값은 그 칸의 형식으로 정규화해서 남긴다. 형식에 맞지 않으면 FormatError 이고 파일에 아무것도 쓰지 않는다.
     읽는 것부터 쓰는 트랜잭션(BEGIN IMMEDIATE) 안에서 한다 — 작업 스레드가 같은 문서를 다시 처리하는 중이어도 그 사이에 끼지 않게
     (tasks/0007 4.8). 문서 상태는 processed 와 needs_review 사이에서만 바뀐다 (received·needs_date·discarded·failed 는 그대로).
-    touched(touched.Touched)를 주면 이 검수가 건드린 것을 더한다: 그 칸의 쪽의 날짜와 문서, 그 쪽의 가동 기록의 장비(검수 전·후 —
-    장비명을 고쳤으면 둘 다). 엑셀·통합 DB 가 다시 볼 범위다 (tasks/0008 4.7).
+    touched(touched.Touched)를 주면 이 검수가 건드린 것을 더한다: 그 칸의 쪽의 날짜와 문서, 핸들러가 다른 쪽의 업무 행도 바꿨으면 그
+    쪽의 날짜·문서 (가동 일보의 계기 연속성 — 바뀐 행의 쪽만, tasks/0009 4.2 다). 엑셀·통합 DB 가 다시 볼 범위다 (tasks/0008 4.7).
     """
     with write_txn(con):
         out = _save(con, site, settings, review, touched)
     if con.in_transaction:                                       # 부른 쪽이 열어 둔 트랜잭션도 지금처럼 커밋한다
         con.commit()
     return out
-
-
-def _usage_refs(con: sqlite3.Connection, page_id: str) -> set[str]:
-    from ..validate.usage import equipment_ref
-
-    return {ref for r in con.execute("SELECT equipment_id, equipment FROM eq_usage_daily WHERE page_id = ?", (page_id,))
-            if (ref := equipment_ref(r))}
 
 
 def _save(con: sqlite3.Connection, site, settings, review: Review, touched=None) -> dict:
@@ -306,19 +299,18 @@ def _save(con: sqlite3.Connection, site, settings, review: Review, touched=None)
             frow.update(has_value=frow["has_value_raw"], value_final=handler.machine_final(frow))
         eff = effective(con, field_ids=[review.field_id]).get(review.field_id, review)
         upsert(con, "doc_field", apply_verdict(frow, eff))
-        refs = _usage_refs(con, row["page_id"]) if touched is not None else set()
         if row["region"] == "fields" and tpl is not None and row["field_name"] in tpl.meta_fields():
             from ..pagemeta import refresh_page
 
             refresh_page(con, site, row["page_id"])          # 쪽 메타(doc_page_meta)부터 — 핸들러는 그 최종 값을 읽는다
-        handler.on_review(con, site, settings, review.field_id)
+        other_pages = handler.on_review(con, site, settings, review.field_id)
         update_document_status(con, row["document_id"])
         applied = True
         if touched is not None:
             day = con.execute("SELECT work_date FROM doc_page WHERE page_id = ?", (row["page_id"],)).fetchone()
             touched.dates.update(d for d in (day[0] if day else None,) if d)
             touched.documents.add(row["document_id"])
-            touched.refs.update(refs | _usage_refs(con, row["page_id"]))
+            touched.add_pages(con, other_pages or ())
     return {"review_id": review.review_id, "seq": seq, "path": str(path), "applied": applied}
 
 

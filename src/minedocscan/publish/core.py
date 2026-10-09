@@ -25,9 +25,9 @@ from .scopes import (
     PUBLISH_VERSION,
     WHOLE_TABLES,
     Orphans,
-    Scope,
     all_keys,
     build,
+    local_keys,
     orphans,
 )
 
@@ -87,6 +87,7 @@ class Result:
     created: bool = False                # 대상의 표를 이번에 만들었다
     checked_ids: set = field(default_factory=set, repr=False)    # 견준 범위 (종류, 키) — AutoPublish 가 건너뛴 범위를 들고 있는 데
     skipped_ids: set = field(default_factory=set, repr=False)    # 건너뛴 범위 (종류, 키) — 찍지 않는다 (문서 ID·날짜)
+    slices: list | None = field(default=None, repr=False)       # cycle=True 일 때 이 바퀴의 조각 (첫 조각은 이번에 했다)
 
     @property
     def changed(self) -> int:
@@ -439,6 +440,33 @@ class Target:
                       (kind, keys))
             return {(k, key): fp for k, key, fp in c.fetchall()}
 
+    def months(self) -> set[str]:
+        """대상에 있는 달 — 상태 표의 날짜 키와 대상의 쪽 날짜 가운데 달의 꼴인 것 (대상에만 있는 달도 조각이 된다, 4.2 가)."""
+        with self.cur() as c:
+            c.execute(f"SELECT DISTINCT substr(key, 1, 7) FROM {self.s}.{q(STATE_TABLE)} WHERE kind = 'date' AND "
+                      f"{_MONTHED_PG.format(c='key')} UNION "
+                      f"SELECT DISTINCT substr(work_date, 1, 7) FROM {self.s}.\"doc_page\" WHERE {_MONTHED_PG.format(c='work_date')}")
+            return {r[0] for r in c.fetchall() if r[0]}
+
+    def dates_in(self, lo: str, hi: str) -> set[str]:
+        """대상에서 lo ≤ 날짜 < hi 인 날짜 키와 쪽 날짜 — 바이트 순서로 (COLLATE "C": DB 의 정렬 규칙과 무관하게 작업 DB 와 같은 비교)."""
+        with self.cur() as c:
+            c.execute(f"SELECT key FROM {self.s}.{q(STATE_TABLE)} WHERE kind = 'date' AND key COLLATE \"C\" >= %s AND "
+                      f"key COLLATE \"C\" < %s UNION "
+                      f"SELECT DISTINCT work_date FROM {self.s}.\"doc_page\" WHERE work_date COLLATE \"C\" >= %s AND "
+                      f"work_date COLLATE \"C\" < %s", (lo, hi, lo, hi))
+            return {r[0] for r in c.fetchall() if r[0]}
+
+    def rest_keys(self) -> tuple[set[str], set[str]]:
+        """날짜 없는 조각의 대상 쪽: 상태 표의 문서 키 가운데 대상에 달의 꼴인 쪽 날짜가 없는 것(대상에만 있는 문서 키도 — 작업 DB 에
+        있는지는 견줄 때 본다), 달의 꼴이 아닌 날짜 키."""
+        with self.cur() as c:
+            c.execute(f"SELECT key FROM {self.s}.{q(STATE_TABLE)} s WHERE kind = 'document' AND NOT EXISTS "
+                      f"(SELECT 1 FROM {self.s}.\"doc_page\" p WHERE p.document_id = s.key AND {_MONTHED_PG.format(c='p.work_date')})")
+            docs = {r[0] for r in c.fetchall()}
+            c.execute(f"SELECT key FROM {self.s}.{q(STATE_TABLE)} WHERE kind = 'date' AND NOT {_MONTHED_PG.format(c='key')}")
+            return docs, {r[0] for r in c.fetchall()}
+
     def documents_on(self, dates: Iterable[str]) -> set[str]:
         """대상에서 그 날짜에 쪽이 있는 문서 (더러운 날짜의 문서 — 대상에도 doc_page.work_date 가 있다)."""
         dates = sorted(set(dates))
@@ -491,6 +519,53 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+REST = "-"                                               # 날짜 없는 조각 (tasks/0009 4.2 가)
+_MONTH = re.compile(r"[0-9]{4}-[0-9]{2}\Z")
+# 달의 꼴인 날짜 = 앞의 여덟 글자가 'YYYY-MM-' (ASCII 숫자). 달의 조각은 그 앞 글자로, 날짜 없는 조각은 그 꼴이 아닌 것 전부 — 둘이 꼭
+# 맞물린다 ('YYYY-MM' 처럼 끝이 잘린 키도 날짜 없는 조각으로 간다). 대상(PostgreSQL)에서는 비교에 COLLATE "C" — DB 의 정렬 규칙이
+# en_US·ko_KR·ICU 면 '-'·'.' 같은 문장 부호를 먼저 무시해 범위가 틀린다.
+_MONTHED_SQLITE = "{c} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-*'"
+_MONTHED_PG = "{c} ~ '^[0-9]{{4}}-[0-9]{{2}}-'"
+
+
+def _month_range(m: str) -> tuple[str, str]:
+    """앞 글자가 'YYYY-MM-' 인 글자 전부 = 'YYYY-MM-' ≤ 글자 < 'YYYY-MM.' (바이트 순서 — '.' 는 '-' 바로 다음 글자. 뒤에 무엇이 오든)."""
+    return f"{m}-", f"{m}."
+
+
+def slices(con, target: Target) -> list[str]:
+    """한 바퀴의 조각 (tasks/0009 4.2 가): 작업 DB 의 달(쪽의 날짜·날짜 범위의 키)과 대상에만 있는 달(상태 표의 날짜 키·대상의 쪽 날짜)을
+    합친 달들, 그리고 마지막에 날짜 없는 조각. 읽는 것은 달의 목록뿐이다."""
+    w = _MONTHED_SQLITE.format(c="work_date")
+    months = {r[0] for r in con.execute(f"SELECT DISTINCT substr(work_date, 1, 7) FROM doc_page WHERE {w}")}
+    for t, c in DATE_TABLES.items():
+        months |= {r[0] for r in con.execute(f"SELECT DISTINCT substr({c}, 1, 7) FROM {t} WHERE {_MONTHED_SQLITE.format(c=c)}")}
+    months |= target.months()
+    return sorted(m for m in months if m and _MONTH.match(m)) + [REST]
+
+
+def slice_keys(con, target: Target, s: str) -> tuple[set[str], set[str]]:
+    """조각 하나의 (문서, 날짜). 달: 앞 글자가 그 달인 날짜 전부(작업 DB 의 쪽·날짜 범위, 대상의 상태 표·쪽) — 그 날짜에 쪽이 있는 문서는
+    plan 이 양쪽에서 더한다. 날짜 없는 조각: 달의 꼴인 날짜에 쪽이 없는 문서(작업 DB·대상 — 대상에만 있는 문서 키도), 달의 꼴이 아닌 날짜
+    키 — 통째 범위는 plan 이 늘 더한다. 조각을 한 바퀴 다 돌면 전체 훑기의 키와 같다 (불변식 시험)."""
+    if s != REST:
+        lo, hi = _month_range(s)
+        dates = {r[0] for r in con.execute("SELECT DISTINCT work_date FROM doc_page WHERE work_date >= ? AND work_date < ?",
+                                           (lo, hi))}
+        for t, c in DATE_TABLES.items():
+            dates |= {r[0] for r in con.execute(f"SELECT DISTINCT {c} FROM {t} WHERE {c} >= ? AND {c} < ?", (lo, hi))}
+        return set(), dates | target.dates_in(lo, hi)
+    w = _MONTHED_SQLITE.format(c="work_date")
+    docs = {r[0] for r in con.execute(
+        f"SELECT document_id FROM doc_document WHERE document_id NOT IN (SELECT document_id FROM doc_page WHERE {w})")}
+    odd = {r[0] for r in con.execute(f"SELECT DISTINCT work_date FROM doc_page WHERE work_date IS NOT NULL AND NOT {w}")}
+    for t, c in DATE_TABLES.items():
+        odd |= {r[0] for r in con.execute(f"SELECT DISTINCT {c} FROM {t} WHERE {c} IS NOT NULL AND NOT "
+                                          f"{_MONTHED_SQLITE.format(c=c)}")}
+    t_docs, t_odd = target.rest_keys()
+    return docs | t_docs, odd | t_odd
+
+
 def plan(con, target: Target, full: bool, documents: Iterable[str] = (), dates: Iterable[str] = ()) -> dict[str, set[str]]:
     """견줄 범위의 키: full 이면 작업 DB 와 대상의 전부, 아니면 준 문서 + 더러운 날짜에 쪽이 있는 문서(양쪽) + 날짜 + 통째."""
     if full:
@@ -508,10 +583,15 @@ def plan(con, target: Target, full: bool, documents: Iterable[str] = (), dates: 
 
 
 def publish(con, target: Target, full: bool = True, documents: Iterable[str] = (), dates: Iterable[str] = (),
-            check: bool = False, now: Callable[[], str] = _now, fail_after: int | None = None, *, site: str) -> Result:
+            check: bool = False, now: Callable[[], str] = _now, fail_after: int | None = None, *, site: str,
+            part: str | None = None, cycle: bool = False) -> Result:
     """한 번의 싣기 (한 트랜잭션). check=True 면 쓰지 않고(상태 표도) 다른 범위의 수만 Result 에.
     작업 DB 는 한 읽기 트랜잭션으로 본다 (store.db.read_txn). fail_after: 시험용 — 그 수의 범위를 넣은 뒤 예외 (한 트랜잭션인지).
-    site: 싣는 쪽의 사이트 이름 — 대상의 pub_meta 의 site 와 다르면 싣지 않는다 (PublishError other_site, check 도)."""
+    site: 싣는 쪽의 사이트 이름 — 대상의 pub_meta 의 site 와 다르면 싣지 않는다 (PublishError other_site, check 도).
+    part: 조각 하나(달 'YYYY-MM' 또는 REST)를 더러운 범위에 더한다. cycle=True 면 조각의 목록을 내어(Result.slices) 첫 조각을 한다
+    (tasks/0009 4.2 가 — 바퀴 끝의 싣기가 전체 훑기를 바퀴마다 한 조각씩 한다).
+    메모리 (4.2 나): 지문은 범위 하나씩 내고 바뀐 범위의 목록에는 (종류, 키, 지문)만 둔다 — 넣을 때 그 범위의 행을 다시 읽는다
+    (한 번에 메모리에 있는 행은 문서 하나와 날짜 범위 몇 개 몫이다. 처음 싣기는 행을 두 번 읽는다)."""
     res = Result(full=full)
     with read_txn(con):
         bad = orphans(con)
@@ -525,9 +605,7 @@ def publish(con, target: Target, full: bool = True, documents: Iterable[str] = (
                 res.replaced = {k: len(keys[k]) for k in KINDS}
                 return res
             target.create(site)
-            res.created = True
-            # 표를 새로 만들었으면(대상의 표가 지워졌다 …) 더러운 범위만 싣고 끝내지 않는다 — 그 자리에서 전부 (tasks/0009 4.1 바)
-            full = res.full = True
+            res.created = True                           # 바퀴 끝의 싣기는 새 조각 바퀴를 시작한다 (AutoPublish — 4.2 가)
         else:
             v = target.versions()
             if v.get("schema_version") != str(SCHEMA_VERSION):
@@ -536,9 +614,17 @@ def publish(con, target: Target, full: bool = True, documents: Iterable[str] = (
                 raise NeedRebuild("싣기의 판")
             if v.get("site") != site:
                 raise PublishError(OTHER_SITE, 2, "other_site")
+        documents, dates = set(documents), set(dates)
+        if cycle:
+            res.slices = slices(con, target)
+            part = res.slices[0]
+        if part is not None and not full:
+            d, ds = slice_keys(con, target, part)
+            documents |= d
+            dates |= ds
         keys = plan(con, target, full, documents, dates)
-        local = all_keys(con)
-        todo: list[tuple[Scope, str]] = []
+        local = all_keys(con) if full else {k: local_keys(con, k, keys.get(k, ())) for k in KINDS}
+        todo: list[tuple[str, str, str]] = []            # (종류, 키, 지문) — 행은 넣을 때 다시 읽는다
         gone: list[tuple[str, str]] = []
         for kind in KINDS:
             have = target.state(None) if full else target.state(kind, keys.get(kind, ()))
@@ -552,10 +638,10 @@ def publish(con, target: Target, full: bool = True, documents: Iterable[str] = (
                     continue
                 fp = sc.fingerprint()
                 if old != fp:
-                    todo.append((sc, fp))
+                    todo.append((sc.kind, sc.key, fp))
         if check:
-            for sc, _fp in todo:
-                res.replaced[sc.kind] += 1
+            for kind, _key, _fp in todo:
+                res.replaced[kind] += 1
             for kind, _key in gone:
                 res.removed[kind] += 1
             return res
@@ -563,13 +649,14 @@ def publish(con, target: Target, full: bool = True, documents: Iterable[str] = (
         for kind, key in gone:
             target.delete_scope(kind, key)
             res.removed[kind] += 1
-        for sc, _fp in todo:
-            target.delete_scope(sc.kind, sc.key)
+        for kind, key, _fp in todo:
+            target.delete_scope(kind, key)
         at = now()
         states = []
-        for n, (sc, fp) in enumerate(todo):
+        for n, (kind, key, fp) in enumerate(todo):
             if fail_after is not None and n >= fail_after:
                 raise RuntimeError("시험: 싣는 가운데의 실패")
+            sc = next(build(con, kind, [key]))           # 같은 읽기 트랜잭션 — 지문을 낸 행과 같다
             if sc.unsuitable():
                 res.skipped += 1                         # 옛 행은 위에서 지웠다. 상태 표에도 없다 — 다음에도 "다르다"
                 res.skipped_ids.add(sc.id)
@@ -577,8 +664,9 @@ def publish(con, target: Target, full: bool = True, documents: Iterable[str] = (
             for t, rows in sc.rows.items():
                 target.insert(t, _cols(con, t), rows)
                 res.rows += len(rows)
-            states.append((sc.kind, sc.key, fp))
-            res.replaced[sc.kind] += 1
+            del sc
+            states.append((kind, key, fp))
+            res.replaced[kind] += 1
         target.set_state(states, at)
     return res
 
@@ -643,11 +731,12 @@ def _failure(e: BaseException, settings) -> PublishError:
 
 def run(con, settings, full: bool = True, documents: Iterable[str] = (), dates: Iterable[str] = (), check: bool = False,
         connect: Callable | None = None, target: Target | None = None, fail_after: int | None = None,
-        rebuild: bool = False, site: str | None = None) -> Result:
+        rebuild: bool = False, site: str | None = None, part: str | None = None, cycle: bool = False) -> Result:
     """연결 → 한 트랜잭션으로 싣기 → 커밋. 더러운 범위만 실은 것이 키 충돌로 실패하면 되돌리고 같은 자리에서 전체 훑기로 다시 한다.
     실패하면 되돌리고 PublishError (종류와 수만). check=True 면 쓰지 않는다 (되돌린다). rebuild=True 면 이 프로그램의 표를 지우고
     다시 만든 뒤 싣는다 — 같은 트랜잭션이라 읽는 쪽은 빈 표를 보지 않고, 실패하면 대상은 그 전 그대로다.
-    site: 사이트 이름 (없으면 사이트 팩의 [site] name — 그것도 없으면 연결하기 전에 PublishError no_site_name)."""
+    site: 사이트 이름 (없으면 사이트 팩의 [site] name — 그것도 없으면 연결하기 전에 PublishError no_site_name).
+    part·cycle: 조각 (publish 를 본다 — 바퀴 끝의 싣기만 쓴다). 키 충돌로 넘어간 전체 훑기에는 조각이 없다 (전부다)."""
     name = site_name(settings, site)
     own = target is None
     t = target or open_target(settings, connect)
@@ -656,7 +745,8 @@ def run(con, settings, full: bool = True, documents: Iterable[str] = (), dates: 
         if rebuild:
             _drop_and_create(t, settings, name)
         try:
-            res = publish(con, t, full=full, documents=documents, dates=dates, check=check, fail_after=fail_after, site=name)
+            res = publish(con, t, full=full, documents=documents, dates=dates, check=check, fail_after=fail_after, site=name,
+                          part=part, cycle=cycle)
         except Exception as e:
             _rollback(t)
             if full or check or rebuild or not _is_conflict(e):

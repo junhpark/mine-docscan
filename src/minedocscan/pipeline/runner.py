@@ -98,7 +98,8 @@ class Pipeline:
                                      else {"path": None, "imported": 0, "skipped": 0})
         self.on_page = None             # 쪽 하나를 커밋한 뒤 부르는 훅 (document_id, page_no) — 시험과 화면의 작업 상태
         self.on_document = None         # 문서 하나의 처리를 시작할 때 (document_id) — 화면의 작업 상태
-        # 처리가 건드린 것 (날짜·문서·장비 — tasks/0008 4.7): 작업 스레드가 바퀴의 끝에 가져가 엑셀·통합 DB 에 다시 볼 범위로 쓴다
+        # 처리가 건드린 것 (날짜·문서·지운 문서 — tasks/0008 4.7, 연속성 행이 바뀐 쪽의 날짜·문서 — 0009 4.2 다): 작업 스레드가
+        # 바퀴의 끝에 가져가 엑셀·통합 DB 에 다시 볼 범위로 쓴다
         self.touched = Touched()
         self._unreachable_seen: set[tuple[str, int]] = set()    # 건드린 것으로 남긴 닿지 않는 문서 (문서, 요청 번호)
 
@@ -670,9 +671,10 @@ class Pipeline:
             self.touched.everything = True
         else:
             self.touched.dates.update(d for d in (dates or ()) if d)
-            self.touched.refs.update(r for r in (equipment or ()) if r)
         for name in REGISTRY:
             extra = self._handler(name).finalize(self.con, self.site, self.settings, dates=dates, equipment=equipment)
+            if extra and "continuity_pages" in extra:              # 연속성 행이 바뀐 쪽 — 건드린 것에만 (요약에 쪽 ID 를 남기지 않는다)
+                self.touched.add_pages(self.con, (extra := dict(extra)).pop("continuity_pages"))
             if extra and any(extra.values()):
                 self.summary.setdefault("finalize", {})[name] = extra
         if commit and self.con.in_transaction:

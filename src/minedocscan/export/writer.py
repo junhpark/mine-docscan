@@ -63,13 +63,17 @@ class Result:
     missing_dir: bool = False                                 # OUT 이 없다
     record_lost: bool = False
     other_site: bool = False                                  # 기록 파일이 다른 사이트의 것 — 아무것도 쓰거나 지우지 않았다
+    deferred: list[str] = field(default_factory=list)         # 바꾸지 못해 retry_seconds 를 기다리는 파일 (이번에는 건드리지 않았다)
+    failed_changed: bool = True                               # 쓰지 못한 파일의 수가 바뀌었다 (바퀴의 요약은 그때만 — 4.2 라)
     empty_db: bool = False                                    # 작업 DB 에 쪽이 없다 — 기록된 파일도 지우지 않았다 (kept 로 센다)
+    failing: int | None = None                                # 바퀴 끝의 내보내기: 지금 쓰지 못하고 있는 파일의 수 (기다리는 것 포함)
 
     def as_dict(self) -> dict:
         return {"written": len(self.written), "unchanged": self.unchanged, "deleted": len(self.deleted),
                 "failed": len(self.failed), "kept": self.kept, "skipped_dates": self.skipped_dates,
                 "missing_dir": self.missing_dir, "record_lost": self.record_lost, "other_site": self.other_site,
-                "empty_db": self.empty_db}
+                "empty_db": self.empty_db, "deferred": len(self.deferred), "failed_changed": self.failed_changed,
+                **({"failing": self.failing} if self.failing is not None else {})}
 
 
 def daily_path(day: str) -> str:
@@ -171,9 +175,16 @@ def page_days(con: sqlite3.Connection) -> list[str]:
     return [r[0] for r in con.execute("SELECT DISTINCT work_date FROM doc_page WHERE work_date IS NOT NULL ORDER BY work_date")]
 
 
-def existing_files(out: Path) -> set[str]:
-    """OUT 아래에서 이름 규칙에 맞는 파일 (기록을 잃었을 때 지우지 않고 셀 것 — 4.6)."""
+def existing_files(out: Path, month: str | None = None) -> set[str]:
+    """OUT 아래에서 이름 규칙에 맞는 파일 (기록을 잃었을 때 지우지 않고 셀 것 — 4.6). month: 그 달의 일별 파일만 (조각 — 4.2 가)."""
     found = set()
+    if month is not None:
+        d = out / "daily" / month
+        for p in d.glob("*.xlsx") if d.is_dir() else ():
+            rel = p.relative_to(out).as_posix()
+            if (m := DAILY_RE.match(rel)) and m.group(2)[:7] == m.group(1):
+                found.add(rel)
+        return found
     for p in (out / "daily").glob("*/*.xlsx") if (out / "daily").is_dir() else ():
         rel = p.relative_to(out).as_posix()
         m = DAILY_RE.match(rel)
@@ -187,9 +198,13 @@ def existing_files(out: Path) -> set[str]:
 
 
 def export_excel(con: sqlite3.Connection, site, out: str | Path, days=None, months=None, full: bool = False,
-                 machine_values: bool = False, made_at: str | None = None) -> Result:
+                 machine_values: bool = False, made_at: str | None = None, slices=(), skip=(), full_if_lost: bool = True) -> Result:
     """days·months: 다시 볼 날짜·달 (쪽이 없으면 그 파일을 지운다). full: 전부 훑기 (DB 의 날짜·달 전부 + 기록 파일의 것 + 폴더에
-    있는 이름 규칙의 파일). 기록 파일이 없거나 깨졌으면 전부 훑는다 (전부 다시 쓴다).
+    있는 이름 규칙의 파일). 기록 파일이 없거나 깨졌으면 전부 훑는다 (전부 다시 쓴다) — full_if_lost=False 면 준 범위만 (바퀴 끝의
+    내보내기: 기록을 잃으면 새 조각 바퀴로 전부 다시 쓴다 — 처음 쓰는 빈 폴더도 조각으로, tasks/0009 4.2 가).
+    slices: 전체 훑기의 조각인 달들 (tasks/0009 4.2 가) — 그 달의 날짜 전부(DB 의 쪽, 기록·폴더의 파일)와 그 달의 월별 파일을 더한다.
+    조각을 한 바퀴 다 돌면 full 과 같다. 조각·더러운 범위만 볼 때는 그 날짜·달의 행만 읽는다 (DB 의 날짜 전부를 읽지 않는다).
+    skip: 이번에는 건드리지 않을 파일 (바꾸지 못해 retry_seconds 를 기다리는 것 — 4.2 라). 모델도 만들지 않는다 (Result.deferred).
     파일마다 모델을 만들고 → 해시가 다르면 쓰고 → 버린다 (모델을 다 들고 있지 않게) — 전부 한 읽기 트랜잭션 안에서 (한 시점).
     사이트 팩에 [site] name 이 없으면 ExportError, 기록 파일이 다른 사이트의 것이면 아무것도 하지 않는다 (Result.other_site).
     돌려주는 값: Result (값·이름 없이 수와 경로)."""
@@ -207,14 +222,39 @@ def export_excel(con: sqlite3.Connection, site, out: str | Path, days=None, mont
     if owner is not None and owner != name:
         res.other_site = True                                 # 다른 사이트의 폴더 — 쓰지도 지우지도 않는다 (이름을 찍지 않는다)
         return res
-    full = full or res.record_lost
+    full = full or (res.record_lost and full_if_lost)
     made_at = made_at or now_iso()
+    skip = set(skip or ())
     with read_txn(con):
-        all_days = page_days(con)
-        iso = {d for d in all_days if is_iso_day(d)}
-        res.skipped_dates = len(set(all_days) - iso)
         res.empty_db = con.execute("SELECT 1 FROM doc_page LIMIT 1").fetchone() is None
-        for rel, build in _targets(con, site, out, iso, record, days, months, full, machine_values):
+        if full:
+            all_days = page_days(con)
+            iso = {d for d in all_days if is_iso_day(d)}
+            res.skipped_dates = len(set(all_days) - iso)
+            want_days = set(iso) | {m.group(2) for k in set(record) | existing_files(out) if (m := DAILY_RE.match(k))}
+            by_month: dict[str, list[str]] = {}
+            for d in sorted(iso):
+                by_month.setdefault(d[:7], []).append(d)
+            want_months = set(by_month) | {m.group(1) for k in set(record) | existing_files(out) if (m := MONTHLY_RE.match(k))}
+        else:
+            want_days = {d for d in (days or ()) if is_iso_day(d)}
+            want_months = {m for m in (months or ()) if MONTH_RE.match(m)}
+            for m in (x for x in slices or () if MONTH_RE.match(x)):
+                want_months.add(m)
+                want_days |= month_days(con, m) | {k.group(2) for rel in set(record) | existing_files(out, m)
+                                                   if (k := DAILY_RE.match(rel)) and k.group(1) == m}
+            by_month = {m: sorted(month_days(con, m)) for m in want_months}
+            iso = days_with_pages(con, want_days)
+            # ISO 가 아닌 쪽 날짜는 파일로 만들지 않는다 — 수만 알린다 (전부 훑기와 같이): 준 날짜 가운데와 조각의 달에 든 것
+            odd = {d for d in (days or ()) if d and not is_iso_day(d)}
+            for m in (x for x in slices or () if MONTH_RE.match(x)):
+                odd |= {r[0] for r in con.execute("SELECT DISTINCT work_date FROM doc_page WHERE work_date >= ? AND work_date < ?",
+                                                  (f"{m}-", f"{m}.")) if not is_iso_day(r[0])}
+            res.skipped_dates = len(days_with_pages(con, odd))
+        for rel, build in _targets(con, site, iso, want_days, want_months, by_month, machine_values, skip):
+            if rel in skip:
+                res.deferred.append(rel)                     # 바꾸지 못해 기다리는 파일 — 이번에는 모델도 만들지 않는다
+                continue
             _apply(out, rel, build, record, res, made_at)
             if not out.is_dir():                              # 쓰는 도중에 폴더가 사라졌다 — 그 자리에 만들지 않는다
                 res.missing_dir = True
@@ -227,29 +267,65 @@ def export_excel(con: sqlite3.Connection, site, out: str | Path, days=None, mont
     return res
 
 
-def _targets(con, site, out: Path, iso: set[str], record: dict, days, months, full: bool, machine_values: bool):
-    """(경로, 모델을 만드는 함수 | None) — None 이면 그 날짜(달)에 쪽이 없다 (그 파일을 지운다). 날짜 순, 일별 다음 월별."""
-    want = set(iso) if full else {d for d in (days or ()) if is_iso_day(d)}
-    if full:
-        known = set(record) | existing_files(out)
-        want |= {m.group(2) for k in known if (m := DAILY_RE.match(k))}
-    for day in sorted(want):
-        yield daily_path(day), ((lambda day=day: daily_book(con, site, day, machine_values)) if day in iso else None)
-    yield from _monthly_targets(con, site, out, iso, record, months, full, machine_values)
+def month_days(con: sqlite3.Connection, month: str) -> set[str]:
+    """그 달에 쪽이 있는 ISO 날짜 (그 달의 행만 읽는다)."""
+    return {r[0] for r in con.execute("SELECT DISTINCT work_date FROM doc_page WHERE work_date >= ? AND work_date < ?",
+                                      (f"{month}-", f"{month}-~")) if is_iso_day(r[0])}
 
 
-def _monthly_targets(con, site, out: Path, iso: set[str], record: dict, months, full: bool, machine_values: bool):
-    """월별 파일: 그 달에 쪽이 있는 날짜를 모은다. full 이면 DB 의 달 전부와 기록·폴더의 달, 아니면 준 달."""
+def days_with_pages(con: sqlite3.Connection, days) -> set[str]:
+    """그 날짜들 가운데 쪽이 있는 것."""
+    days = sorted(set(days))
+    out: set[str] = set()
+    for i in range(0, len(days), 500):
+        chunk = days[i:i + 500]
+        out |= {r[0] for r in con.execute(f"SELECT DISTINCT work_date FROM doc_page WHERE work_date IN ({','.join('?' * len(chunk))})",
+                                          chunk)}
+    return out
+
+
+def odd_page_days(con: sqlite3.Connection) -> int:
+    """ISO 날짜가 아닌 쪽 날짜의 수 — 파일로 만들지 않는 것 (4.3). 바퀴 끝의 내보내기가 바퀴를 시작할 때 한 번 센다 (달의 꼴도 아닌
+    날짜는 어느 조각에도 들지 않는다)."""
+    return sum(1 for d in page_days(con) if not is_iso_day(d))
+
+
+def months_of(con: sqlite3.Connection, out: Path, record: dict | None = None) -> list[str]:
+    """전체 훑기의 조각(달)의 목록: 작업 DB 의 달과 기록 파일·폴더에만 있는 달 (tasks/0009 4.2 가)."""
+    found = {r[0] for r in con.execute("SELECT DISTINCT substr(work_date, 1, 7) FROM doc_page WHERE work_date IS NOT NULL")}
+    rels = set(record or ()) | existing_files(out)
+    found |= {m.group(1) for k in rels if (m := DAILY_RE.match(k) or MONTHLY_RE.match(k))}
+    return sorted(m for m in found if m and MONTH_RE.match(m))
+
+
+def _targets(con, site, iso: set[str], want_days: set[str], want_months: set[str], by_month: dict[str, list[str]],
+             machine_values: bool, skip: set[str] = frozenset()):
+    """(경로, 모델을 만드는 함수 | None) — None 이면 그 날짜(달)에 쪽이 없다 (그 파일을 지운다). 달마다 그 달의 일별(날짜 순) 다음 월별.
+    월별 파일을 만드는 달은 그 달의 쪽을 한 번 읽어 일별 파일과 같이 쓴다 (tasks/0009 4.2 마 — 일별과 월별이 같은 행을 두 번 읽지 않게.
+    한 번에 들고 있는 것은 달 하나 — 월별 파일을 만드는 동안 들고 있던 것과 같다)."""
+    from .model import load_pages
     from .monthly import monthly_book
 
-    by_month: dict[str, list[str]] = {}
-    for d in sorted(iso):
-        by_month.setdefault(d[:7], []).append(d)
-    want = set(by_month) if full else {m for m in (months or ()) if MONTH_RE.match(m)}
-    if full:
-        want |= {m.group(1) for k in set(record) | existing_files(out) if (m := MONTHLY_RE.match(k))}
-    for m in sorted(want):
-        yield monthly_path(m), ((lambda m=m: monthly_book(con, site, m, by_month[m], machine_values)) if m in by_month else None)
+    for m in sorted({d[:7] for d in want_days} | set(want_months)):
+        held: dict = {}
+
+        def month_pages(m=m, held=held):
+            if "pages" not in held:
+                held["pages"] = load_pages(con, by_month[m])
+            return held["pages"]
+
+        share = m in want_months and bool(by_month.get(m)) and monthly_path(m) not in skip
+        in_month = set(by_month.get(m) or ())
+        for day in sorted(d for d in want_days if d[:7] == m):
+            if day not in iso:
+                yield daily_path(day), None
+            elif share and day in in_month:
+                yield daily_path(day), (lambda day=day, mp=month_pages: daily_book(con, site, day, machine_values, pages=mp().day(day)))
+            else:
+                yield daily_path(day), (lambda day=day: daily_book(con, site, day, machine_values))
+        if m in want_months:
+            yield monthly_path(m), ((lambda m=m, mp=month_pages: monthly_book(con, site, m, by_month[m], machine_values, pages=mp()))
+                                    if by_month.get(m) else None)
 
 
 def _apply(out: Path, rel: str, build, record: dict, res: Result, made_at: str) -> None:

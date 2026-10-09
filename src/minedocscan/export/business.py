@@ -29,7 +29,7 @@ from ..handlers.usage import is_shift_cell
 from ..store.order import page_key
 from ..validate.usage import check_cells
 from . import labels as L
-from .model import CHUNK, Pages, cell, head, row_state, sure, worst
+from .model import CHUNK, Pages, cell, dict_rows, head, row_state, sure, worst
 
 
 @dataclass
@@ -39,6 +39,7 @@ class Ctx:
     pages: Pages
     machine_values: bool = False
     _extra: dict = field(default_factory=dict)
+    _order: dict = field(default_factory=dict)        # 쪽 ID → 쪽의 순서 키 (행마다 다시 내지 않는다 — 한 달 치 운반 행 6만 개)
 
     def field(self, fid: str | None) -> dict | None:
         """필드 행 — 그 날짜(들)의 적재된 쪽에 없으면(연속성 검산의 앞 기록) DB 에서."""
@@ -94,8 +95,12 @@ class Ctx:
         return f"{r['source_name']}#{r['page_no']}" if r else ""
 
     def order(self, page_id: str) -> tuple:
-        p = self.pages.index.get(page_id)
-        return page_key(p["source_rel"], p["source_path"], p["document_id"], p["page_no"]) if p else ((9,), page_id)
+        k = self._order.get(page_id)
+        if k is None:
+            p = self.pages.index.get(page_id)
+            k = self._order[page_id] = (page_key(p["source_rel"], p["source_path"], p["document_id"], p["page_no"]) if p
+                                        else ((9,), page_id))
+        return k
 
 
 def columns(key: str, machine_values: bool) -> list[str]:
@@ -125,7 +130,7 @@ def in_days(con, sql: str, days: list[str], args: tuple = ()) -> list[dict]:
     out: list[dict] = []
     for i in range(0, len(days), CHUNK):
         chunk = days[i:i + CHUNK]
-        out += [dict(r) for r in con.execute(sql.format(",".join("?" * len(chunk))), (*chunk, *args))]
+        out += dict_rows(con, sql.format(",".join("?" * len(chunk))), (*chunk, *args))
     return out
 
 
@@ -221,7 +226,7 @@ def _xcheck_rows_of(x: dict, unres: dict[str, list[str]], by_key: dict, ctx: Ctx
 def xcheck_haul_sheet(ctx: Ctx, days: list[str]) -> dict | None:
     out = []
     for day in days:
-        rows = [dict(r) for r in ctx.con.execute("SELECT * FROM xcheck_haul WHERE work_date = ?", (day,))]
+        rows = dict_rows(ctx.con, "SELECT * FROM xcheck_haul WHERE work_date = ?", (day,))
         if not rows:
             continue
         unres = unresolved_pages(ctx, day)

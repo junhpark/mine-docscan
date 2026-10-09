@@ -104,7 +104,10 @@ def test_decisions_and_reprocessing_with_dirty_scopes_only(world, pg):
     con = pipe.con
     auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0))
     first = auto.after_round(con, Touched())
-    assert first.created and first.full                                       # 시작할 때의 전체 훑기
+    assert first.created and first.slices                                     # 시작할 때의 전체 훑기 (조각으로)
+    whole = first.checked
+    while auto.sweep.running:
+        whole += auto.after_round(con, Touched()).checked
     path = world["st"].decisions_path(site.root)
     a, b, e = ids["a_2030-01-07"], ids["b_2030-01-07"], ids["e_2030-01-07"]
     winner = {r[0]: r[1] for r in con.execute("SELECT inspection_id, page_id FROM insp_daily")}
@@ -120,7 +123,7 @@ def test_decisions_and_reprocessing_with_dirty_scopes_only(world, pg):
         t, pipe.touched = pipe.touched, Touched()
         r = auto.after_round(con, t)
         assert r is not None and not isinstance(r, Exception) and not getattr(r, "kind", None), r
-        assert not r.fell_back and not r.full and r.checked < first.checked   # 더러운 범위만 (전체 훑기가 아니다)
+        assert not r.fell_back and not r.full and r.checked < whole           # 더러운 범위만 (전체 훑기가 아니다)
         assert_same(con, pg)
         now = {r_[0]: r_[1] for r_ in con.execute("SELECT inspection_id, page_id FROM insp_daily")}
         moved |= any(winner.get(k) and v.split("-p")[0] != winner[k].split("-p")[0] for k, v in now.items())
@@ -173,7 +176,7 @@ def test_one_transaction_and_unsuitable_values(world, pg):
 
     auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0))
     out = auto.after_round(con, Touched())
-    assert out.full and out.skipped == 1 and auto.status["skipped"] == 1 and _worth_showing({"publish": out.as_dict()})
+    assert out.slices and out.skipped == 1 and auto.status["skipped"] == 1 and _worth_showing({"publish": out.as_dict()})
     other = world["ids"]["d_2030-01-08"]
     assert not auto.after_round(con, Touched(documents={other})).full and auto.status["skipped"] == 1
     con.execute("UPDATE doc_field SET value_final = 'ab' WHERE value_final = 'a' || char(0) || 'b'")
@@ -328,7 +331,9 @@ def test_a_lock_on_the_target_ends_the_round_and_the_work_goes_on(world, pg):
     clock = Clock()
     auto = AutoPublish(st, clock=clock)
     worker = Worker(pipe, after={"publish": auto})
-    assert worker.run_once()["publish"]["full"]                              # 시작할 때의 전체 훑기
+    assert worker.run_once()["publish"]["created"]                           # 시작할 때의 전체 훑기 (조각으로 — 끝까지)
+    while auto.sweep.running:
+        worker.run_once()
     fid, doc = con.execute("SELECT h.source_field_id, p.document_id FROM prod_haul h JOIN doc_page p ON h.page_id = p.page_id "
                            "WHERE h.source_role = 'log' AND h.review_status = 'pending' ORDER BY h.haul_id LIMIT 1").fetchone()
     holder = psycopg.connect(PG)                                              # autocommit 꺼짐 — 커밋하지 않는다
@@ -388,7 +393,7 @@ def test_a_slow_statement_is_cut_at_statement_timeout(world, pg):
     con = pipe.con
     st = replace(pg, publish_statement_timeout_s=1.0, publish_sweep_minutes=0.0)
     auto = AutoPublish(st)
-    assert auto.after_round(con, Touched()).full
+    finish_cycle(auto, con)
     t = core.open_target(st)                                                  # 실제 드라이버에 간 것
     try:
         params = {i.keyword.decode(): (i.val or b"").decode() for i in t.conn.pgconn.info}
@@ -507,19 +512,22 @@ def test_rebuild_drops_only_what_this_program_made(world, pg):
 
 
 def test_a_dirty_round_after_the_tables_vanished_publishes_everything(world, pg):
-    """더러운 범위만 싣는 바퀴에서 대상의 표가 없어 새로 만들었으면 그 자리에서 전부 싣는다 (sweep_minutes = 0 — 다음 전체 훑기가 없다).
-    그 바퀴를 전체 훑기를 마친 것으로 센다."""
+    """더러운 범위만 싣는 바퀴에서 대상의 표가 없어 새로 만들었으면 새 조각 바퀴를 시작한다 (sweep_minutes = 0 — 다음 전체 훑기가
+    없어도). 그 바퀴를 다 돌면 대상 = 작업 DB 이고 그때를 전체 훑기를 마친 것으로 센다."""
     import psycopg
 
     con = world["pipe"].con
     clock = Clock()
     auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0), clock=clock)
-    assert auto.after_round(con, Touched()).full
+    finish_cycle(auto, con)
+    assert auto.after_round(con, Touched()) is None                     # 시작할 때 한 바퀴만
     with psycopg.connect(PG, autocommit=True) as c:
         c.execute(f'DROP SCHEMA "{pg.publish_schema}" CASCADE')
     clock.t += 10
     r = auto.after_round(con, Touched(documents={world["ids"]["d_2030-01-08"]}))
-    assert r.created and r.full and auto.last_sweep == clock.t
+    assert r.created and not r.full and auto.sweep.due()                # 더러운 범위만 실었다 — 다음 바퀴에 새 조각 바퀴
+    clock.t += 10
+    assert finish_cycle(auto, con) >= 2 and auto.last_sweep == clock.t
     assert_same(con, pg)
 
 
@@ -625,7 +633,9 @@ def test_a_stalled_server_ends_the_round_within_a_bound(world, pg):
     auto = AutoPublish(st, clock=clock)
     worker = Worker(pipe, after={"publish": auto})
     try:
-        assert worker.run_once()["publish"]["full"]                         # 중계를 거쳐 처음 싣기
+        assert worker.run_once()["publish"]["created"]                      # 중계를 거쳐 처음 싣기 (조각으로 — 끝까지)
+        while auto.sweep.running:
+            worker.run_once()
         sch = st.publish_schema
         with psycopg.connect(PG, autocommit=True) as c:                     # 문장 하나를 1.5초 붙잡는다 (문장의 시간 제한 2초 안)
             c.execute(f'CREATE FUNCTION "{sch}".hold() RETURNS trigger LANGUAGE plpgsql AS '
@@ -672,3 +682,119 @@ def test_a_stalled_server_ends_the_round_within_a_bound(world, pg):
     finally:
         relay.release()
         relay.close()
+
+
+# ── 조각으로 나눈 전체 훑기 (tasks/0009 4.2 가) ───────────────────────────────────────
+def two_months(world) -> None:
+    pipe, site, st = world["pipe"], world["site"], world["st"]
+    decs.save(pipe.con, st.decisions_path(site.root), [{"target": world["ids"]["d_2030-01-08"], "kind": "date",
+                                                       "value": "2030-02-08"}], "jp")
+    pipe.process_pending()
+    pipe.touched = Touched()
+
+
+def finish_cycle(auto, con, first=None, limit: int = 20) -> int:
+    """바퀴 하나를 끝까지 (조각마다 작업 바퀴 하나). 돌려주는 값: 조각 수."""
+    r = auto.after_round(con, first or Touched())
+    assert not getattr(r, "kind", None), r
+    n = 1
+    while auto.sweep.running:
+        r = auto.after_round(con, Touched())
+        assert not getattr(r, "kind", None), r
+        n += 1
+        assert n < limit
+    return n
+
+
+def test_the_publish_sweep_goes_one_month_per_round(world, pg):
+    """자동 싣기의 전체 훑기도 바퀴마다 달 하나, 마지막에 날짜 없는 조각. 처음 싣기도 조각으로 — 다 돌 때까지 대상은 일부만 있다.
+    대상에만 있는 달의 것도 지워진다. 다 돌면 대상 = 작업 DB."""
+    import psycopg
+
+    con = world["pipe"].con
+    two_months(world)
+    clock = Clock()
+    auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0), clock=clock)
+    r = auto.after_round(con, Touched())                                # 첫 조각 2030-01 (표를 만들었다)
+    assert r.created and r.slices == ["2030-01", "2030-02", "-"]
+    assert auto.status["sweep"] == {"done": 1, "total": 3, "first": True}
+    sch = pg.publish_schema
+    days = {x[0] for x in remote(pg, f'SELECT DISTINCT work_date FROM "{sch}".doc_page')}
+    assert days and all(d.startswith("2030-01") for d in days)          # 아직 일부만
+    auto.after_round(con, Touched())
+    auto.after_round(con, Touched())
+    assert auto.status["sweep"] is None and auto.status["last_sweep_at"] and auto.last_sweep == clock.t
+    assert_same(con, pg)
+    assert auto.after_round(con, Touched()) is None                     # sweep_minutes = 0 — 시작할 때 한 바퀴만
+    with psycopg.connect(PG, autocommit=True) as c:                         # 대상에만 있는 달 (다른 프로그램이 남긴 것이 아니라 옛 싣기의 것)
+        c.execute(f'INSERT INTO "{sch}".pub_state (kind, key, fingerprint, published_at) VALUES (%s, %s, %s, %s)',
+                  ("date", "2029-12-31", "0" * 64, "x"))
+        c.execute(f'INSERT INTO "{sch}".eq_assignment_obs (work_date, slot, matched_by, header_mismatch) VALUES (%s, %s, %s, %s)',
+                  ("2029-12-31", "T09", "vehicle", 0))
+    again = AutoPublish(replace(pg, publish_sweep_minutes=0.0), clock=clock)
+    assert finish_cycle(again, con) == 4                                # 2029-12, 2030-01, 2030-02, 날짜 없음
+    assert_same(con, pg)
+    assert remote(pg, f'SELECT COUNT(*) FROM "{sch}".pub_state WHERE key = %s', ("2029-12-31",)) == [(0,)]
+
+
+def test_watch_once_publishes_everything_in_its_one_round(world, pg):
+    """watch --once 의 싣기는 할 때가 된 전체 훑기를 그 바퀴에 한 번에 (명령 publish 처럼 — 다음 바퀴가 없다)."""
+    con = world["pipe"].con
+    two_months(world)
+    auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0), once=True)
+    r = auto.after_round(con, Touched())
+    assert r.full and r.created and auto.status["sweep"] is None and auto.status["last_sweep_at"]
+    assert_same(con, pg)
+
+
+def test_the_sweep_finds_target_only_keys_under_any_collation(world, pg):
+    """대상의 정렬 규칙이 C 가 아니어도(ICU en-US — '-'·'~' 같은 문장 부호를 먼저 무시한다: '2030-01-31' < '2030-01-~' 가 거짓) 달의 조각이
+    대상에만 있는 날짜를 찾는다. 'YYYY-MM' 처럼 끝이 잘린 날짜 키는 날짜 없는 조각이 찾는다 — 한 바퀴 뒤 대상 = 작업 DB."""
+    import psycopg
+
+    con = world["pipe"].con
+    clock = Clock()
+    auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0), clock=clock)
+    finish_cycle(auto, con)
+    sch = pg.publish_schema
+    with psycopg.connect(PG, autocommit=True) as c:
+        if not c.execute("SELECT 1 FROM pg_collation WHERE collname = 'en-US-x-icu'").fetchone():
+            pytest.skip("ICU 정렬 규칙이 없다")
+        c.execute(f'ALTER TABLE "{sch}".pub_state ALTER COLUMN key TYPE TEXT COLLATE "en-US-x-icu"')
+        c.execute(f'ALTER TABLE "{sch}".doc_page ALTER COLUMN work_date TYPE TEXT COLLATE "en-US-x-icu"')
+        c.execute(f'ALTER TABLE "{sch}".eq_assignment_obs ALTER COLUMN work_date TYPE TEXT COLLATE "en-US-x-icu"')
+        for key in ("2030-01-31", "2030-01"):
+            c.execute(f'INSERT INTO "{sch}".pub_state (kind, key, fingerprint, published_at) VALUES (%s, %s, %s, %s)',
+                      ("date", key, "0" * 64, "x"))
+            c.execute(f'INSERT INTO "{sch}".eq_assignment_obs (work_date, slot, matched_by, header_mismatch) VALUES (%s, %s, %s, %s)',
+                      (key, "T09", "vehicle", 0))
+    again = AutoPublish(replace(pg, publish_sweep_minutes=0.0), clock=clock)
+    assert finish_cycle(again, con) == 2                                # 2030-01, 날짜 없음
+    assert_same(con, pg)
+    assert remote(pg, f'SELECT COUNT(*) FROM "{sch}".pub_state WHERE kind = %s AND key IN (%s, %s)',
+                  ("date", "2030-01-31", "2030-01")) == [(0,)]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", [21, 22])
+def test_a_sliced_publish_sweep_equals_the_work_db(world, pg, seed):
+    """조각으로 돈 한 바퀴 = 전체 훑기 (싣기): 걸음마다 검수(건드린 것을 넘기지 않는다 — 다른 프로세스처럼)·결정(처리가 건드린 것은
+    넘긴다)을 넣고 바퀴 하나를 끝까지 돌린 뒤 대상 = 작업 DB."""
+    from test_review_store import reprocess_fuzz
+
+    pipe = world["pipe"]
+    con = pipe.con
+    two_months(world)
+    clock = Clock()
+    auto = AutoPublish(replace(pg, publish_sweep_minutes=1.0), clock=clock)
+    parts = [finish_cycle(auto, con)]
+    assert_same(con, pg)
+
+    def step(n):
+        t, pipe.touched = pipe.touched, Touched()
+        clock.t += 61.0
+        parts.append(finish_cycle(auto, con, t))
+        assert_same(con, pg)
+
+    reprocess_fuzz(world, steps=8, seed=seed, fresh=False, on_touched=lambda t: None, after_step=step)
+    assert max(parts) >= 3 and auto.fell_back == 0, parts

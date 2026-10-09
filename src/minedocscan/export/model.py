@@ -51,6 +51,24 @@ def head(*names: str) -> list[list]:
     return [cell(n, "h") for n in names]
 
 
+def dict_rows(con: sqlite3.Connection, sql: str, args=()) -> list[dict]:
+    """조회의 행을 사전으로 — dict(sqlite3.Row) 와 같은 것을 더 빨리: 튜플로 받아 열 이름과 묶는다 (한 달 치 doc_field 75,000행에
+    0.76 → 0.46초 — tasks/0009 4.2 마: 바뀐 것 없는 조각 하나를 5초 안에). 열 이름이 겹치는 조회(dict(Row) 는 앞의 것을 고른다)나
+    연결에 다른 row_factory 가 있으면(시험이 읽은 행을 센다) 그것을 거친다."""
+    if con.row_factory not in (sqlite3.Row, None):
+        return [dict(r) for r in con.execute(sql, args)]
+    cur = con.cursor()
+    cur.row_factory = None
+    try:
+        cur.execute(sql, args)
+        cols = [d[0] for d in cur.description]
+        if len(set(cols)) != len(cols):
+            return [dict(r) for r in con.execute(sql, args)]
+        return [dict(zip(cols, r, strict=True)) for r in cur]
+    finally:
+        cur.close()
+
+
 def book_hash(book: dict) -> str:
     """내용의 해시 — 정규화한 JSON 의 SHA-256 (4.6). 파일의 바이트가 아니다 (xlsx 는 안에 만든 시각이 들어간다)."""
     return hashlib.sha256(json.dumps(book, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -129,7 +147,8 @@ def sure(state: str) -> bool:
 # ── DB 읽기 ────────────────────────────────────────────────────────────────
 @dataclass
 class Pages:
-    """그 날짜(들)의 쪽 — 쪽의 순서(store/order.py)대로. fields·meta 는 적재된 쪽의 것."""
+    """그 날짜(들)의 쪽 — 쪽의 순서(store/order.py)대로. fields·meta 는 적재된 쪽의 것. day(d): 그 날짜의 것만 (같은 행 — 다시
+    읽지 않는다. load_pages(con, [d]) 와 같다)."""
     all: list[dict]
     fields: dict[str, dict] = field(default_factory=dict)            # field_id → doc_field 행
     by_page: dict[str, dict[str, dict]] = field(default_factory=dict)  # page_id → {field_id → 행}
@@ -150,6 +169,13 @@ class Pages:
             self._index = {p["page_id"]: p for p in self.all}
         return self._index
 
+    def day(self, d: str) -> Pages:
+        ps = [p for p in self.all if p["work_date"] == d]
+        ids = [p["page_id"] for p in ps]
+        by_page = {i: self.by_page[i] for i in ids if i in self.by_page}
+        return Pages(ps, {fid: f for fs in by_page.values() for fid, f in fs.items()}, by_page,
+                     {i: self.meta[i] for i in ids if i in self.meta}, {i: self.meta_source[i] for i in ids if i in self.meta_source})
+
 
 PAGE_SQL = ("SELECT p.*, d.source_name, d.source_rel, d.source_path FROM doc_page p "
             "JOIN doc_document d ON p.document_id = d.document_id WHERE p.work_date IN ({})")
@@ -159,15 +185,14 @@ def load_pages(con: sqlite3.Connection, days: list[str]) -> Pages:
     rows: list[dict] = []
     for i in range(0, len(days), CHUNK):
         chunk = days[i:i + CHUNK]
-        rows += [dict(r) for r in con.execute(PAGE_SQL.format(",".join("?" * len(chunk))), chunk)]
+        rows += dict_rows(con, PAGE_SQL.format(",".join("?" * len(chunk))), chunk)
     rows.sort(key=lambda p: (p["work_date"], page_key(p["source_rel"], p["source_path"], p["document_id"], p["page_no"])))
     pages = Pages(rows)
     ids = [p["page_id"] for p in pages.loaded]
     for i in range(0, len(ids), CHUNK):
         chunk = ids[i:i + CHUNK]
         marks = ",".join("?" * len(chunk))
-        for r in con.execute(f"SELECT * FROM doc_field WHERE page_id IN ({marks})", chunk):
-            d = dict(r)
+        for d in dict_rows(con, f"SELECT * FROM doc_field WHERE page_id IN ({marks})", chunk):
             pages.fields[d["field_id"]] = d
             pages.by_page.setdefault(d["page_id"], {})[d["field_id"]] = d
         for r in con.execute(f"SELECT page_id, meta_key, value, source FROM doc_page_meta WHERE value IS NOT NULL "
