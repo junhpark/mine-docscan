@@ -288,7 +288,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        # Docker Hub 의 공식 이미지와 같은 것을 ECR Public 에서 — 러너의 익명 내려받기가 Docker Hub 의 횟수 제한(toomanyrequests)에 걸려
+        # 시험 전에 작업이 실패했다 (0009 단계 7 의 CI, 두 번)
+        image: public.ecr.aws/docker/library/postgres:16
         env:
           POSTGRES_PASSWORD: ci-only
           POSTGRES_DB: mdtest
