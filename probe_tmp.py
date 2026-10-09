@@ -1,25 +1,26 @@
-"""윈도우 탐침 (임시): 소켓 shutdown 이 select/recv 를 깨우는가, 다시 스캔 쪽의 서명 유사도."""
+"""윈도우 탐침 2 (임시): CancelIoEx 가 select/recv 를 깨우는가, 정합이 결정적인가 (실행마다·스레드 수)."""
 import hashlib
 import select
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
 
-
-def borrow_shutdown(fd):
-    s = socket.socket(fileno=fd)
-    try:
-        s.shutdown(socket.SHUT_RDWR)
-    except OSError as e:
-        print("  shutdown error", type(e).__name__, e)
-    finally:
-        s.detach()
+WIN = sys.platform == "win32"
 
 
-def wake(kind, how):
+def cancel_io(fd):
+    import ctypes
+    k = ctypes.windll.kernel32
+    k.CancelIoEx.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    ok = k.CancelIoEx(ctypes.c_void_p(fd), None)
+    return ok, k.GetLastError()
+
+
+def wake(kind, how, method):
     if how == "pair":
         a, b = socket.socketpair()
     else:
@@ -34,23 +35,17 @@ def wake(kind, how):
         t = time.monotonic()
         try:
             if kind == "recv":
-                a.settimeout(15)
+                a.settimeout(8)
                 res["got"] = a.recv(1)
-            elif kind == "select":
-                r, _, x = select.select([a], [], [a], 15)
+            else:
+                r, _, x = select.select([a], [], [a], 8)
                 res["got"] = ("readable" if r else "") + ("except" if x else "") or "timeout"
-                if r:
+                if r or x:
                     a.setblocking(False)
                     try:
                         res["recv_after"] = a.recv(1)
                     except OSError as e:
-                        res["recv_after"] = type(e).__name__ + str(e.args)
-            elif kind == "selectors":
-                import selectors
-                sel = selectors.DefaultSelector()
-                sel.register(a, selectors.EVENT_READ)
-                ev = sel.select(15)
-                res["got"] = "ready" if ev else "timeout"
+                        res["recv_after"] = f"{type(e).__name__}{e.args}"
         except Exception as e:
             res["got"] = f"{type(e).__name__}: {e}"
         res["t"] = round(time.monotonic() - t, 2)
@@ -58,9 +53,23 @@ def wake(kind, how):
     th = threading.Thread(target=waiter)
     th.start()
     time.sleep(0.5)
-    borrow_shutdown(a.fileno())
-    th.join(20)
-    print(f"  {kind:9} {how:4} -> {res}")
+    if method == "cancelio":
+        res["cancel"] = cancel_io(a.fileno())
+    elif method == "cancelio+shutdown":
+        s = socket.socket(fileno=a.fileno())
+        try:
+            s.shutdown(socket.SHUT_RDWR)
+        finally:
+            s.detach()
+        res["cancel"] = cancel_io(a.fileno())
+    th.join(12)
+    # 끊은 뒤 그 소켓을 다시 쓸 수 있나 (libpq 가 닫을 때까지 기술자는 살아 있어야 한다)
+    try:
+        a.getsockname()
+        res["still_open"] = True
+    except OSError as e:
+        res["still_open"] = type(e).__name__
+    print(f"  {kind:6} {how:4} {method:18} -> {res}", flush=True)
     for s in (a, b):
         try:
             s.close()
@@ -68,45 +77,37 @@ def wake(kind, how):
             pass
 
 
-print(sys.platform, sys.version)
-for how in ("pair", "tcp"):
-    for kind in ("recv", "select", "selectors"):
-        wake(kind, how)
+print(sys.platform, sys.version, flush=True)
+if WIN:
+    for how in ("pair", "tcp"):
+        for kind in ("recv", "select"):
+            for method in ("cancelio", "cancelio+shutdown"):
+                wake(kind, how, method)
 
-try:
-    import psycopg
-    print("psycopg", psycopg.__version__, getattr(psycopg.pq, "__impl__", "?"))
-    from psycopg import waiting
-    print("  wait fn:", waiting.wait.__name__ if hasattr(waiting, "wait") else "?", getattr(waiting, "wait_c", None) is not None)
-except Exception as e:
-    print("psycopg", type(e).__name__, e)
+# 정합의 결정성
+if len(sys.argv) > 1 and sys.argv[1] == "align":
+    import cv2
+    import numpy as np
+    from minedocscan.forms.sitepack import SitePack
+    from minedocscan.imaging.io import load_pages
+    from minedocscan.imaging.align import align_to_template
+    site = SitePack(Path(sys.argv[2]))
+    tpl = site.templates["synth_inspection"]
+    threads = int(sys.argv[4])
+    if threads:
+        cv2.setNumThreads(threads)
+    g = dict(load_pages(Path(sys.argv[3]), 200))[1]
+    for i in range(3):
+        ar = align_to_template(g, tpl.reference, [], ref_features=tpl.features)
+        H = np.asarray(ar.homography)
+        print(f"  align threads={threads or cv2.getNumThreads()} run{i}: inliers {ar.n_inliers} H {hashlib.sha256(np.round(H, 9).tobytes()).hexdigest()[:12]} cpu {cv2.checkHardwareSupport(cv2.CPU_AVX512_SKX) if hasattr(cv2, 'CPU_AVX512_SKX') else '?'} {cv2.getNumberOfCPUs()}", flush=True)
+    sys.exit(0)
 
-# 다시 스캔 쪽
-sys.path.insert(0, str(Path("tests").resolve()))
 from minedocscan.tools.synth import generate
-from minedocscan.config import Settings
-from minedocscan.forms.sitepack import SitePack
-from minedocscan.pipeline import Pipeline
-from conftest import split_pages
-import shutil
-
 root = Path(tempfile.mkdtemp())
 r = generate(root / "rs", days=1, seed=0, rescans=True)
-first, rescan = sorted(r.scans.glob("scan_*.pdf"))
-for p in (first, rescan):
-    print("sha", p.name, hashlib.sha256(p.read_bytes()).hexdigest()[:16], p.stat().st_size)
-scans = root / "scans"
-split_pages(first, [1, 2, 3, 6], scans / "x_2030-01-07.pdf")
-shutil.copyfile(rescan, scans / "y_2030-01-07.pdf")
-st = Settings(site=r.site, archive_root=scans, work_root=root / "w", reviews=root / "rv" / "reviews.jsonl", save_aligned=False)
-pipe = Pipeline(st, site=SitePack(r.site))
-pipe.run([scans])
-from minedocscan.imaging.io import load_pages
-for name in ("x_2030-01-07.pdf", "y_2030-01-07.pdf"):
-    for n, g in load_pages(scans / name, 200):
-        print("render", name, n, g.shape, hashlib.sha256(g.tobytes()).hexdigest()[:12])
-for row in pipe.con.execute("SELECT d.source_name, p.page_no, p.status, p.duplicate_sim, p.rotation, p.align_inliers, p.align_grid_err, p.template_name "
-                            "FROM doc_page p JOIN doc_document d ON p.document_id = d.document_id ORDER BY 1, 2"):
-    print("page", tuple(row))
-for row in pipe.con.execute("SELECT page_id, sig FROM doc_page_sig ORDER BY 1"):
-    print("sig", row[0][-4:], hashlib.sha256(str(row[1]).encode()).hexdigest()[:12])
+first = sorted(r.scans.glob("scan_*.pdf"))[0]
+for threads in ("0", "0", "1"):
+    subprocess.run([sys.executable, __file__, "align", str(r.site), str(first), threads], check=False)
+import cv2
+print(cv2.getBuildInformation()[:3000])
