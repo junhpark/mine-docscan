@@ -20,6 +20,8 @@
 *.xls
 *.csv
 !tests/fixtures/**
+# 설명서의 갈무리 — 합성 데모로만 찍는다 (scripts/manual_shots.py, docs/DATA.md)
+!docs/manual/img/*.png
 
 # 로컬 설정·비밀값
 minedocscan.toml
@@ -50,6 +52,10 @@ __pycache__/
 /selftest.json
 /selftest.md
 /selftest-out/
+/junit/
+/report/
+/v2-metrics/
+/THIRD_PARTY_NOTICES.txt
 .venv/
 venv/
 .pytest_cache/

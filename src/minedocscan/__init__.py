@@ -4,4 +4,4 @@
 구조와 설계 원칙은 docs/ARCHITECTURE.md, 작업 규칙은 CLAUDE.md 를 본다.
 """
 
-__version__ = "0.2.0"
+__version__ = "1.0.0"

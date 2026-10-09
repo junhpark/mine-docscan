@@ -8,9 +8,11 @@
   install.ps1, uninstall.ps1 scripts/windows/ 의 것을 UTF-8 BOM·CRLF 로 (Windows PowerShell 5.1 은 BOM 이 없으면 한글을 깨뜨린다)
   minedocscan.example.toml   config/ 의 보기
   THIRD_PARTY_NOTICES.txt    scripts/licenses.py --wheels … --python-embed … --check (허용 목록 밖이면 멈춘다)
-  NOTICE, manual.html, INSTALL.txt, VERSION
+  manual.html                docs/manual/ 을 한 장으로 (scripts/manual_html.py — markdown 꾸러미가 있어야 한다: pip install -e ".[docs]")
+  NOTICE, INSTALL.txt, VERSION
   SHA256SUMS.txt             묶음 안 파일 전부의 해시 (install.ps1 이 먼저 확인한다)
-묶음 옆에 bundle-report.json: 크기, 바퀴 수, 바퀴가 담은 DLL 과 msvcp140.dll 이 필요한 바이너리 (embeddable 파이썬에는 vcruntime 만 있다).
+묶음 옆에 bundle-report.json: 크기, 바퀴 수, 바퀴가 담은 DLL 과 msvcp140.dll 이 필요한 바이너리 (embeddable 파이썬에는 vcruntime 만 있다),
+그리고 licenses.txt (licenses.py 가 찍은 줄 — 시험 성적서의 라이선스 절).
 이 도구는 설치되는 패키지에 들어가지 않는다 (scripts/).
 """
 from __future__ import annotations
@@ -74,9 +76,30 @@ def fetch(entry: dict, cache: Path, given: Path | None = None) -> Path:
     return path
 
 
-def run(cmd: list[str]) -> None:
+def run(cmd: list[str], capture: bool = False) -> str:
     print("  $", " ".join(cmd), flush=True)
-    subprocess.run(cmd, check=True, env={**os.environ, "PYTHONIOENCODING": "utf-8"})   # licenses.py 의 한글 (윈도우 러너는 cp1252)
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}                  # licenses.py 의 한글 (윈도우 러너는 cp1252)
+    if not capture:
+        subprocess.run(cmd, check=True, env=env)
+        return ""
+    r = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+    print(r.stdout, end="", flush=True)
+    if r.returncode:
+        raise subprocess.CalledProcessError(r.returncode, cmd, r.stdout)
+    return r.stdout
+
+
+def build_manual(dest: Path) -> Path:
+    """docs/manual/ → 한 장짜리 manual.html (scripts/manual_html.py). markdown 꾸러미가 없으면 BundleError."""
+    try:
+        import markdown  # noqa: F401
+    except ImportError:
+        raise BundleError('설명서(manual.html)를 만들려면 markdown 꾸러미가 있어야 한다 — pip install -e ".[docs]"') from None
+    sys.path.insert(0, str(Path(__file__).parent))
+    import manual_html
+
+    dest.write_text(manual_html.render(), encoding="utf-8", newline="\n")
+    return dest
 
 
 def app_version() -> str:
@@ -217,11 +240,8 @@ def assemble(stage: Path, *, version: str, embed: Path, pip_whl: Path, wheels: P
     shutil.copy2(ROOT / "config" / "minedocscan.example.toml", stage / "minedocscan.example.toml")
     shutil.copy2(ROOT / "NOTICE", stage / "NOTICE")
     shutil.copy2(notices, stage / "THIRD_PARTY_NOTICES.txt")
-    if manual is not None and manual.is_file():
+    if manual is not None:
         shutil.copy2(manual, stage / "manual.html")
-    else:                                                               # 설명서는 단계 7 — 그 전에는 자리만
-        (stage / "manual.html").write_text("<!doctype html><meta charset='utf-8'><title>minedocscan</title>"
-                                           "<p>사용 설명서는 docs/manual/ 에 있습니다.</p>\n", encoding="utf-8")
     (stage / "VERSION").write_text(version + "\n", encoding="ascii")
     write_sums(stage)
 
@@ -233,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", type=Path, default=CONFIG)
     ap.add_argument("--python-zip", type=Path, help="이미 받은 embeddable zip (해시는 그대로 확인한다)")
     ap.add_argument("--pip-wheel", type=Path, help="이미 받은 pip 바퀴 (해시는 그대로 확인한다)")
-    ap.add_argument("--manual", type=Path, default=ROOT / "docs" / "manual" / "manual.html")
+    ap.add_argument("--manual", type=Path, help="이미 만든 manual.html (없으면 docs/manual/ 에서 만든다)")
     a = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):                             # 윈도우 러너의 표준 출력은 cp1252 — 한글을 찍다 죽지 않게
         if hasattr(stream, "reconfigure"):
@@ -253,11 +273,19 @@ def main(argv: list[str] | None = None) -> int:
         build_wheels(cfg, wheels, work)
         notices = work / "THIRD_PARTY_NOTICES.txt"
         shutil.copy2(pip_whl, wheels / pip_whl.name)                    # 라이선스 목록에 pip 도 (바퀴의 본문으로)
-        run([sys.executable, str(Path(__file__).with_name("licenses.py")), "--wheels", str(wheels), "--python-embed", str(embed),
-             "--check", "--out", str(notices)])
+        try:
+            lic = run([sys.executable, str(Path(__file__).with_name("licenses.py")), "--wheels", str(wheels), "--python-embed",
+                       str(embed), "--check", "--out", str(notices)], capture=True)
+        except subprocess.CalledProcessError as e:
+            (out / "licenses.txt").write_text(e.output or "", encoding="utf-8")   # 막힌 목록(NO 줄)도 시험 성적서로
+            raise
+        (out / "licenses.txt").write_text(lic, encoding="utf-8")
         (wheels / pip_whl.name).unlink()
         stage = work / f"minedocscan-{version}-win64"
-        assemble(stage, version=version, embed=embed, pip_whl=pip_whl, wheels=wheels, notices=notices, manual=a.manual)
+        manual = a.manual if a.manual else build_manual(work / "manual.html")
+        if not manual.is_file():
+            raise BundleError(f"설명서가 없다: {manual}")
+        assemble(stage, version=version, embed=embed, pip_whl=pip_whl, wheels=wheels, notices=notices, manual=manual)
         zip_path = make_zip(stage, out / f"{stage.name}.zip")
         report = {"version": version, "zip": zip_path.name, "zip_bytes": zip_path.stat().st_size,
                   "files": sum(1 for p in stage.rglob("*") if p.is_file()), "wheels": len(list((stage / "wheels").glob("*.whl"))),

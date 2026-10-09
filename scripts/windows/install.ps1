@@ -298,5 +298,5 @@ if (-not $NoTask) { Write-Host "  화면: http://127.0.0.1:8765/ (바탕 화면�
 if ($upgrade -and $oldSchema -and $newSchema -and ($oldSchema -ne $newSchema)) {
     Write-Host "  작업 DB 의 스키마가 바뀌었습니다 ($oldSchema → $newSchema): 새 창에서 minedocscan run --fresh 로 다시 만드십시오 (검수·결정 기록은 그대로)" -ForegroundColor Yellow
 }
-Write-Host "다음: 새 PowerShell 창에서 'minedocscan selftest' — 그리고 설명서의 '템플릿' 장 (manual.html)"
+Write-Host "다음: 새 PowerShell 창에서 'minedocscan selftest' — 그리고 설명서(묶음의 manual.html)의 3장 '처음 설정'"
 exit 0

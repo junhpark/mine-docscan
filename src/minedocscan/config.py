@@ -124,14 +124,19 @@ class Settings:
 
 
 def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> Settings:
-    path = Path(config_path or os.environ.get("MINEDOCSCAN_CONFIG", "minedocscan.toml"))
+    # 빈 MINEDOCSCAN_CONFIG 는 없는 것과 같다 (Path("") 는 지금 폴더 — 폴더를 열다 트레이스백으로 죽었다)
+    path = Path(config_path or os.environ.get("MINEDOCSCAN_CONFIG", "").strip() or "minedocscan.toml")
     raw: dict = {}
+    if path.is_dir():
+        raise ConfigError(f"설정 파일 자리에 폴더가 있습니다 ({path}) — --config 나 MINEDOCSCAN_CONFIG 에는 .toml 파일을 줍니다")
     if path.exists():
         try:
             with open(path, "rb") as f:
                 raw = tomllib.load(f)
         except tomllib.TOMLDecodeError as e:
             raise ConfigError(f"설정 파일을 읽을 수 없습니다 ({path}): {e}") from e
+        except OSError as e:                                           # 잠긴 파일·권한 — 트레이스백 없이 한 줄로
+            raise ConfigError(f"설정 파일을 열 수 없습니다 ({path}): {type(e).__name__}") from e
     paths = _table(raw, "paths", path)
     pipe = _table(raw, "pipeline", path)
     intake = _table(raw, "intake", path)

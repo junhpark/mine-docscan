@@ -152,8 +152,10 @@ def test_assemble_lays_out_the_bundle(tmp_path):
     (wheels / "minedocscan-0.0.1-py3-none-any.whl").write_bytes(b"app")
     notices = tmp_path / "THIRD_PARTY_NOTICES.txt"
     notices.write_text("notices\n", encoding="utf-8")
+    manual = tmp_path / "manual.html"
+    manual.write_text("<!doctype html><title>설명서</title>\n", encoding="utf-8")
     stage = tmp_path / "out" / "minedocscan-0.0.1-win64"
-    bundle.assemble(stage, version="0.0.1", embed=embed, pip_whl=pip_whl, wheels=wheels, notices=notices, manual=None)
+    bundle.assemble(stage, version="0.0.1", embed=embed, pip_whl=pip_whl, wheels=wheels, notices=notices, manual=manual)
     names = sorted(p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file())
     assert names == sorted(["INSTALL.txt", "NOTICE", "SHA256SUMS.txt", "THIRD_PARTY_NOTICES.txt", "VERSION", "install.ps1",
                             "manual.html", "minedocscan.example.toml", "pip-26.2.1-py3-none-any.whl",
@@ -163,3 +165,16 @@ def test_assemble_lays_out_the_bundle(tmp_path):
     listed = {line.split("  ")[1] for line in (stage / "SHA256SUMS.txt").read_text(encoding="ascii").splitlines()}
     assert listed == set(names) - {"SHA256SUMS.txt"}
     assert (stage / "VERSION").read_text(encoding="ascii") == "0.0.1\n"
+
+
+def test_the_bundle_builds_the_manual_or_says_why(tmp_path):
+    out = tmp_path / "manual.html"
+    try:
+        import markdown  # noqa: F401
+    except ImportError:
+        with pytest.raises(bundle.BundleError, match="markdown"):
+            bundle.build_manual(out)
+        return
+    bundle.build_manual(out)
+    text = out.read_text(encoding="utf-8")
+    assert text.startswith("<!doctype html>") and "data:image/png;base64," in text

@@ -47,7 +47,7 @@ flowchart LR
 | 단계 | 모듈 | 하는 일 | 모델 필요 |
 |---|---|---|---|
 | 접수 | `intake/inbox.py`, `intake/worker.py` | 스캐너의 저장 폴더(접수 폴더)에서 다 쓰인 파일만 보관 폴더의 `intake/` 로 복사하고 해시를 다시 확인해 등록한 뒤 치운다 (아래 "등록과 처리") | 아니오 |
-| 등록 | `pipeline/runner.py`, `imaging/io.py` | 파일 SHA-256 으로 문서 등록(중복 차단), 쪽 수, 날짜(결정 > 라벨 > 파일명 — 없으면 `needs_date`). 처리할 때 PDF 를 200 dpi 회색조로 렌더링 | 아니오 |
+| 등록 | `pipeline/runner.py`, `imaging/io.py` | 파일 SHA-256 으로 문서 등록(중복 차단), 쪽 수, 날짜(결정 > 라벨 > 파일명 — 없으면 `needs_date`). 처리할 때 PDF 를 200 dpi 회색조로 렌더링 (PDFium — §11) | 아니오 |
 | classify | `forms/classify.py` | 각 템플릿 기준 이미지와 ORB 정합을 시도해 인라이어가 가장 많은 양식을 고른다. 1위/2위 비율이 낮으면 표시. 그날의 동시 판 묶음은 한 후보다 (§5) | 아니오 |
 | align | `imaging/align.py` | ORB → 비율 검정 → RANSAC 호모그래피. 호모그래피의 회전각이 90° 단위로 0 이 아니면 쪽을 정확히 세워 다시 정합한다(`align_upright`). 정합 뒤 표마다 괘선을 다시 검출해 템플릿과의 오차(px, 중앙값)를 잰다. 기준 미달이면 `align_failed`. 동시 판의 묶음이면 판마다 정합해 괘선 오차로 하나를 고른다 (`pipeline/runner.py`, §5) | 아니오 |
 | extract | `imaging/cells.py`, `marks.py`, `blobs.py` | 셀 크롭과 잉크 비율, ✓ 판정, 괘선 제거 + RLSA 로 글씨 덩어리를 셀에 배정(여러 칸에 걸친 메모 구분). 템플릿에 인쇄 층이 있으면 role 표의 형식 있는 칸은 인쇄를 뺀 이진 그림으로 잰다 (§5) | 아니오 |
@@ -70,6 +70,15 @@ flowchart LR
 
 - **등록** = 파일을 한 번 열어 해시와 쪽 수를 적는다. 열리지 않으면(쓰레기 바이트, 쪽이 없는 PDF, 손상 방침에 걸린 PDF, 여러 쪽 TIFF)
   날짜와 상관없이 `failed`. **처리**(`Pipeline.process_document`) = 그 문서의 쪽을 분류·정합·적재. `process_file(path)` 는 "등록하고 바로 처리".
+- **접수**(`intake/inbox.py`)는 다 쓰인 파일만 가져온다 — 수정 시각이 `settle_seconds` 앞이고 열린다 (PDF 는 마지막 1 KB 에 `%%EOF` 까지 — 손상
+  방침과 같은 검사(§11), JPEG 는 끝 표시 `FF D9` 까지). `give_up_seconds` 가 지나도 다 쓰이지 않으면 손상 방침대로 등록한다.
+  **긴 경로** (tasks/0009 4.4): 보관 경로(보관 폴더의 절대 경로 + `intake/<해-달>/<받은 시각>-<문서 ID>/<원래 이름>`, 쓰는 동안의 `.part`
+  까지)가 259자(윈도우의 `MAX_PATH` — 긴 경로를 켜지 않은 PC 는 그보다 긴 경로를 만들지도 열지도 못한다)를 넘으면 **접수하지 않고** 접수 폴더에
+  둔다 (`PATH_MAX`, 리눅스에서도 같은 규칙). 이름을 줄이지 않는다 — 보관한 이름이 `source_name` 이 되고 날짜 규칙이 그것을 다시 읽는다. 홈의 할 일에 늘
+  ("경로가 너무 길어 접수하지 않은 파일"), 요약에는 그 수가 바뀐 바퀴에만.
+- **폴더가 겹치는가**(접수 폴더와 보관·작업 폴더·사이트 팩, 내보낼 곳이 접수·보관 폴더 안인가)는 `intake/inbox.within` 하나로 본다: 글자로
+  (절대 경로, 윈도우는 대소문자 없이 — `normcase`) 맞지 않으면 파일의 정체(장치·번호)로 위 폴더들을 견준다 — 같은 폴더를 UNC(`\\서버\공유`)와
+  연결한 드라이브 문자로 적어도 잡는다. git 작업 트리 안인가는 위 폴더의 `.git` 으로 (`review/export.inside_git_tree` — 대소문자는 파일 시스템이 가린다).
 - **문서의 날짜**는 문서의 결정 > 문서 라벨(ISO 날짜만) > 파일명 규칙(원래 파일명에). 없으면 `needs_date` — 쪽·필드·업무 행 없이 기다린다.
   **쪽의 날짜**는 쪽의 결정 > 문서의 결정 > 쪽 라벨 > 문서 라벨 > 파일명 — `pagemeta.page_date` 한 곳 (분류 후보, `doc_page.work_date`,
   `doc_page_meta` 의 `date`, 핸들러의 `ctx.work_date` 가 같이 쓴다). 날짜가 없는 쪽은 핸들러에 넘기지 않는다 — 업무 테이블에 날짜 없는 행이 없다.
@@ -147,7 +156,8 @@ DB             작업 DB = WORK_ROOT 의 SQLite. PostgreSQL 로 옮기지 않는
 EXCEL_DIR      엑셀 폴더 ([export] excel_dir). 일별·월별 파일과 기록 파일 — DB 의 사본, 지워도 다시 만든다. 저장소 밖 (이름·차량번호 포함)
 통합 DB        현장 서버의 PostgreSQL (MINEDOCSCAN_PUBLISH_URL — 환경변수로만). 작업 DB 의 표를 실은 사본 — 2단계가 읽는다
 가린 그림      export masked-pages 의 OUT. 템플릿이 아는 자리만 가렸다 — 저장소 밖, 사람이 보고 쓴다
-저장소          코드, 문서, 합성 데이터 생성기. 현장에 관한 것은 없다
+설치 폴더      윈도우 묶음의 %LOCALAPPDATA%\minedocscan — 앱 전용 파이썬(python\)과 serve 의 로그(logs\). 데이터가 없다 — 지우기는 이 폴더와 작업·바로 가기·환경 변수만 (§11.1)
+저장소          코드, 문서, 합성 데이터 생성기, 만들고 재는 도구(scripts/ — 설치되는 패키지 밖). 현장에 관한 것은 없다
 ```
 
 원본은 셋(스캔 파일, 검수 기록, 결정 기록)이다. 작업 DB 는 그것들로, 엑셀·통합 DB·가린 그림은 작업 DB 로 다시 만들 수 있다 — 한 방향 (§12).
@@ -237,10 +247,11 @@ EXCEL_DIR      엑셀 폴더 ([export] excel_dir). 일별·월별 파일과 기�
   계열에 `concurrent` 판이 하나뿐이어도 오류다 — `template variant` 가 새 판에만 적고 기존 판에 적을 두 줄을 안내한 채로 남은 상태다.
   오류는 그 판과 계열, 두 줄을 적을 판(계열과 이름이 같은 템플릿)을 말한다. 이름(`name`)이 같은 템플릿이 둘이어도 오류다.
 - **동시 판끼리 기하 밖의 모든 것이 같아야 한다**: `handler`·`handler_options`, 표(이름·role·`header_rows`·열과 행 — 메타(근무조·소계·
-  장소·머리글 …)까지 통째로), 필드(bbox 밖 전부). 형식을 적지 않은 칸은 칸 종류의 기본 형식으로 비교한다. 다르면 사이트 팩을 읽을 때
-  오류다 (`forms/sitepack.variant_key_diff` — 표 이름과 항목의 종류만 알리고 행 키·값은 찍지 않는다). 다를 수 있는 것은 괘선 좌표
-  (나눔 선 포함)·필드의 bbox·기준 그림·인쇄 층·이름·제목·유효 기간뿐이다. `field_id` 에 템플릿 이름이 없으므로 키가 같으면 판 선택이
-  바뀐 쪽에도 검수가 그대로 붙고, 메타·`header_rows` 가 같으므로 같은 `field_id` 가 판마다 다른 뜻의 칸을 가리키지 않는다.
+  장소·머리글 …)까지 통째로), 필드(bbox 밖 전부), 표시 이름 `display`, 가릴 상자 `redact` 의 이름 목록(§12.6). 형식을 적지 않은 칸은 칸
+  종류의 기본 형식으로 비교한다. 다르면 사이트 팩을 읽을 때 오류다 (`forms/sitepack.variant_key_diff` — 표 이름과 항목의 종류만 알리고 행 키·
+  값은 찍지 않는다). 다를 수 있는 것은 괘선 좌표(나눔 선 포함)·필드의 bbox·`redact` 의 좌표·기준 그림·인쇄 층·이름·제목·유효 기간뿐이다.
+  `field_id` 에 템플릿 이름이 없으므로 키가 같으면 판 선택이 바뀐 쪽에도 검수가 그대로 붙고, 메타·`header_rows` 가 같으므로 같은 `field_id` 가
+  판마다 다른 뜻의 칸을 가리키지 않는다.
 - **분류**: `SitePack.concurrent_groups(날짜)` = 그날 유효한 동시 판이 둘 이상인 계열. 분류기는 묶음을 한 후보로 본다 — 점수는 판 중
   최댓값, 1위/2위 여유는 후보 사이에서 잰다 (판끼리의 비율 ≈ 1 이 낮은 여유 표시를 늘 켜지 않게). 묶음이 없는 템플릿의 점수·여유는 예전과 같다.
 - **고르기** (`Pipeline._align_variants`, `choose_variant`): 묶음이 이기면 판마다 정합하고, 통과한 판 중 괘선 오차가 가장 작은 판을 고른다.
@@ -638,9 +649,14 @@ class Corrector(Protocol):
 | 양식의 뜻으로 엑셀 칸의 상태를 고쳐 말하기 | 핸들러의 `export_cells` | 있음 |
 | 통합 DB 로 싣는 표·열 | `store/db.py` 의 `PUBLISH_TABLES`·`PUBLISH_SKIP_COLUMNS`, `publish/scopes.py` 의 범위 — 바꾸면 `PUBLISH_VERSION` 을 올리고 대상은 `publish --rebuild` | 있음 (`schema.sql` 은 그대로) |
 
+첫 줄("같은 종류의 새 양식 — 코드 변경 없음")의 증거는 가상 양식 두 종이다 (tasks/0009 4.7 — `synth --v2-forms`, `tools/synth_v2.py`): 유류일지·
+환경일지가 핸들러 `generic` 의 템플릿만으로 적재되고 일별 엑셀의 양식 시트와 통합 DB 의 `doc_field` 까지 간다. V2 의 이름(양식 이름, `fuel_`·`env_`
+필드)은 `src/minedocscan/` 에서 `tools/` 밖에 없다 (`tests/test_v2_forms.py` 가 읽어 본다). 템플릿 도구(`template init` → `add-region` → 열·행)로
+처음부터 만든 유류일지 템플릿도 칸이 생성기의 템플릿과 4 px 안이고 `oracle` 의 결과가 같다 (`slow`). 합성의 수치이지 인식률이 아니다.
+
 ## 11. 프로그램 형태
 
-명령줄 도구 하나다(`minedocscan`). 현장에서는 `serve` 하나를 띄워 둔다.
+명령줄 도구 하나다(`minedocscan`). 현장에서는 `serve` 하나를 띄워 둔다 (윈도우 묶음으로 설치했으면 작업 스케줄러가 로그온할 때 — §11.1).
 
 ```
 스캐너가 접수 폴더에 PDF 저장
@@ -664,18 +680,90 @@ minedocscan serve --reviewer jp          한 프로세스, 스레드 둘, 127.0.
   `checks`)은 홈에 두지 않는다.
 - **PDF 는 PDFium(pypdfium2)으로 읽는다** ([ADR 0023](decisions/0023-pdf-with-pdfium.md)). PDFium 은 여러 스레드에서 같이 쓰면 안 된다 —
   `imaging/io.PDF_LOCK` 하나로 PDFium 을 부르는 곳(열기·쪽 꺼내기·렌더링·닫기)을 전부 감싸고 쪽·문서는 잠금 안에서 직접 닫는다 (가비지
-  수집이 다른 스레드에서 닫지 않게). `load_pages` 는 쪽을 내주는 동안 잠금을 놓는다. 파일은 바이트로 읽어 넘긴다 (한글 경로를 라이브러리에
+  수집이 다른 스레드에서 닫지 않게). `load_pages` 는 쪽을 내주는 동안 잠금을 놓는다. 프로세스가 끝날 때는 PDFium 을 닫기 전에 잠금을 잡는다
+  (`atexit` — `serve` 의 작업 스레드(데몬)가 쪽을 그리는 가운데 닫히지 않게). 파일은 바이트로 읽어 넘긴다 (한글 경로를 라이브러리에
   넘기지 않는다). 그림의 크기 = ceil(쪽의 pt × dpi / 72 − 0.001) — PyMuPDF 와 같은 규칙(`page_px`), 그 크기의 회색조 비트맵에 PDFium 이 쪽을
-  맞춰 그린다 (pypdfium2 의 `render(scale)` 는 봐주지 않는 올림이라 합성 A4 가 1655 px 이 된다). **손상** = 열리지 않거나 마지막 1 KB 에 `%%EOF` 가 없다 (`damaged_pdf` —
-  fail 은 실패, warn 은 열리면 경고). 합성 PDF 는 라이브러리 없이 쓴다 (`tools/pdfwrite` — 쪽마다 그림 하나, JPEG 는 `DCTDecode` 그대로,
-  무손실은 `FlateDecode`, `/ID`·만든 시각 없이: 같은 입력이면 바이트까지 같다).
+  맞춰 그린다 (pypdfium2 의 `render(scale)` 는 봐주지 않는 올림이라 합성 A4 가 1655 px 이 된다 — 우리 규칙으로는 1654×2339 그대로).
+  **손상** = 열리지 않거나 마지막 1 KB 에 `%%EOF` 가 없다 (`[pipeline] damaged_pdf` — `fail`(기본)은 그 문서를 `failed` 로, `warn` 은 열 수 있으면
+  열고 `doc_document.warning` 에 한 줄 — 열 수 없으면 `fail` 과 같다). 끝 표시를 같이 보는 것은 PDFium 이 객체 중간에서 잘린 파일은 열지 않지만
+  상호 참조표·끝만 잘린 파일은 다시 세워 열기 때문이다. 접수 폴더의 "다 쓰였나"도 같은 검사다 (§3). 합성 PDF 는 라이브러리 없이 쓴다
+  (`tools/pdfwrite` — 쪽마다 그림 하나, JPEG 는 `DCTDecode` 그대로, 무손실은 `FlateDecode`, `/ID`·만든 시각 없이: 같은 입력이면 바이트까지 같다).
 - 쪽 그림(`/page.png`)은 원본에서 그때그때 렌더링하고 방향을 알면 세운다 (몇 장만 메모리에, 디스크에 쓰지 않는다).
 - 서버 로그에는 경로와 상태 코드만(질의 — 내려받기의 날짜 — 도 없이), `watch`·`serve` 의 요약에는 수와 문서 ID 만 — 파일명·날짜·메모를 찍지 않는다.
   통합 DB 는 호스트·DB·스키마만 (URL·비밀번호 없이).
+- **출력의 글자** (tasks/0009 4.4): 안내 글에는 한국어 윈도우의 코드 페이지(cp949)로 쓸 수 없는 글자(`—`·`–`·`−`·`≈`·`✓`·`〜`)가 있고, 파이썬은
+  출력이 파일·파이프로 갈 때 코드 페이지로 쓴다 — 한글·줄표에서 `UnicodeEncodeError` 로 죽었다 (윈도우 러너는 cp1252 라 한글부터). 그래서
+  `cli.main` 의 처음(`utf8_streams`)에 표준 출력·오류가 UTF-8 이 아니면 UTF-8 로 다시 연다 (`reconfigure(errors="replace")` — 콘솔은 파이썬이
+  이미 유니코드로 쓴다). `pythonw`(작업 스케줄러)에서는 둘 다 `None` 이다 — 버리는 곳(`os.devnull`)으로 두어 무엇을 찍어도 죽지 않게 한다.
+- **`serve --log-dir DIR`** (`logfile.py`): 표준 출력·오류를 `DIR/serve-YYYYMMDD.log` 에 쓴다 — UTF-8, 그 PC 의 날짜가 바뀌면 새 파일,
+  30일 지난 파일은 이름의 날짜로 지운다, 두 스레드의 줄이 섞이지 않게 줄 단위로(잠금 하나), 쓰지 못한 줄은 버리고 다음 줄에 다시 연다
+  (찍다가 서버가 서지 않게). `main` 이 **인자를 읽기 전에** 연다 — `pythonw` 에서 인자가 틀려 멈춘 이유도 그 파일에 남는다. 시계는 주입한다.
+  찍는 것은 지금의 요약과 같다 (수와 문서 ID, 서버의 경로와 상태 코드).
+- 화면의 포트는 혼자 쓴다: 윈도우에서 `HTTPServer` 의 `SO_REUSEADDR` 는 다른 프로세스가 듣는 포트에도 같이 묶여 `serve` 를 두 번 띄우면 둘째도
+  "떴다"고 했다 → 윈도우는 `SO_EXCLUSIVEADDRUSE`, 다른 OS 는 그대로 (`review/server._Server`).
 - 사이트 팩을 고치면 `serve` 를 다시 띄운다 (돌고 있는 것은 알아채지 않는다).
 - `watch` 나 (`--no-watch` 가 아닌) `serve` 가 도는 동안 쓰는 명령(`export excel`·`publish`·`publish --rebuild`)은 파이프라인 잠금을 잡지 못해
   한 줄로 끝난다 — 설정이 있으면 그 프로세스가 내보내고 있다. 엑셀은 `serve` 의 홈에서 내려받는다. 읽기만 하는 명령(`publish --check`·
   `export masked-pages`)은 돈다.
+
+### 11.1 설치·자가 시험·만들고 재는 도구 (tasks/0009 4.5·4.6, [ADR 0024](decisions/0024-offline-bundle-and-task-scheduler.md))
+
+현장 PC 는 윈도우이고 외부망이 없다 (ADR 0003). 설치는 **오프라인 묶음 zip + PowerShell** 이고 `serve` 는 **작업 스케줄러**가 로그온할 때 띄운다
+(설치 프로그램·윈도우 서비스가 아니다 — 결정과 이유는 [ADR 0024](decisions/0024-offline-bundle-and-task-scheduler.md)). 순서는
+[사용 설명서 2장 '설치'](manual/2-설치.md), 폴더와 지우기가 남기는 것은 [DATA.md](DATA.md). 리눅스는 `pip install` 이다 (묶음 없음).
+
+```
+minedocscan-<판>-win64.zip    scripts/bundle.py 가 인터넷이 되는 곳(CI 의 windows-install 작업)에서 만든다. 안의 이름은 ASCII
+  python-3.12.10-embed-amd64.zip · pip-*.whl  앱 전용 파이썬(3.12 의 마지막 바이너리 판)과 pip — 판·SHA-256 은 scripts/bundle.toml 에 고정
+                                              (받은 것이 다르면 만들기가 멈춘다)
+  wheels/                                     minedocscan 과 런타임 의존성 전부 ([postgres] 포함, cp312-win_amd64)
+  install.ps1 · uninstall.ps1 · INSTALL.txt   UTF-8 BOM·CRLF (Windows PowerShell 5.1 은 BOM 이 없으면 한글을 깨뜨린다)
+  THIRD_PARTY_NOTICES.txt · NOTICE · manual.html · minedocscan.example.toml · VERSION · SHA256SUMS.txt
+      ↓ install.ps1 — 관리자 권한 없이, 지금 사용자로, 망에 닿지 않고 (pip --no-index)
+%LOCALAPPDATA%\minedocscan\python\       앱 전용 파이썬 (레지스트리·시작 메뉴를 건드리지 않는다, PC 의 다른 파이썬과 섞이지 않는다)
+%LOCALAPPDATA%\minedocscan\logs\         serve --log-dir
+%APPDATA%\minedocscan\minedocscan.toml   설정 (없을 때만 쓴다) — 사용자 환경 변수 MINEDOCSCAN_CONFIG, 사용자 PATH 에 python\Scripts
+작업 스케줄러 minedocscan-serve          로그온할 때 pythonw -m minedocscan.cli serve --config … --reviewer … --log-dir …\logs (창 없이,
+                                         실패하면 1분 뒤 세 번, 시간 제한 없음, 배터리에서도)
+바탕 화면 "광산 문서 스캔"                http://127.0.0.1:8765/
+```
+
+- `install.ps1` 은 먼저 `SHA256SUMS.txt` 로 묶음을 확인하고(해시가 다르거나, 설치하는 파일 — 바퀴·파이썬·pip·스크립트 — 이 목록에 없거나, 목록이
+  비었으면 멈춘다) 받은 zip 의 차단 표시를 푼다. 런타임 확인(`cv2`·`numpy`·`pypdfium2`·`psycopg`·`openpyxl` 을 읽어 들인다)이 실패하면 Visual C++
+  재배포 패키지(그리고 N·KN 판 윈도우의 미디어 기능 팩)를 안내한다 — 묶음으로는 필요 없었다: numpy·rapidfuzz 는 자기 `msvcp140` 을 담고,
+  OpenCV·PDFium 의 바이너리는 그것을 가져오지 않으며, `vcruntime140(_1)` 은 embeddable 이 준다 (`bundle-report.json`). 러너에는 둘 다 있어
+  CI 로는 잡을 수 없다 — 현장 PC 에서 본다.
+- **올리기** = 새 판의 묶음으로 `install.ps1` 을 다시: 작업을 멈추고 옆에 만든 `python.new` 를 런타임 확인 뒤 바꿔 끼운다 (실패하면 옛 판 그대로).
+  설정·로그는 그대로. 작업 DB 의 스키마 버전이 바뀌는 판이면 `run --fresh` 를 안내한다 (스스로 돌리지 않는다).
+- **지우기** (`uninstall.ps1`): 작업·바로 가기·`python\`·`logs\`·`VERSION`·PATH 항목·`MINEDOCSCAN_CONFIG` 만. 설정·사이트 팩·보관·작업·접수·
+  엑셀 폴더는 건드리지 않고 자리를 찍는다 (`-RemoveConfig` 일 때만 `%APPDATA%` 의 설정도). minedocscan 의 설치 폴더가 아니면 아무것도 지우지 않는다.
+- 설치는 통합 DB 의 URL 을 받지 않는다 — URL 에는 비밀번호를 넣지 않고 libpq 의 `pgpass.conf` 에 둔다 ([DATA.md](DATA.md)).
+- 윈도우에서 도는지는 CI 가 본다: `windows`(기본 `pytest`)와 `windows-install`(묶음 → 망을 막고 설치 → 새 창처럼 `--version`·자가 시험 →
+  작업 스케줄러의 `serve` 의 `/api/home`·로그 → 같은 묶음으로 다시 설치 → 손상된 묶음은 멈춘다 → 지우기). tasks/0009 단계 5 의 CI(윈도우
+  러너)에서 묶음 76.0 MB(바퀴 12개), 망을 막은 설치 15초, 자가 시험 49.4초. 현장의 윈도우 PC 에서 해 본 것은 아니다 (러너뿐).
+
+**자가 시험** (`selftest.py` — `minedocscan selftest [--out DIR] [--keep] [--publish-schema NAME]`): 설치한 프로그램만으로(pytest 없이),
+합성 데이터만으로(`synth` 와 `oracle` 은 패키지 안에 있다), 임시 폴더에서. 망에 닿지 않는다 (`--publish-schema` 의 대상과 127.0.0.1 만).
+
+| 검사 | 보는 것 |
+|---|---|
+| `synth` | 합성 이틀치(점검·운반·가동 일보 — 인쇄 층·표시 이름·가릴 상자)와 접수 폴더 — 둘째 날은 스캐너가 붙이는 이름 |
+| `intake` | 접수 → 둘째 날은 날짜를 기다린다 → 날짜 결정 → 처리. 쪽이 다 적재되고 업무 행에 날짜가 있다 |
+| `recognition` | `oracle` 로 기계가 읽는 표의 칸(형식 없음·`integer`)의 CER 0, 읽지 않는 형식(소수·시각·계기)의 값 칸은 잉크 있음 + 검수 대기 |
+| `reprocess` | 검수·결정 → 다시 처리 = 같은 파일·검수·결정으로 처음부터 만든 DB (§3 의 불변식) |
+| `excel` | 일별·월별을 써서 되읽기 = 모델, 운반 표 = 합성 정답, 검수로 넣은 칸은 그 값 |
+| `masked` | 가린 그림: 상자 밖 = 정합 그림, 안 = 한 색 |
+| `serve` | `serve --port 0 --log-dir` 을 하위 프로세스로 — `/api/home`·`/export/day.xlsx` 가 200, 로그 파일이 UTF-8 |
+| `publish` | (`--publish-schema` 일 때만) `minedocscan_selftest_` 로 시작하는 스키마에 싣고 `--check` 가 같고 표마다 행 수가 같으면 지운다 (`--check` 는 지문만 본다. `--keep` 이면 남긴다). 그 스키마가 이미 있으면 쓰지도 지우지도 않고 실패, `CREATE` 권한이 없으면 이 검사만 건너뛴다 |
+
+- 앞의 검사가 실패하면 그것에 기대는 검사는 건너뛴다. 결과는 `selftest.json`·`selftest.md` — 검사마다 통과·실패·건너뜀과 시간, 환경(OS·파이썬·
+  의존성의 판·CPU 수·메모리). 사용자의 경로·이름은 오류의 글에서도 지운다. 종료 코드 0 통과·1 실패(어느 검사가 왜 — 한 줄씩)·2 받지 않는 스키마 이름.
+  CI 의 우분투·윈도우에서 돌고 3분이 기준이다 (시험 성적서의 한 절 — [docs/test-report/README.md](test-report/README.md)).
+
+**만들고 재는 도구는 `scripts/`** — 설치되는 패키지(`src/minedocscan`, 바퀴의 `packages`)에 들지 않는다 (묶음을 만드는 도구가 오프라인 제품에
+들어가지 않게). 묶음(`bundle.py`), 제3자 라이선스(`licenses.py --check` — 허용 목록 밖이면 1), 설명서의 명령 목록·HTML·갈무리, 시험 성적서,
+확장성 표(`v2_metrics.py`), 규모(`bigdb.py`). 목록은 [scripts/README.md](../scripts/README.md). 프로그램이 쓰는 도구(`synth`, 템플릿 도구,
+자가 시험)는 지금처럼 패키지 안(`tools/`, `selftest.py`)이다.
 
 ## 12. 내보내기와 싣기 (tasks/0008, ADR 0021·0022)
 
@@ -696,8 +784,15 @@ minedocscan serve --reviewer jp          한 프로세스, 스레드 둘, 127.0.
   (`export excel`·`publish`·`publish --rebuild`)은 파이프라인 잠금(`pipeline/lock.py`)을 잡고. 처리 중인 문서의 반쯤 지워진 행을 내보내는 일도,
   두 프로세스가 같은 기록 파일을 고치는 일도 없다. 다시 처리 대기 중인 문서는 옛 행을 가진 채라 그대로 내보내고, 요약에 그 수를 적는다.
 - 실패해도(폴더가 없다, 파일이 열려 있다, 서버가 꺼졌다) 접수·처리·검수는 계속된다. 실패는 요약과 홈에 수로 알리고 다음에 다시 한다.
+- **사본의 주인** (tasks/0009 4.1 다): 사이트 팩의 `site.toml` 에 **적힌** `[site] name`(`SitePack.declared_name` — 폴더 이름으로 대신하지
+  않는다: 폴더를 옮기면 바뀌고, 두 사이트 팩의 폴더가 다 `site` 일 수 있다)을 엑셀 폴더의 기록 파일(`site` — 12.2)과 통합 DB 의
+  `pub_meta.site`(12.5)에 적고, 다르면 쓰지도 지우지도 않는다. 0008 에는 실제 DB 를 실어 둔 스키마에 합성 묶음의 작업 폴더로 `publish` 하자
+  문서 3·날짜 3 범위가 묻지 않고 합성 행으로 바뀌었고, 빈 작업 DB 로 훑은 엑셀 폴더는 기록된 파일을 다 지웠다. 이름이 없으면 자동 내보내기·
+  자동 싣기는 시작할 때 한 줄로 알리고 꺼지고(홈 `no_site_name`) `export excel`·`publish` 는 거절한다. `info` 가 이름을 보이고, 평가셋의 분할
+  소금값이 이름(없으면 폴더 이름)을 따르고 있으면 이름을 적거나 바꾸기 전에 `[eval] split_salt` 를 먼저 적으라고 한다 — 바꾸는 순서는 [DATA.md](DATA.md).
 - 엑셀과 가린 그림에는 현장의 값이 있다 — 저장소 밖에. `export excel` 은 git 작업 트리 안(`--allow-in-repo` 는 합성만)·접수 폴더 안·보관 폴더
-  안을 거절하고, `export masked-pages` 도 git 작업 트리·접수 폴더·보관 폴더 안을 거절한다. 설정의 `excel_dir` 가 그런 곳이면 자동 내보내기를 켜지 않고 시작할 때 한 줄로 알린다.
+  안을 거절하고, `export masked-pages`·`review export-crops`·`recognizer eval --errors` 도 git 작업 트리·접수 폴더·보관 폴더 안을 거절한다
+  (같은 검사 — 대소문자·UNC·연결한 드라이브 문자도, §3). 설정의 `excel_dir` 가 그런 곳이면 자동 내보내기를 켜지 않고 시작할 때 한 줄로 알린다.
 - 요약: `watch`·`serve` 는 수와 문서 ID 만. 사람이 친 명령의 요약은 날짜와 엑셀 폴더 안의 경로를 낸다. 값·이름·원래 파일명은 어디에도 내지 않는다.
 
 ### 12.1 칸의 상태 — 확정되지 않은 값은 싣지 않는다
@@ -836,6 +931,7 @@ ISO 날짜가 아닌 `work_date`(쪽 라벨에서 올 수 있다)는 파일로 �
 |---|---|---|
 | 값 · 빈 칸 · `?` · `판독 불가` | 12.1 | 그 일보 칸의 상태 |
 | `●` | `present` | 확정이지만 수가 없다 (글씨만) — 그 줄의 합계를 막는다 |
+| `겹침` | `overlap` | 한 일보 쪽에 (광종·편, 주야)가 같은 행이 둘 이상이다 (tasks/0009 4.1 가 — `template check` 가 오류로 내는 템플릿, 검사 전에 만든 것). **더하지 않고** 그 줄의 합계를 비운다 (덮어쓰면 뒤의 행이 앞의 행을 지웠다 — 합성에서 값 칸 71 → 70, 합 309 → 305 인데 합계는 확정으로 나왔다). 범례의 이 줄은 겹침이 있는 파일에만 (그래야 겹침이 없는 파일의 모델이 그대로다). 교차검증 시트는 그대로 |
 | `–` | `no_doc` | **문서 없음**: 그 날짜·자리의 일보 쪽이 없고, 그 날짜에 자리 미정인 일보 쪽도 없다 |
 | `–?` | `unknown` | **모름**: 그 날짜·자리의 일보 쪽이 없는데 자리 미정인 일보 쪽이 있다 (그 쪽이 이 자리의 것일 수 있다) |
 | 붉은 글씨 + 바탕 | `mismatch` | 교차검증 불일치(`xcheck_haul.status = 'mismatch'`)인 날짜·자리·광종·편 (주·야 두 칸 다) — 그 판정이 확정일 때만 (견준 운반 행이 전부 확정; 잠정인 불일치는 교차검증 시트의 `(잠정)`). **고치지 않는다** — 일보의 값 그대로 (ADR 0006) |
@@ -877,18 +973,22 @@ ISO 날짜가 아닌 `work_date`(쪽 라벨에서 올 수 있다)는 파일로 �
   쓰지 않는다. 달이 없으면(빈 DB·빈 폴더) 한 번에 전부 훑고 마친다. 기록 파일이 없거나 깨졌으면(처음 쓰는 빈 폴더, 누가 지웠다) 바퀴 끝의
   내보내기는 그 바퀴에 전부 다시 쓰지 않고(`export_excel(full_if_lost=False)` — 명령은 지금처럼 전부) 조각마다 다시 쓴다 — 기록에 없는 파일은
   해시를 모르므로 쓴다. 바퀴를 시작할 때 잃었으면 그 바퀴가, 도는 사이에 잃었으면 새 조각 바퀴가. 전부 건드린 처리(`everything`)도 새 조각
-  바퀴를 시작한다. 시계는 주입한다 (시험이 잠들지 않는다).
+  바퀴를 시작한다. 바퀴를 시작한 작업 바퀴에서 아무것도 하지 못했으면(폴더가 없다, 다른 사이트의 폴더, 기록 파일을 다루지 못했다, 예외) 그 바퀴는
+  없던 것으로 하고 다음 작업 바퀴에 달의 목록부터 다시 정한다 (`Sweep.cancel` — 빈 목록으로 멈춰 서지 않게). `watch --once` 는 다음 바퀴가
+  없다 — 할 때가 된 전체 훑기를 조각으로 나누지 않고 그 바퀴에 한 번에 한다 (나누면 실행마다 첫 달만 훑었다; 싣기도 같다). 시계는 주입한다
+  (시험이 잠들지 않는다).
 - **조각 하나의 일**: 월별 파일을 만드는 달은 그 달의 쪽·필드를 한 번 읽어 일별 파일과 같이 쓴다 (`writer._targets` — 달마다 일별 다음 월별,
-  `Pages.day`), 행은 튜플로 받아 열 이름과 묶는다 (`model.dict_rows`). 한 번에 들고 있는 것은 달 하나다. 한 해 규모의 복제 DB(125만 행)에서
-  바뀐 것 없는 전체 훑기가 바퀴 하나 76초 → 조각 하나 3.4–4.1초 (조각으로 나누기만 했을 때 4.7–7.5초 — `docs/test-report/scale-*.json`).
+  `Pages.day`), 행은 튜플로 받아 열 이름과 묶는다 (`model.dict_rows`). 한 번에 들고 있는 것은 달 하나다. 합성 작업 DB 를 한 해 규모로 복제한
+  DB(252일·125만 행 — `scripts/bigdb.py`)에서 바뀐 것 없는 전체 훑기가 바퀴 하나 76초 → 조각 하나 3.4–4.1초 (조각으로 나누기만 했을 때
+  4.7–7.5초 — `docs/test-report/scale-*.json`).
 - 폴더가 없거나 기록 파일을 다루지 못한 바퀴는 건드린 것을 그대로 들고 있다가 다음 바퀴에 같은 범위로 한다 (조각도 그대로). 쓰지 못한 파일(열려
   있다)은 `retry_seconds` 가 지난 뒤에 그 파일만 다시 본다 — 그 사이의 바퀴는 그 파일의 모델을 만들지 않는다 (`skip` → `Result.deferred`; 0008 에는
   바퀴마다 3초에 모델을 만들고 임시 파일을 쓰고 실패하고 한 줄을 찍었다). 바퀴의 요약 줄은 쓰지 못한 파일의 수가 바뀔 때만 찍는다
   (`Result.failed_changed`). 예외가 나도 그 일만 건너뛰고(요약에 `excel_error` — 예외의 종류) 건드린 것은 남는다.
 - `export excel [OUT] [--date D | --month M | --from D --to D]` 명령은 범위를 주지 않으면 전부 훑고, 주면 그 날짜들과 그 달들을 본다. 파이프라인 잠금을
   잡고 작업 DB 를 읽기 전용으로 연다. 쓰지 못한 파일이 있거나 폴더가 없으면 종료 코드 1.
-- **홈**(`/api/home`)의 `export`: 켜짐·꺼짐과 이유(`off` 설정 없음 · `refused` 저장소·접수 폴더·보관 폴더 안 · `no_watch`), 마지막으로 쓴 시각과 파일 수,
-  지운 파일 수, 쓰지 못한 파일 수, 폴더가 없다, 도는 훑기(`sweep` — `{done, total, first}`: "처음 훑는 중 3/13")와 마지막 전체 훑기의 시각
+- **홈**(`/api/home`)의 `export`: 켜짐·꺼짐과 이유(`off` 설정 없음 · `refused` 저장소·접수 폴더·보관 폴더 안 · `no_site_name` · `no_watch`), 마지막으로 쓴 시각과 파일 수,
+  지운 파일 수, 쓰지 못한 파일 수, 폴더가 없다, 다른 사이트의 폴더, 도는 훑기(`sweep` — `{done, total, first}`: "처음 훑는 중 3/13")와 마지막 전체 훑기의 시각
   (`last_sweep_at`) — 수만.
 - **내려받기** (`serve` 에서만 — `review/ops.export_xlsx`): `GET /export/day.xlsx?date=YYYY-MM-DD`, `GET /export/month.xlsx?month=YYYY-MM` — 같은 모델로 그때
   만든다 (폴더 설정이 없어도 된다, 디스크에 쓰지 않는다, 읽기는 한 트랜잭션). 달력에 없는 날짜는 400, 쪽이 없는 날짜(달)는 404. Host·Origin 검사와
@@ -900,8 +1000,9 @@ ISO 날짜가 아닌 `work_date`(쪽 라벨에서 올 수 있다)는 파일로 �
 대상에 SQL 을 보내는 곳은 `publish/core.py` 의 `Target` 하나다. `psycopg` 는 선택 의존성(`[postgres]`)이고 `publish/` 안에서만 import 한다 — 연결은 `core.psycopg_connect`, 바퀴 끝의 싣기는 시작할 때
 드라이버가 있는지만 본다(`auto.AutoPublish`). 없어도 다른 명령은 전부 돈다. 연결은 `core.connect` 한 이름을 거친다 (시험이 바꿔 끼운다).
 
-- **대상**: 환경변수 `MINEDOCSCAN_PUBLISH_URL`(`postgresql://사용자:비밀번호@호스트/DB`) — **환경변수로만** (설정 파일의 `[publish]` 에 `url`·`dsn`·`password`
-  를 적으면 `ConfigError`). 설정 `[publish] schema`(기본 `minedocscan`, 환경변수 `MINEDOCSCAN_PUBLISH_SCHEMA` — 영문 소문자·숫자·밑줄) · `enabled`(바퀴 끝의 싣기 —
+- **대상**: 환경변수 `MINEDOCSCAN_PUBLISH_URL`(`postgresql://계정@호스트/DB` — 비밀번호는 URL 에 넣지 않고 libpq 의 `pgpass.conf` 에 둔다, 프로그램은
+  고칠 것이 없다 — libpq 가 읽는다. [DATA.md](DATA.md)) — **환경변수로만** (설정 파일의 `[publish]` 에 `url`·`dsn`·`password`·`conninfo` 를 대소문자와
+  상관없이 적으면 `ConfigError`). 설정 `[publish] schema`(기본 `minedocscan`, 환경변수 `MINEDOCSCAN_PUBLISH_SCHEMA` — 영문 소문자·숫자·밑줄) · `enabled`(바퀴 끝의 싣기 —
   기본: URL 이 있으면 켜짐) · `sweep_minutes`(기본 30) · `connect_timeout_s`(기본 5) · `lock_timeout_s`(기본 5) · `statement_timeout_s`(기본 60) ·
   `retry_seconds`(기본 60). `psycopg` 가 없으면 `publish` 는 한 줄 안내와 종료 코드 2,
   `watch`·`serve` 는 시작할 때 한 번 알리고 싣기를 끈다.
@@ -938,10 +1039,12 @@ ISO 날짜가 아닌 `work_date`(쪽 라벨에서 올 수 있다)는 파일로 �
    `pub_meta` 가 없는데 이름이 같은 표가 있으면
    이 프로그램이 만든 표가 아니다 — 만들지도 지우지도 않고 멈춘다 (`not_ours`). 있으면 스키마 버전·싣기의 판·사이트를 본다.
 3. 견줄 범위의 키를 정한다 (아래 "언제"). 범위마다 지문을 내어 `pub_state` 와 견준다 — 다른 범위가 갈아 끼울 것, 작업 DB 에 없는 범위(대상에만 남은
-   문서·날짜)가 지울 것이다. **메모리** (tasks/0009 4.2 나): 지문은 범위 하나씩(문서는 하나씩 — `scopes.DOC_CHUNK`) 내고 바뀐 범위의 목록에는
-   (종류, 키, 지문)만 둔다. 넣을 때 그 범위의 행을 다시 읽는다 — 한 번에 메모리에 있는 행은 문서 하나와 날짜 범위 몇 개 몫이다 (0008 에는 처음
-   싣기가 모든 행을 메모리에 들고 있어 한 해 규모에서 1.3 GB 였다). 처음 싣기는 행을 두 번 읽는다. 전부가 아닌 싣기는 견줄 키를 작업 DB 에서
-   그 범위만 찾는다 (`scopes.local_keys` — 모든 키를 읽지 않는다).
+   문서·날짜)가 지울 것이다. **메모리** (tasks/0009 4.2 나): 지문은 범위 하나씩(문서는 하나씩 — `scopes.DOC_CHUNK`, 날짜 범위는 한 달 치씩 —
+   `DATE_CHUNK` 31) 내고 바뀐 범위의 목록에는 (종류, 키, 지문)만 둔다. 넣을 때 그 범위의 행을 다시 읽는다 — 한 번에 메모리에 있는 행은 문서
+   하나와 날짜 범위 몇 개 몫이다. 처음 싣기는 행을 두 번 읽는다. 전부가 아닌 싣기는 견줄 키를 작업 DB 에서 그 범위만 찾는다 (`scopes.local_keys` —
+   모든 키를 읽지 않는다). 합성 작업 DB 를 한 해 규모로 복제한 DB(12.4 — `scripts/bigdb.py`)에서 처음 싣기의 최대 메모리(기준선을 뺀 것)가
+   1,298 MB → 8 MB, 명령 `publish` 의 시간은 처음 1.07배·바뀐 것 없을 때 1.08배 (0008 에는 `CHUNK = 500` 이 문서 수라 한 해가 한 묶음으로
+   올라왔다 — `docs/test-report/scale-*.json`).
 4. **지울 것을 먼저 다 지운다** (갈아 끼울 범위와 지울 범위, 자식부터, `pub_state` 의 그 줄도) — 같은 키의 행이 문서 사이를 옮겨 다닌다 (점검의 이기는 쪽,
    일보의 자리). 그다음 갈아 끼울 범위의 행을 넣고(`COPY`) `pub_state` 에 지문과 실은 시각을 적는다.
 5. **실을 수 없는 값**(대상의 형이 받지 않는 값 — NUL 문자가 든 글자. SQLite 는 저장한다)이 있는 범위는 넣지 않고 수로 알린다. 그 범위의 옛 행은 4 에서
@@ -965,8 +1068,10 @@ ISO 날짜가 아닌 `work_date`(쪽 라벨에서 올 수 있다)는 파일로 �
   (그 횟수를 `fell_back` 으로 센다). 그 전체 훑기가 성공하면 도는 조각 바퀴를 마친 것으로 센다 (`last_sweep`).
 - **전체 훑기는 조각으로** (tasks/0009 4.2 가 — `sweep.Sweep`, 엑셀과 같은 틀): 조각 = 달 하나 — 그 달의 날짜 전부(작업 DB 의 쪽·날짜 범위, 대상의
   상태 표·쪽)와 그 날짜에 쪽이 있는 문서(양쪽) — 그리고 마지막에 **날짜 없는 조각**(`core.REST` — 쪽에 날짜가 없는 문서, 대상에만 있는 문서 키,
-  달의 꼴이 아닌 날짜 키; 통째 범위는 늘). 달의 목록은 바퀴의 첫 조각에서 정한다 (`core.slices` — 작업 DB 의 달과 대상에만 있는 달,
-  `publish(cycle=True)` → `Result.slices`). 조각을 한 바퀴 다 돌면 전체 훑기와 같다 (흔들기 시험). **자동 싣기의 처음 싣기도 조각으로 간다** — 다 돌
+  달의 꼴이 아닌 날짜 키; 통째 범위는 늘). 달의 조각은 앞 글자 `YYYY-MM-` 로 가르고, 대상의 날짜 키는 `COLLATE "C"`(바이트 순서)로 견준다 —
+  DB 의 정렬 규칙(ICU)에서는 `'2030-01-31' < '2030-01-~'` 가 거짓이라 대상에만 있는 날짜를 못 찾았다 (tasks/0009 12절). 달의 목록은 바퀴의
+  첫 조각에서 정한다 (`core.slices` — 작업 DB 의 달과 대상에만 있는 달, `publish(cycle=True)` → `Result.slices`). 조각을 한 바퀴 다 돌면
+  전체 훑기와 같다 (흔들기 시험). **자동 싣기의 처음 싣기도 조각으로 간다** — 다 돌
   때까지 대상은 일부만 있다 (홈: "처음 훑는 중 n/N"). 한 번에 다 싣으려면 명령 `publish` (늘 전부 — 한 트랜잭션).
 - 실패하면(서버가 꺼졌다, 권한이 없다, 판이 다르다) 그 바퀴의 싣기만 건너뛰고 건드린 것을 들고 있다가 다음에 같이 싣는다. 실패한 뒤 `retry_seconds` 안의
   바퀴는 연결하지 않는다 (꺼진 서버에 바퀴마다 매달리지 않게). 접수·처리·엑셀은 계속된다. 시계는 주입한다.
@@ -985,13 +1090,20 @@ ISO 날짜가 아닌 `work_date`(쪽 라벨에서 올 수 있다)는 파일로 �
     30초 안에 돌아오지 않으면 `cancel_safe(timeout=5)` 를 보내고(취소도 새 연결이라 멈춘 서버에서는 기다린다 — 다른 스레드에서 5초만), 취소가 들었으면
     2초 더 기다린 뒤, 아니면 바로 그 연결의 소켓에 `shutdown()` 을 건다 (`close()`·PQfinish 는 부르지 않는다 — libpq 가 쓰는 중이다). 기다리던 쪽이
     끝을 읽어 드라이버가 예외를 내고 `connection_lost` 로 간다. 서버가 살아 있으면 서버의 `statement_timeout` 이 30초 먼저 끊는다.
+    **윈도우**에서는 `shutdown()` 이 다른 스레드의 `recv`·`select` 를 깨우지 않는다 (윈도우 러너에서 소켓 한 쌍·TCP 모두 15초 그대로였다). 그래서
+    `shutdown()` 뒤에 그 소켓에 걸린 I/O 를 `CancelIoEx` 로 취소한다 (`core.interrupt_waits` — 소켓은 닫지 않는다): 기다리던 `select` 가 곧바로
+    `WSAEINTR` 로 돌아오고 psycopg 의 윈도우 대기(`wait_select`)가 그것을 `OperationalError` 로 끝낸다 — 리눅스와 같은 실패 경로. psycopg 는
+    0.1초마다 `select` 를 다시 걸어 그 사이에 쏘면 헛방이므로 5초 동안 0.05초마다 되풀이한다 (`INTERRUPT_S`). 시험은 둘이다: 기본 `pytest` 의
+    가짜 연결(소켓 한 쌍 — psycopg 처럼 `select` 로 기다린다, 윈도우 CI 에서도 돈다)과 `-m postgres` 의 **멈추는 TCP 중계** (서버를 멈출 수 없다 —
+    답을 기다리는 동안에 멈춘다. COPY 를 보내는 동안 멈추면 리눅스의 `tcp_user_timeout` 이 먼저 끊는다). 타이머를 빼면 중계 시험이 실패한다.
   - 명령(`publish`)이 시간 제한·끊김으로 그만두면 글이 "다시 실행하십시오"다 (바퀴 끝의 싣기는 "다음에 다시 합니다" — `PublishError.for_command`).
   - 바퀴 끝의 일을 하는 동안 작업 상태는 `exporting`·`publishing` 이고 홈에 몇 초째인지 보인다 (`intake/worker.py`).
 - **홈**의 `publish`: 켜짐·꺼짐과 이유(`off` URL 없음 · `disabled` `[publish] enabled = false` · `no_driver` · `no_watch` · `no_site_name`), 대상(호스트·DB)과 스키마,
   마지막 성공 시각, 밀린 범위의 수(문서 + 날짜), 마지막 실패의 종류, 마지막 싣기에서 바꾼 범위의 수(갈아 끼운 것 + 지운 것), 전체 훑기로 넘어간 횟수,
   도는 훑기(`sweep`)와 마지막 전체 훑기의 시각 (12.4 와 같다).
 - **비밀값**: URL 을 어디에도 그대로 찍지 않는다 — 로그·요약·오류·`info`·홈에는 `호스트(:포트)/DB` 와 스키마만 (`core.describe_url` — 비밀번호에
-  `/`·`?`·`#` 가 그대로 들어가 갈리지 않는 URL 은 `(읽을 수 없는 URL)`, 찍을 수 없는 글자의 이름은 `?`). 드라이버의 오류 글은
+  `/`·`?`·`#` 가 그대로 들어가 갈리지 않는 URL 과 `@호스트` 를 빠뜨린 URL(`postgresql://이름:비밀/db`)은 `(읽을 수 없는 URL)`, 찍을 수 없는
+  글자의 이름은 `?`. 작업 DB 의 `MINEDOCSCAN_DB_URL` 도 `sqlite:///…` 가 아니면 같은 함수로 — `info`·`store/db.py` 의 오류 글). 드라이버의 오류 글은
   싣지 않는다 (비밀번호가 섞일 수 있다 — 예외의 종류만). 실패한 행의 값을 찍지 않는다 (표 이름과 수만).
 - 이름·차량번호가 대상으로 간다 (`doc_field`, `doc_page_meta`, `prod_haul`, `eq_assignment_obs` …) — 현장의 서버라는 전제다. 대상의 계정은 그 스키마에만 쓰는
   전용 계정으로 ([DATA.md](DATA.md)).
@@ -1007,15 +1119,19 @@ ISO 날짜가 아닌 `work_date`(쪽 라벨에서 올 수 있다)는 파일로 �
 | `redact` | 템플릿의 `redact: [{name, bbox: [x0, y0, x1, y1]}, …]` — 템플릿이 아는데 필드가 아닌 자리 (결재란, 행렬 양식 머리의 인쇄된 이름, 점검표의 인쇄된 등록번호 열) | `pad_px` |
 | `text` | 글자 칸 전부 — 표의 `handwritten_text` 칸(괘선까지 — `cells(inset=0)`)과 표 밖의 `handwritten_text` 필드. 기본. `--keep-text` 면 남긴다 (그때는 `meta_key` 가 없는 이름 필드도 남는다) | 표 밖 필드만 `pad_px` |
 
-- 필드 하나는 한 번만 센다 (서명 > 메타 > 글자). 수 칸·✓ 칸·인쇄는 남는다.
-- `pad_px` 는 `site.toml` 의 `[redact] pad_px` (0–200), 기본 16 px — 합성 세 묶음(기본·메타 필드·가동 일보, 사흘씩)의 표 밖 필드 206개에서 그 칸의 글씨가
-  상자를 넘은 거리가 최대 11 px, 99 % 9 px, 95 % 5 px 였다. 실제 글씨는 더 넘을 수 있다.
-- `redact` 는 **기하다** — 동시 판은 판마다 따로 적는다 (판 B 는 표가 내려가 있다). 로더가 이름(겹치지 않는 글자)·bbox(정수 넷)·넓이를, `template check` 가
-  쪽 안인지를 보고, `template preview` 가 점선과 대각선으로 그린다. `template variant` 는 기존 판의 상자를 그대로 베끼고 다시 확인하라고 알린다.
-  `redact` 는 파이프라인의 결과를 바꾸지 않는다.
+- 필드 하나는 한 번만 센다 (서명 > 메타 > 글자). 수 칸·✓ 칸·인쇄는 남는다 — 다만 넓힌 상자에 걸친 만큼은 가려진다 (48 px 이면 표 밖 필드
+  옆의 수 칸을 덮을 수 있다 — 가리는 쪽으로 틀리는 편이 낫다).
+- `pad_px` 는 `site.toml` 의 `[redact] pad_px` (0–200), **기본 48 px**(약 6 mm — tasks/0009 4.1 마): 실제 일보 30쪽에서 16 px(합성 글씨로 잡은
+  그 전의 기본)로는 약 25쪽에서 작성자 이름의 첫 획이 상자 밖에 남았고 48 px 로는 30쪽 모두 가려졌다. 근거와, 폭이 아니라 필드의 상자를 넓혀야
+  하는 경우는 [SITE_PACK.md](SITE_PACK.md) `[redact]` 와 `export/masked.py` 의 `DEFAULT_PAD_PX` 주석.
+- `redact` 는 **기하다** — 동시 판은 판마다 따로 적는다 (판 B 는 표가 내려가 있다). 다만 동시 판끼리 `redact` 의 **이름 목록**은 같아야 한다 —
+  다르면 사이트 팩을 읽을 때 오류다 (`variant_key_diff` — 검사가 없으면 상자를 빠뜨린 판의 쪽은 그 자리를 가리지 않은 채 나간다). 로더가
+  이름(겹치지 않는 글자)·bbox(정수 넷)·넓이를, `template check` 가 쪽 안인지를 보고, `template preview` 가 점선과 대각선으로 그린다.
+  `template variant` 는 기존 판의 상자를 그대로 베끼고 다시 확인하라고 알린다. `redact` 는 파이프라인의 결과를 바꾸지 않는다.
 - 명령 `export masked-pages OUT --date D | --page-id ID…`: 적재된 쪽만 (아닌 쪽은 이유별 수로 알린다). 파일 이름은 쪽 ID (`<쪽 ID>.png` — 원래 파일명을 쓰지 않는다).
   정합 그림이 없으면(`save_aligned = false`) 원본을 `doc_page.homography` 로 다시 편다 (`tools/printlayer.page_image` — 인쇄 층과 같은 길). 작업 DB 는 읽기
-  전용으로 열고 잠금을 잡지 않는다. git 작업 트리 안의 `OUT` 은 거절한다. 요약은 쪽 수, 종류별로 가린 상자의 수, 내지 않은 쪽의 수 — 이름·값 없이.
+  전용으로 열고 잠금을 잡지 않는다. git 작업 트리·접수 폴더·보관 폴더 안의 `OUT` 은 거절하고, `OUT` 은 내보낼 쪽이 있을 때만 만든다.
+  요약은 쪽 수, 종류별로 가린 상자의 수, 내지 않은 쪽의 수 — 이름·값 없이.
 - **템플릿이 아는 자리만 가린다.** 표 위에 걸쳐 쓴 메모, 수 칸에 적은 이름, 템플릿에 적지 않은 인쇄는 남는다. 그래서 내보낸 그림은 사람이 보고 나서 쓰고
   (명령의 요약이 그렇게 말한다), 내보낸 폴더도 현장 데이터다 — 가렸다고 저장소·이슈에 넣어도 되는 것이 아니다.
 - 화면(홈·문서 화면·검수 화면)의 그림은 가리지 않는다 — 127.0.0.1 에서 검수하는 사람이 본다.

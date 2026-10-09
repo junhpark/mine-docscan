@@ -26,8 +26,7 @@
 
 ```toml
 [site]
-name = "synthetic"                 # 짧은 식별자 — 엑셀 폴더·통합 DB 가 어느 사이트의 사본인지 적는 이름 (없으면 자동 내보내기·싣기가
-                                   # 꺼지고 export excel·publish 가 거절한다. 바꾸는 순서는 DATA.md "사이트 이름을 바꾸려면")
+name = "synthetic"                 # 짧은 식별자 — 엑셀 폴더·통합 DB 가 어느 사이트의 사본인지 적는 이름. 적어야 한다 (아래 "[site] name")
 title = "…"                        # 사람이 읽는 이름
 
 [ingest]
@@ -77,6 +76,21 @@ test_share = 0.2
 ```
 
 코드에서는 `site.option("crosscheck.haul", "exclude_materials", [])` 처럼 읽는다. 새 옵션이 필요하면 여기에 절을 추가한다.
+
+### `[site] name` — 적어야 한다
+
+엑셀 폴더와 통합 DB 는 작업 DB 의 사본이고, 어느 사이트 팩의 사본인지 이 이름으로 적어 둔다 (엑셀은 기록 파일 `.minedocscan-export.json` 의
+`site`, 통합 DB 는 `pub_meta` 의 `site` — [ADR 0021](decisions/0021-publish-to-the-shared-db.md)·[0022](decisions/0022-exports-are-copies.md)).
+이름이 다른 사본에는 **쓰지도 지우지도 않는다** — 실제 DB 를 실어 둔 스키마에 합성 묶음의 작업 폴더로 `publish` 하자 문서 3·날짜 3 범위가
+묻지 않고 합성 행으로 바뀐 일이 있어서다 (URL 이 환경변수에 있는 PC 에서 합성 예제를 돌리면 일어난다 — tasks/0009 4.1 다). 합성 팩의 이름은
+`synthetic` 이다.
+
+- **적힌 이름만 쓴다** — 폴더 이름으로 대신하지 않는다 (폴더를 옮기면 바뀌고, 여러 사이트 팩의 폴더가 다 `site` 일 수 있다). 앞뒤 빈칸은 뗀다.
+- **없거나 빈 글자면** `serve`·`watch` 는 엑셀 폴더·통합 DB 가 설정되어 있어도 자동 내보내기·싣기를 끄고 시작할 때 한 줄로 알린다 (접수·처리·
+  검수는 돈다). `export excel`·`publish` 는 한 줄로 거절한다 (`publish` 는 종료 코드 2). `minedocscan info` 가 이름이 적혀 있는지 보여 준다.
+- 이름은 평가셋 분할의 소금값도 된다 — `[eval] split_salt` 가 없으면 이 이름, 이름도 없으면 폴더 이름 (위 `[eval]`). 그래서 **처음 적거나 바꾸기
+  전에 `[eval] split_salt` 를 먼저 적는다** — 아니면 test 날짜가 바뀐다. `info` 가 지금의 소금값과 적을 줄을 보여 준다. 바꾸는 순서 전체(기록 파일을
+  지우고 `publish --rebuild`)는 [DATA.md](DATA.md) "사본의 주인 — `[site] name`".
 
 ### `[haul_table]` — 월별 엑셀의 운반 표
 
@@ -214,6 +228,13 @@ fields:
 - 열 메타: `role: log` 는 `shift`(`day`/`night`), `role: matrix` 는 `slot`, `header_vehicle_no`, `header_operator`
 - `role: log` 는 페이지마다 차량번호·작성자가 필요하다. `meta_key` 필드를 검수 화면에서 입력하거나(권장), 라벨로 주거나, 메타 필드 모델이 읽는다.
   행렬의 `header_vehicle_no`·`header_operator` 는 그 화면의 후보 목록이 된다.
+- **겹침 규칙** (`role: log` 의 횟수 표 — `region`): **(광종, 편)이 같은 행이 둘 이상**이거나 **횟수 열의 `shift` 가 겹치면**(같은 주야의 열이 둘)
+  `template check` 의 오류다 — 한 쪽의 두 행이 월별 운반 표의 한 칸(날짜 × 주야 × 자리 × 광종·편)에 떨어진다. 핸들러가 적는 그대로 견준다:
+  광종·편은 글자로(`level: 1` 과 `level: "1"` 은 같은 칸), 횟수 열은 형식이 `integer` 인 `handwritten_number` 열만 (소수·시각 칸은 운반 행이 되지
+  않는다). 오류에 값(광종·편)은 나오지 않는다 — 행의 겹침은 겹친 쌍의 수만.
+  사이트 팩을 읽을 때는 막지 않는다 — 검사 전에 만든 템플릿으로 겹친 행이 적재되어 있으면 월별 운반 표는 **더하지 않고** 그 칸에 `겹침`, 그 줄의
+  합계를 비운다 (범례의 `겹침` 줄은 그런 파일에만). 예전처럼 뒤의 행이 앞의 행을 덮으면 값이 조용히 사라진다 — 합성 DB 에서 한 행을 겹치게 하자
+  값 칸 71 → 70, 합 309 → 305 인데 그 줄의 합계는 확정으로 나왔다 (tasks/0009 1절 다. 실제 3일치에는 겹침이 없다). 교차검증 시트는 그대로다.
 
 **`usage`** — 장비 가동 일보: 장비 한 대의 하루 (ADR 0016). `handler_options` 는 없다. 표마다 **역할**(`role`)을 적는다:
 
@@ -537,6 +558,10 @@ operator     = "op-v1"
 
 ## 새 양식을 추가하는 절차
 
+처음부터 끝까지의 보기는 설명서 [7장 새 양식 더하기](manual/7-새-양식-더하기.md) — 합성 유류일지(`synth --v2-forms` 의 `fuel_log`, 핸들러
+`generic`)를 코드 변경 없이 이 절차로 더한다. 같은 순서(`template init` → `add-region` → 열·행 → 확인)로 만든 유류일지 템플릿의 칸은 생성기의
+템플릿과 4 px 안이고 `oracle` 의 결과가 같다 (`tests/test_v2_forms.py`, slow).
+
 1. **기준 이미지 고르기** — 빈 양식이 가장 좋다. 없으면 글씨가 적고 반듯하게 스캔된 한 장.
 2. **뼈대 만들기**
    ```bash
@@ -557,6 +582,7 @@ operator     = "op-v1"
    ```bash
    minedocscan template check  <site>/templates/<이름>            # 오류를 전부: 읽기 오류, 겹치는 칸, 쪽 밖의 칸, 역할에 필요한 칸,
                                                                   #   형식과 종류의 불일치, 열·행 이름 겹침, 열 이름 display,
+                                                                  #   운반 일보의 겹친 행·주야 열(위 "겹침 규칙"),
                                                                   #   redact 상자(쪽 밖·넓이·이름 겹침) … (있으면 종료 코드 1)
    minedocscan template preview <site>/templates/<이름>           # 칸·필드의 테두리·이름·종류·형식·역할·행 번호와 가릴 자리를 기준 이미지 위에
    minedocscan template preview <site>/templates/<이름> --scan <PDF> --page 3   # 그 쪽을 정합한 위에 — 칸이 글씨에 맞는지

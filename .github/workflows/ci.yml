@@ -18,16 +18,29 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - run: pip install -e ".[dev]"
+      # markdown: 설명서의 manual.html 시험 (tasks/0009 4.8 — [docs] 의 나머지 playwright 는 갈무리를 만들 때만)
+      - run: pip install -e ".[dev]" "markdown>=3.5"
       - run: ruff check .
-      # 합성 양식으로 전체 시험. 실데이터 회귀(-m realdata)는 데이터가 없으므로 건너뛴다
-      - run: pytest
+      # 합성 양식으로 전체 시험. 실데이터 회귀(-m realdata)는 데이터가 없으므로 건너뛴다. JUnit 과 환경은 시험 성적서로 (report 작업)
+      - run: pytest --junitxml=junit/junit.xml
+      - run: python scripts/test_report.py env --out junit/env.json
+        if: always()
       # 제3자 라이선스 (tasks/0009 4.3 나): .[postgres] 를 설치한 환경의 닫힘으로 같은 검사 — 윈도우 묶음의 닫힘(tzdata …)과는
       # 조금 다르다. 묶음의 목록은 윈도우 작업이 묶음을 만들 때 wheels/ 로 검사한다 (tasks/0009 단계 5 — scripts/bundle.py)
       - run: pip install -e ".[postgres]"
-      - run: python scripts/licenses.py --installed postgres --check --out THIRD_PARTY_NOTICES.txt
+      - run: python scripts/licenses.py --installed postgres --check --out THIRD_PARTY_NOTICES.txt | tee junit/licenses.txt
+        shell: bash                     # -eo pipefail — tee 가 --check 의 종료 코드를 삼키지 않게
       # 자가 시험 (tasks/0009 4.6): 설치한 명령 그대로, 저장해 둔 결과 없이 — 3분 안이어야 한다
-      - run: /usr/bin/time -f "selftest %e s" minedocscan selftest --out selftest-out && cat selftest-out/selftest.md
+      - run: /usr/bin/time -f "selftest %e s" minedocscan selftest --out junit/selftest && cat junit/selftest/selftest.md
+      # 행렬의 두 갈래는 needs 에서 결과가 하나로 합쳐진다 — 갈래마다의 결과를 성적서로
+      - run: mkdir -p junit && echo "${{ job.status }}" > junit/job-result.txt
+        if: always()
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-test-${{ matrix.python-version }}
+          retention-days: 14
+          path: junit/
 
   windows:
     # 윈도우에서 돈다 (tasks/0009 4.4): 현장 PC 는 윈도우다. 러너의 기본 코드 페이지(cp1252)로 표준 출력을 파일에 묶은 명령, 대소문자·
@@ -42,7 +55,15 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev,postgres]"
       - run: python -c "import sys, locale; print(sys.version, locale.getpreferredencoding(False), sys.stdout.encoding)"
-      - run: pytest --durations=30
+      - run: pytest --durations=30 --junitxml=junit/junit.xml
+      - run: python scripts/test_report.py env --out junit/env.json
+        if: always()
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-windows
+          retention-days: 14
+          path: junit/
 
   windows-install:
     # 오프라인 설치 묶음 (tasks/0009 4.5 바): 묶음 만들기(인터넷) → 망을 막고 install.ps1 → 새 창처럼 PATH·설정을 레지스트리에서 →
@@ -61,16 +82,24 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: 묶음 만들기
+        id: bundle
         run: |
           "APP=$env:RUNNER_TEMP\app" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "DATA=$env:RUNNER_TEMP\data" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          python -m pip install --quiet "markdown>=3.5"
+          $t0 = Get-Date
           python scripts/bundle.py --out "$env:RUNNER_TEMP\dist"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-Content "$env:RUNNER_TEMP\dist\bundle-report.json"
           $zip = Get-ChildItem "$env:RUNNER_TEMP\dist\minedocscan-*-win64.zip"
           "bundle bytes: $($zip.Length)"
+          "bundle_mb=$([math]::Round($zip.Length / 1MB, 1))" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          "seconds=$([int]((Get-Date) - $t0).TotalSeconds)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           Expand-Archive $zip.FullName -DestinationPath "$env:RUNNER_TEMP\b"
+          $m = Get-Content -Raw -Encoding UTF8 (Get-ChildItem "$env:RUNNER_TEMP\b\*\manual.html").FullName
+          if ($m -notmatch 'data:image/png;base64,' -or $m -match 'src="(?!data:)') { throw "manual.html is not one file with its pictures" }
       - name: 합성 사이트 팩과 데이터 폴더 (PATH 에 없는 개발용 venv 로 — 설치할 것과 섞이지 않게)
+        id: demo
         run: |
           python -m venv "$env:RUNNER_TEMP\devenv"
           & "$env:RUNNER_TEMP\devenv\Scripts\python.exe" -m pip install --quiet -e .
@@ -78,6 +107,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           New-Item -ItemType Directory -Force "$env:DATA\archive", "$env:DATA\work", "$env:DATA\inbox", "$env:DATA\excel" | Out-Null
       - name: 설치 (망을 막고)
+        id: install
         run: |
           $env:PIP_NO_INDEX = '1'; $env:HTTP_PROXY = 'http://127.0.0.1:9'; $env:HTTPS_PROXY = 'http://127.0.0.1:9'
           $b = (Get-ChildItem "$env:RUNNER_TEMP\b" -Directory)[0].FullName
@@ -86,7 +116,9 @@ jobs:
             -Archive "$env:DATA\archive" -Work "$env:DATA\work" -Inbox "$env:DATA\inbox" -ExcelDir "$env:DATA\excel" -Reviewer ci
           if ($LASTEXITCODE -ne 0) { exit 1 }
           "install seconds: $([int]((Get-Date) - $t0).TotalSeconds)"
+          "seconds=$([int]((Get-Date) - $t0).TotalSeconds)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
       - name: 새 창처럼 — 사용자 PATH·MINEDOCSCAN_CONFIG, 판, 설치한 자가 시험
+        id: fresh
         run: |
           $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
           $env:MINEDOCSCAN_CONFIG = [Environment]::GetEnvironmentVariable('MINEDOCSCAN_CONFIG', 'User')
@@ -99,8 +131,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $r = [IO.File]::ReadAllText("$env:RUNNER_TEMP\selftest\selftest.json", [Text.Encoding]::UTF8) | ConvertFrom-Json
           "selftest seconds: $($r.seconds)"
+          "selftest_seconds=$($r.seconds)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           if ($r.seconds -ge 180) { throw "selftest took $($r.seconds) s (limit 180 s)" }
       - name: 작업 스케줄러의 serve
+        id: serve
         run: |
           $task = Get-ScheduledTask -TaskName minedocscan-serve
           $a = $task.Actions[0]; $s = $task.Settings
@@ -129,19 +163,24 @@ jobs:
           if (-not $ok) { $text; throw "/api/home did not answer 200" }
           if ($text -notmatch '[\uAC00-\uD7A3]' -or $text -notmatch 'http://127\.0\.0\.1:8765/') { $text; throw "log is not UTF-8 Korean text with the URL" }
           "serve started by: $how"
+          "started_by=$how" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
       - name: 같은 묶음으로 다시 설치 (올리기) — 설정이 그대로
+        id: upgrade
         run: |
           $env:PIP_NO_INDEX = '1'; $env:HTTP_PROXY = 'http://127.0.0.1:9'; $env:HTTPS_PROXY = 'http://127.0.0.1:9'
           $cfg = [Environment]::GetEnvironmentVariable('MINEDOCSCAN_CONFIG', 'User')
           $before = (Get-FileHash $cfg).Hash
           $b = (Get-ChildItem "$env:RUNNER_TEMP\b" -Directory)[0].FullName
+          $t0 = Get-Date
           powershell -NoProfile -ExecutionPolicy Bypass -File "$b\install.ps1" -InstallDir $env:APP -Reviewer ci -NoTask -Quiet
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          "seconds=$([int]((Get-Date) - $t0).TotalSeconds)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           if ((Get-FileHash $cfg).Hash -ne $before) { throw "config changed" }
           & "$env:APP\python\Scripts\minedocscan.exe" --version
           if ($LASTEXITCODE -ne 0) { throw "minedocscan.exe broken after the upgrade swap" }
           Stop-ScheduledTask -TaskName minedocscan-serve -ErrorAction SilentlyContinue
       - name: 손상된 묶음은 멈춘다
+        id: tampered
         run: |
           $b = (Get-ChildItem "$env:RUNNER_TEMP\b" -Directory)[0].FullName
           Copy-Item $b "$env:RUNNER_TEMP\broken" -Recurse
@@ -152,6 +191,7 @@ jobs:
           if (Test-Path "$env:RUNNER_TEMP\app2\python") { throw "a tampered bundle unpacked python" }
           $global:LASTEXITCODE = 0
       - name: 지우기 — 프로그램만
+        id: uninstall
         run: |
           $cfg = [Environment]::GetEnvironmentVariable('MINEDOCSCAN_CONFIG', 'User')
           $b = (Get-ChildItem "$env:RUNNER_TEMP\b" -Directory)[0].FullName
@@ -166,15 +206,28 @@ jobs:
             if (-not (Test-Path $keep)) { throw "uninstall removed what it must keep: $keep" }
           }
           "uninstall: program only"
+      - name: 단계마다의 결과 (시험 성적서의 설치 시험)
+        if: always()
+        env:
+          STEPS: ${{ toJSON(steps) }}
+        run: |
+          [IO.File]::WriteAllText("$env:RUNNER_TEMP\install-steps.json", $env:STEPS, (New-Object System.Text.UTF8Encoding $false))
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: windows-bundle
           retention-days: 14
+          path: ${{ runner.temp }}\dist\minedocscan-*-win64.zip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-install-report
+          retention-days: 14
           path: |
-            ${{ runner.temp }}\dist\minedocscan-*-win64.zip
             ${{ runner.temp }}\dist\bundle-report.json
+            ${{ runner.temp }}\dist\licenses.txt
             ${{ runner.temp }}\selftest
+            ${{ runner.temp }}\install-steps.json
 
   lowest:
     # pyproject 의 하한(OpenCV 4.9, numpy 1.26, openpyxl 3.1.0, pypdfium2 4.30)에서도 같은 시험. 위 작업은 최신판만 받는다 —
@@ -188,7 +241,15 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev]" "opencv-python-headless==4.9.0.80" "numpy==1.26.4" "openpyxl==3.1.0" "pypdfium2==4.30.0"
       - run: python -c "import cv2, numpy, openpyxl, pypdfium2; print(cv2.__version__, numpy.__version__, openpyxl.__version__, pypdfium2.version.PYPDFIUM_INFO)"
-      - run: pytest
+      - run: pytest --junitxml=junit/junit.xml
+      - run: python scripts/test_report.py env --out junit/env.json
+        if: always()
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-lowest
+          retention-days: 14
+          path: junit/
 
   slow:
     # 기본 pytest 에서 떼어 낸 무거운 시험 (-m slow): 다시 처리의 불변식 흔들기(결정·검수를 섞어 넣고 그때마다 처음부터 만든 DB 와 비교),
@@ -203,7 +264,23 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -e ".[dev]"
-      - run: pytest -m slow
+      - run: pytest -m slow --junitxml=junit/junit.xml
+      - run: python scripts/test_report.py env --out junit/env.json
+        if: always()
+      # 확장성 표 (tasks/0009 4.7 다 — 시험 성적서 6절): 가상 양식(V2)·보통과 거친 글씨, 3일
+      - run: python scripts/v2_metrics.py --out v2-metrics/v2-metrics.json --days 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-slow
+          retention-days: 14
+          path: junit/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v2-metrics
+          retention-days: 14
+          path: v2-metrics/
 
   postgres:
     # 통합 DB 로 싣기 (tasks/0008 4.8): PostgreSQL 16 서비스 컨테이너에 싣고 불변식(대상의 행 = 작업 DB 의 행)을 본다.
@@ -227,7 +304,15 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -e ".[dev,postgres]"
-      - run: pytest -m postgres -s
+      - run: pytest -m postgres -s --junitxml=junit/junit.xml
+      - run: python scripts/test_report.py env --out junit/env.json
+        if: always()
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-postgres
+          retention-days: 14
+          path: junit/
 
   train:
     # 숫자 인식기 학습 시험 (torch 필요, 몇 분). 합성 셀만으로 학습한 모델의 문턱, torch ↔ OpenCV 출력 일치,
@@ -243,3 +328,38 @@ jobs:
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e ".[dev,train]"
       - run: pytest -m train -s
+
+  report:
+    # 시험 성적서 (tasks/0009 4.9): 다른 작업이 끝난 뒤 산출물을 모아 scripts/test_report.py → 시험성적서-<판>.md (산출물).
+    # if: always() — 실패한 작업도 성적서에 실패로 나온다. 묶음 zip 은 받지 않는다 (windows-install-report 만)
+    needs: [test, windows, windows-install, lowest, slow, postgres]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: junit-*
+          path: artifacts
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: windows-install-report
+          path: artifacts/windows-install-report
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: v2-metrics
+          path: artifacts/v2-metrics
+      - run: python scripts/test_report.py build --artifacts artifacts --out report && cat report/*.md
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          retention-days: 30
+          path: report/

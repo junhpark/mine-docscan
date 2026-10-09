@@ -158,3 +158,16 @@ def test_non_finite_numbers_are_config_errors(tmp_path, monkeypatch, text, pat):
     with pytest.raises(ConfigError, match=pat) as ei:
         load_settings(cfg)
     assert "\n" not in str(ei.value)
+
+
+def test_an_empty_config_variable_is_unset_and_a_folder_is_a_config_error(tmp_path, monkeypatch):
+    """빈 MINEDOCSCAN_CONFIG 는 없는 것과 같다 (지금 폴더를 열다 트레이스백으로 죽었다 — 설명서의 검토). 폴더를 주면 한 줄의 설정 오류."""
+    from minedocscan.config import ConfigError
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MINEDOCSCAN_SITE", raising=False)
+    monkeypatch.setenv("MINEDOCSCAN_CONFIG", "")
+    assert load_settings().site is None
+    monkeypatch.setenv("MINEDOCSCAN_CONFIG", str(tmp_path))
+    with pytest.raises(ConfigError, match="폴더"):
+        load_settings()

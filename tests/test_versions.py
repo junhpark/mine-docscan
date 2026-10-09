@@ -26,6 +26,7 @@ def revised(tmp_path_factory):
     return {"synth": synth, "settings": settings, "pipe": pipe, "root": root}
 
 
+@pytest.mark.slow                       # 기본 시험 시간을 0008 의 1.15배 안에 (tasks/0009 — CI 의 slow 작업)
 def test_pages_go_to_the_version_valid_that_day(revised):
     synth, con = revised["synth"], revised["pipe"].con
     site = SitePack(synth.site)

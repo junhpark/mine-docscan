@@ -54,6 +54,7 @@ def run_cli(tmp_path, capsys, *extra) -> tuple[int, dict, str]:
     return code, json.loads((out / "selftest.json").read_text(encoding="utf-8")), text
 
 
+@pytest.mark.slow                       # 기본 시험 시간을 0008 의 1.15배 안에 (tasks/0009 — CI 의 slow 작업)
 def test_selftest_passes_and_the_results_name_no_user_path(quick, tmp_path, capsys, monkeypatch):
     made = []
     real = tempfile.mkdtemp

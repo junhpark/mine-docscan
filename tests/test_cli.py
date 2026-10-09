@@ -54,8 +54,10 @@ def test_run_report_eval(env, capsys):
     assert "교차검증" in capsys.readouterr().out
 
 
+@pytest.mark.slow                       # 기본 시험 시간을 0008 의 1.15배 안에 (tasks/0009 — CI 의 slow 작업)
 def test_regress_roundtrip(env, capsys):
     root, common = env
+    assert main(["run", "--skip-existing"] + common) == 0                    # 작업 DB 가 있게 (slow 만 돌 때 — 앞 시험 없이)
     assert main(["regress", "--update", "--inputs", "."] + common) == 0
     baseline = root / "data" / "site" / "expected" / "regression.json"
     assert json.loads(baseline.read_text(encoding="utf-8"))["inputs"] == ["."]
@@ -68,7 +70,7 @@ def test_regress_roundtrip(env, capsys):
     from minedocscan.store.db import open_db
 
     con = open_db(f"sqlite:///{(root / 'work' / 'minedocscan.db').as_posix()}")
-    fid = con.execute("SELECT field_id FROM doc_field WHERE kind='handwritten_number' AND has_value=1").fetchone()[0]
+    fid = con.execute("SELECT field_id FROM doc_field WHERE kind='handwritten_number' ORDER BY field_id").fetchone()[0]   # 어느 칸이든
     con.close()
     append(root / "data" / "site" / "reviews" / "reviews.jsonl", Review(fid, "value", "9", "jp"))
     assert main(["regress"] + common) == 0
