@@ -226,7 +226,7 @@ def test_http_routes_checks_and_the_log_has_no_names(ops, capsys):
 # ── 스레드 둘 ───────────────────────────────────────────────────────────────
 def test_screen_saves_and_crops_while_the_worker_is_in_the_middle_of_a_document(ops):
     """작업 스레드가 문서를 처리하는 중(쪽 하나를 커밋하고 다음 쪽 전)에 화면 스레드의 검수 저장과 크롭 요청이 성공한다 —
-    연결 둘, WAL, PyMuPDF 잠금. 순서는 신호로 맞춘다 (시간을 재지 않는다)."""
+    연결 둘, WAL, PDF 잠금(PDFium). 순서는 신호로 맞춘다 (시간을 재지 않는다)."""
     pipe = ops["pipe"]
     b, a = ops["ids"]["b_2030-01-07"], ops["ids"]["a_2030-01-07"]
     screen = open_db(ops["st"].resolved_db_url)

@@ -370,7 +370,7 @@ erDiagram
 
 | 층 | 테이블 | 내용 |
 |---|---|---|
-| 문서 | `doc_document` | 원본 파일. ID = SHA-256 앞 16자리 → 같은 스캔의 중복 접수 차단. `source_rel`(archive_root 기준)로 다른 컴퓨터에서도 원본을 찾는다. 상태·오류·경고(`warning` — 복구해서 연 PDF, `[pipeline] damaged_pdf = "warn"`). 등록한 시각 `received_at`(접수한 문서는 보관 폴더 이름에서 — 다시 처리해도 바뀌지 않는다), 날짜의 출처 `date_source`(`decision`·`label`·`filename`), 요청 번호 `work_requested`·`work_done` (스키마 8) |
+| 문서 | `doc_document` | 원본 파일. ID = SHA-256 앞 16자리 → 같은 스캔의 중복 접수 차단. `source_rel`(archive_root 기준)로 다른 컴퓨터에서도 원본을 찾는다. 상태·오류·경고(`warning` — 끝 표시가 없는데 연 PDF, `[pipeline] damaged_pdf = "warn"`). 등록한 시각 `received_at`(접수한 문서는 보관 폴더 이름에서 — 다시 처리해도 바뀌지 않는다), 날짜의 출처 `date_source`(`decision`·`label`·`filename`), 요청 번호 `work_requested`·`work_done` (스키마 8) |
 | | `doc_page` | 페이지별 양식(동시 판이면 고른 판), 분류 여유, 정합 품질, 정합 이미지 경로, 호모그래피(렌더링한 쪽 픽셀 → 템플릿 픽셀)와 렌더링 dpi, 상태, 오류. 값 유무를 잰 인쇄 층의 해시 `print_sha`(쓰지 않았으면 NULL), 동시 판마다의 괘선 오차 `variant_errs`(JSON `{판: 오차 \| null}`, 판이 하나면 NULL) (§5, 스키마 7). 방향 `rotation`, 다시 스캔으로 붙잡혔으면 `duplicate_of`(앞쪽, 외래 키 없음)·`duplicate_sim` (스키마 8) |
 | | `doc_field` | 셀 하나. 좌표(bbox), 값의 형식(`format`, 스키마 6), 잉크, 값 유무(기계 `has_value_raw` / 최종 `has_value`), 원문 `value_raw`, 최종값 `value_final`, 신뢰도, 후보, 값을 만든 주체, 검수 상태(`review_status`)와 기계가 정한 상태(`status_raw` — 자동 적재 오류율의 분모) |
 | | `doc_page_meta` | 쪽 × 메타 키(`vehicle_no`, `operator`, `date`, `date.month`, `date.day` …): 최종 값과 출처(`review`·`label`·`filename`·`machine`), 그 키를 적는 필드, 기계가 읽은 값·신뢰도·상태(`auto`·`pending`·`unlisted`·`empty`), 대조 결과 (§5, 스키마 5) |
@@ -662,8 +662,13 @@ minedocscan serve --reviewer jp          한 프로세스, 스레드 둘, 127.0.
 - `minedocscan watch [--once]` 는 화면 없이 작업 스레드의 바퀴만 돈다 — 바퀴 끝의 엑셀·싣기도 같다. `serve --no-watch` 와 `run` 은 내보내지 않는다.
 - 홈의 남은 수는 DB 가 바뀔 때(`PRAGMA data_version`, `total_changes`)만 다시 센다 — 5초마다 대기열을 통째로 만들지 않는다. 표본 대기열(`haul-numbers`·
   `checks`)은 홈에 두지 않는다.
-- **PyMuPDF 는 여러 스레드에서 같이 쓰면 안 된다** — `imaging/io.PDF_LOCK` 하나로 PyMuPDF 로 읽는 곳(열기·쪽 꺼내기·렌더링·닫기)을 전부
-  감싼다 (합성 PDF 를 쓰는 `tools/synth.py` 는 `serve` 안에서 돌지 않아 밖이다). `load_pages` 는 쪽을 내주는 동안 잠금을 놓는다.
+- **PDF 는 PDFium(pypdfium2)으로 읽는다** ([ADR 0023](decisions/0023-pdf-with-pdfium.md)). PDFium 은 여러 스레드에서 같이 쓰면 안 된다 —
+  `imaging/io.PDF_LOCK` 하나로 PDFium 을 부르는 곳(열기·쪽 꺼내기·렌더링·닫기)을 전부 감싸고 쪽·문서는 잠금 안에서 직접 닫는다 (가비지
+  수집이 다른 스레드에서 닫지 않게). `load_pages` 는 쪽을 내주는 동안 잠금을 놓는다. 파일은 바이트로 읽어 넘긴다 (한글 경로를 라이브러리에
+  넘기지 않는다). 그림의 크기 = ceil(쪽의 pt × dpi / 72 − 0.001) — PyMuPDF 와 같은 규칙(`page_px`), 그 크기의 회색조 비트맵에 PDFium 이 쪽을
+  맞춰 그린다 (pypdfium2 의 `render(scale)` 는 봐주지 않는 올림이라 합성 A4 가 1655 px 이 된다). **손상** = 열리지 않거나 마지막 1 KB 에 `%%EOF` 가 없다 (`damaged_pdf` —
+  fail 은 실패, warn 은 열리면 경고). 합성 PDF 는 라이브러리 없이 쓴다 (`tools/pdfwrite` — 쪽마다 그림 하나, JPEG 는 `DCTDecode` 그대로,
+  무손실은 `FlateDecode`, `/ID`·만든 시각 없이: 같은 입력이면 바이트까지 같다).
 - 쪽 그림(`/page.png`)은 원본에서 그때그때 렌더링하고 방향을 알면 세운다 (몇 장만 메모리에, 디스크에 쓰지 않는다).
 - 서버 로그에는 경로와 상태 코드만(질의 — 내려받기의 날짜 — 도 없이), `watch`·`serve` 의 요약에는 수와 문서 ID 만 — 파일명·날짜·메모를 찍지 않는다.
   통합 DB 는 호스트·DB·스키마만 (URL·비밀번호 없이).

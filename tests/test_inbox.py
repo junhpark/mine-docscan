@@ -363,3 +363,17 @@ def test_complete_checks_the_jpeg_end_marker(tmp_path):
     whole.write_bytes(buf.tobytes())
     cut.write_bytes(buf.tobytes()[:-40])
     assert ib.complete(whole) and not ib.complete(cut)
+
+
+def test_complete_waits_for_the_pdf_end_marker(tmp_path):
+    """끝이 덜 쓰인 PDF(마지막 1 KB 에 %%EOF 가 없다 — 열리더라도)는 "아직 쓰이는 중"이다 (tasks/0009 4.3 — 손상 방침 fail 과 같다)."""
+    import numpy as np
+
+    from minedocscan.tools.pdfwrite import write_images
+
+    whole = write_images(tmp_path / "w.pdf", [np.full((300, 200), 220, np.uint8)])
+    data = whole.read_bytes()
+    noeof, cut = tmp_path / "n.pdf", tmp_path / "c.pdf"
+    noeof.write_bytes(data.rstrip()[: -len(b"%%EOF")])
+    cut.write_bytes(data[: len(data) // 2])
+    assert ib.complete(whole) and not ib.complete(noeof) and not ib.complete(cut)

@@ -27,3 +27,4 @@
 | [0020](0020-rescanned-pages.md) | 다시 스캔한 쪽은 같은 날·같은 계열 안에서 손글씨 자리의 유사도로, 문서의 순서로 붙잡고 사람이 정한다 | 채택 |
 | [0021](0021-publish-to-the-shared-db.md) | 작업 DB 는 SQLite 그대로, 통합 DB(PostgreSQL)에는 문서·날짜 단위 지문으로 결과의 사본을 싣는다 (0005 의 보완) | 채택 |
 | [0022](0022-exports-are-copies.md) | 내보낸 것은 사본이다 — 한 방향, 확정되지 않은 값은 싣지 않는다, 가린 그림은 템플릿이 아는 자리만 | 채택 |
+| [0023](0023-pdf-with-pdfium.md) | PDF 는 PDFium(pypdfium2)으로 읽는다 — 크기는 PyMuPDF 와 같은 규칙, 손상은 끝 표시로 | 채택 |

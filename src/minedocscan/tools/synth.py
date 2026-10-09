@@ -909,22 +909,12 @@ def _fill_matrix(blank, spec, dt, rng, low: bool = False) -> np.ndarray:
 
 
 def _write_pdf(path: Path, pages: list[np.ndarray], dpi: int = DPI, lossless: bool = False) -> None:
-    """쪽들을 PDF 로. 기본은 복합기 스캔처럼 JPEG(품질 85), lossless=True 면 PNG — 돌린 쪽이 바로 선 쪽을 정확히 돌린 것이어야 할 때
+    """쪽들을 PDF 로 (tools/pdfwrite — 라이브러리 없이, /ID·만든 시각 없이: 같은 seed 면 바이트까지 같아야 문서 ID 가 같다).
+    기본은 복합기 스캔처럼 JPEG(품질 85), lossless=True 면 화소 그대로(zlib) — 돌린 쪽이 바로 선 쪽을 정확히 돌린 것이어야 할 때
     (synth --intake: 접수 묶음과 견줄 묶음이 같은 화소)."""
-    import pymupdf
+    from .pdfwrite import write_images
 
-    doc = pymupdf.open()
-    for img in pages:
-        h, w = img.shape
-        page = doc.new_page(width=w * 72 / dpi, height=h * 72 / dpi)
-        ok, buf = (cv2.imencode(".png", img) if lossless else
-                   cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85]))     # 복합기 스캔처럼 JPEG 로 담는다
-        if not ok:
-            raise ValueError("페이지를 인코딩할 수 없습니다")
-        page.insert_image(page.rect, stream=buf.tobytes())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(str(path), no_new_id=True)      # 저장할 때 새 /ID 를 넣지 않는다: 같은 seed 면 바이트까지 같아야 문서 ID 가 같다
-    doc.close()
+    write_images(path, pages, dpi, lossless)
 
 
 def _meta_answers(source: str, day: str, t: dict) -> list[dict]:
@@ -1046,7 +1036,7 @@ def generate(out_dir: str | Path, days: int = 3, seed: int = 0, start: str = "20
     첫 묶음보다 뒤라 문서의 순서도 뒤다. truth["rescans"] = [{"page", "of": "<원래 파일>#<쪽>", "how"}]. 난수를 따로 쓰므로 앞의
     묶음은 바이트까지 그대로다.
     intake=True(넷째 날까지 — days ≥ 4)면 접수 폴더 시나리오 (tasks/0007 단계 6, _write_intake): OUT/inbox/ 에 일곱 가지 파일,
-    OUT/baseline/ 에 견줄 묶음(네 날을 바로 선 채로·날짜 있는 이름·빈 쪽 없이 — scans/ 와 같은 파일). 이 묶음의 PDF 는 쪽을 무손실(PNG)로
+    OUT/baseline/ 에 견줄 묶음(네 날을 바로 선 채로·날짜 있는 이름·빈 쪽 없이 — scans/ 와 같은 파일). 이 묶음의 PDF 는 쪽을 무손실(화소 그대로 — FlateDecode)로
     담는다. truth["intake"]: 접수 순서, 문서·쪽의 상태(넣을 결정을 적용한 뒤, null 인식기), 넣을 결정(날짜·버리기).
     display_names=True 면 템플릿에 표시 이름(display)을 넣는다 (tasks/0008 4.5) — template.yaml 만 바뀐다.
     """

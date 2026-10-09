@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS doc_document (
   status          TEXT NOT NULL,             -- received(등록, 처리 전·처리 중) | needs_date(날짜를 기다린다) | processed | needs_review
                                              -- | failed(문서를 읽지 못함) | discarded(사람이 버렸다) — tasks/0007 4.1
   error           TEXT,                      -- failed 일 때 예외 종류와 메시지. 셀 값은 적지 않는다
-  warning         TEXT,                      -- 처리는 했지만 알아야 할 것 (예: damaged_pdf = warn 으로 복구해서 연 PDF)
+  warning         TEXT,                      -- 처리는 했지만 알아야 할 것 (예: damaged_pdf = warn 으로 연, 끝 표시가 없는 PDF)
   created_at      TEXT NOT NULL,
   received_at     TEXT,                      -- 등록한 시각 (UTC). 다시 처리해도 바뀌지 않는다 — upsert 가 덮어쓰지 않는다 (insert_only)
   work_requested  INTEGER NOT NULL DEFAULT 0,   -- 다시 처리해 달라는 요청 번호 (요청마다 +1). upsert 로 쓰지 않는다 — 전용 UPDATE 로만

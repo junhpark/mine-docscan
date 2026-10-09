@@ -3,13 +3,16 @@
 cv2.imread / cv2.imwrite 는 Windows 에서 한글 경로를 읽고 쓰지 못한다. 현장 파일명은 대부분 한글이므로
 항상 여기의 함수를 쓴다 (np.fromfile + imdecode, imencode + tofile).
 
-PyMuPDF 는 여러 스레드에서 같이 쓰면 안 된다 (tasks/0007 4.9 — serve 의 작업 스레드는 쪽을 렌더링하고 화면 스레드는 크롭과 쪽 그림을
-렌더링한다). PyMuPDF 를 부르는 곳(열기·쪽 꺼내기·렌더링·닫기)은 전부 이 파일에 있고 PDF_LOCK 하나로 감싼다. 공개 함수가 잠금을
-잡고, 밑줄로 시작하는 도우미는 잡힌 채로 불린다고 본다. load_pages 는 쪽을 내주는 동안(yield)에는 잠금을 놓는다.
-(합성 PDF 를 쓰는 tools/synth._write_pdf 는 시험·합성 명령의 주 스레드에서만 돈다 — 화면과 같이 돌지 않는다.)
+PDF 는 PDFium(pypdfium2 — Apache-2.0/BSD-3)으로 읽는다 (ADR 0023 — PyMuPDF 는 AGPL-3.0 이라 바꿨다). PDFium 은 여러 스레드에서 같이
+쓰면 안 된다 (tasks/0007 4.9 — serve 의 작업 스레드는 쪽을 렌더링하고 화면 스레드는 크롭과 쪽 그림을 렌더링한다). PDFium 을 부르는
+곳(열기·쪽 꺼내기·렌더링·닫기)은 전부 이 파일에 있고 PDF_LOCK 하나로 감싼다. 공개 함수가 잠금을 잡고, 밑줄로 시작하는 도우미는
+잡힌 채로 불린다고 본다. load_pages 는 쪽을 내주는 동안(yield)에는 잠금을 놓는다. 쪽·문서는 잠금 안에서 직접 닫는다 (가비지 수집이
+다른 스레드에서 닫지 않게). 합성 PDF 는 라이브러리 없이 쓴다 (tools/pdfwrite).
 """
 from __future__ import annotations
 
+import atexit
+import math
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -19,7 +22,7 @@ import numpy as np
 
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 SUPPORTED_EXT = IMAGE_EXT | {".pdf"}
-PDF_LOCK = threading.RLock()        # PyMuPDF 를 부르는 곳 전부 (위의 설명)
+PDF_LOCK = threading.RLock()        # PDFium 을 부르는 곳 전부 (위의 설명)
 
 
 def imread_gray(path: str | Path) -> np.ndarray:
@@ -57,40 +60,111 @@ class DamagedPdfError(ValueError):
 
 
 DAMAGED_PDF_POLICIES = ("fail", "warn")
+EOF_WINDOW = 1024                   # %%EOF 를 찾는 파일 끝의 바이트 수 (실제 PDF 30개 모두 마지막 1 KB 안에 있었다 — tasks/0009 1절 나)
 
 
-def _open_pdf(path: Path, damaged: str = "fail", warnings: list[str] | None = None):
-    """PDF 를 연다. 라이브러리의 오류 메시지는 표준 출력에 찍지 않는다(--json).
+def pdf_has_eof(data: bytes) -> bool:
+    """파일의 마지막 1 KB 에 %%EOF 가 있나 — 전송 중 끊긴 PDF(50 %·90 %·99.9 % 로 자른 실제 묶음)는 셋 다 없었다."""
+    return b"%%EOF" in data[-EOF_WINDOW:]
 
-    라이브러리가 조용히 복구해서 연 파일(동기화 중 잘린 파일이 가장 흔하다)의 처리는 damaged 가 정한다:
+
+class _Pdf:
+    """열린 PDF (pypdfium2). 부르는 쪽이 PDF_LOCK 을 잡고 쓰고 닫는다."""
+
+    def __init__(self, doc, n: int, data: bytes = b""):
+        self.doc, self.page_count = doc, n
+        self._data = data                                # PDFium 이 읽는 메모리 — 닫을 때까지 놓지 않는다
+
+    def render(self, index: int, dpi: int) -> np.ndarray:
+        return _render_page(self.doc, index, dpi)
+
+    def close(self) -> None:
+        self.doc.close()
+        self._data = b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+_EXIT_HOOK: list[bool] = []
+
+
+def _pdfium():
+    """pypdfium2 (처음 부를 때 끝낼 때의 고리를 하나 건다: pypdfium2 는 import 할 때 PDFium 을 닫는 atexit 를 걸고 atexit 는 거꾸로 돈다 —
+    그보다 뒤에 건 우리 고리가 먼저 PDF_LOCK 을 잡아(놓지 않는다) serve 의 작업 스레드(데몬)가 쪽을 그리는 가운데 PDFium 이 닫히지 않게)."""
+    import pypdfium2 as pdfium
+
+    if not _EXIT_HOOK:
+        atexit.register(PDF_LOCK.acquire, timeout=30)
+        _EXIT_HOOK.append(True)
+    return pdfium
+
+
+def _open_pdf(path: Path, damaged: str = "fail", warnings: list[str] | None = None) -> _Pdf:
+    """PDF 를 연다 (파일을 바이트로 읽어서 — 한글 경로를 라이브러리에 넘기지 않는다). 라이브러리의 오류 글은 싣지 않는다 (예외의 종류만).
+
+    손상(tasks/0009 4.3 가): **열리지 않거나, 파일의 마지막 1 KB 에 %%EOF 가 없으면** 손상이다.
       fail  오류로 낸다 (기본) — 뒤쪽 쪽이 사라진 채 '양식 없음'으로 섞이면 손상을 알 수 없다
-      warn  그대로 연다. warnings 에 한 줄 남긴다 — 스캐너가 만든 멀쩡한 파일이 '복구 필요'로 읽힐 때를 위한 것
-    열 수조차 없는 파일(쓰레기 바이트, 0바이트)과 쪽이 하나도 없는 파일은 어느 쪽이든 오류다.
+      warn  열 수 있으면 열고 warnings 에 한 줄 남긴다 (열 수 없으면 fail 과 같다) — 끝 표시를 빼먹는 스캐너를 위한 것
+    쪽이 하나도 없는 파일은 어느 쪽이든 오류다.
     """
-    import pymupdf
-
+    pdfium = _pdfium()
     if damaged not in DAMAGED_PDF_POLICIES:
         raise ValueError(f"damaged_pdf 는 {DAMAGED_PDF_POLICIES} 중 하나: {damaged!r}")
-    pymupdf.TOOLS.mupdf_display_errors(False)
-    doc = pymupdf.open(str(path))
-    if doc.page_count == 0:
-        doc.close()
+    data = path.read_bytes()
+    from pypdfium2 import raw as pdfium_c
+
+    # 손잡이로 직접 연다 — pypdfium2 의 PdfDocument(bytes) 는 쪽이 0개인 파일을 "열 수 없다"로 거절하고 손잡이를 닫지 않는다
+    handle = pdfium_c.FPDF_LoadMemDocument64(data, len(data), None)
+    if not handle:
+        raise DamagedPdfError(f"PDF 를 열 수 없습니다 (잘린 파일?): {path.name}. 원본을 다시 받으세요")
+    n = pdfium_c.FPDF_GetPageCount(handle)
+    if n < 1:
+        pdfium_c.FPDF_CloseDocument(handle)
         raise DamagedPdfError(f"PDF 에 쪽이 없습니다: {path.name}")
-    if doc.is_repaired:
+    doc = pdfium.PdfDocument(handle)                     # 닫으면 손잡이를 닫는다. 바이트는 _Pdf 가 그때까지 들고 있다
+    if not pdf_has_eof(data):
         if damaged != "warn":
             doc.close()
-            raise DamagedPdfError(f"PDF 가 손상되어 복구가 필요했습니다 (잘린 파일?): {path.name}. 원본을 다시 받으세요 "
+            raise DamagedPdfError(f"PDF 의 끝 표시(%%EOF)가 없습니다 (잘린 파일?): {path.name}. 원본을 다시 받으세요 "
                                   "(스캐너가 만든 멀쩡한 파일이면 [pipeline] damaged_pdf = \"warn\")")
         if warnings is not None:
-            warnings.append(f"PDF 가 손상되어 복구해서 열었습니다 (쪽 {doc.page_count}개): {path.name}")
-    return doc
+            warnings.append(f"PDF 의 끝 표시(%%EOF)가 없지만 열어서 처리했습니다 (쪽 {n}개): {path.name}")
+    return _Pdf(doc, n, data)
 
 
-def _render_page(page, dpi: int) -> np.ndarray:
-    import pymupdf
+SIZE_FUZZ = 0.001                  # 그림 크기의 올림에서 봐주는 소수 — PyMuPDF(MuPDF 의 fz_round_rect)와 같다 (1000.001 → 1000, 1000.0011 → 1001)
 
-    pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
-    return np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width).copy()
+
+def page_px(pt: float, dpi: int) -> int:
+    """쪽의 길이(pt) → 화소: ceil(pt × dpi / 72 − 0.001) — PyMuPDF 와 같은 규칙 (재 보니 반올림이 아니라 0.001 을 봐주는 올림이다:
+    1165.36 → 1166). pypdfium2 의 render(scale) 는 봐주지 않는 올림이라 합성 A4(1654.0000000000002)가 1655 px 이 된다 (tasks/0009 1절 나).
+    실제 스캔의 그림 크기가 PyMuPDF 로 읽던 때와 같다."""
+    return max(1, math.ceil(pt * dpi / 72 - SIZE_FUZZ))
+
+
+def _render_page(doc, index: int, dpi: int) -> np.ndarray:
+    """쪽 하나를 회색조로. 그림의 크기 = page_px (PyMuPDF 와 같은 규칙) — 그 크기의 비트맵에 PDFium 이 쪽을 맞춰 그린다."""
+    import ctypes
+
+    from pypdfium2 import raw as pdfium_c
+
+    page = doc[index]
+    try:
+        w, h = page_px(page.get_width(), dpi), page_px(page.get_height(), dpi)
+        buf = (ctypes.c_ubyte * (w * h))()
+        bitmap = pdfium_c.FPDFBitmap_CreateEx(w, h, pdfium_c.FPDFBitmap_Gray, buf, w)
+        try:
+            pdfium_c.FPDFBitmap_FillRect(bitmap, 0, 0, w, h, 0xFFFFFFFF)
+            pdfium_c.FPDF_RenderPageBitmap(bitmap, page, 0, 0, w, h, 0, pdfium_c.FPDF_ANNOT | pdfium_c.FPDF_GRAYSCALE)
+        finally:
+            pdfium_c.FPDFBitmap_Destroy(bitmap)
+        return np.frombuffer(buf, np.uint8).reshape(h, w).copy()
+    finally:
+        page.close()
 
 
 def load_pages(path: str | Path, dpi: int = 200, damaged: str = "fail",
@@ -109,7 +183,7 @@ def load_pages(path: str | Path, dpi: int = 200, damaged: str = "fail",
         try:
             for i in range(1, n + 1):
                 with PDF_LOCK:                                         # 쪽 하나를 렌더링하는 동안만 — 내주는 동안은 놓는다
-                    img = _render_page(doc.load_page(i - 1), dpi)
+                    img = doc.render(i - 1, dpi)
                 yield i, img
         finally:
             with PDF_LOCK:
@@ -148,7 +222,7 @@ def load_page(path: str | Path, page_no: int, dpi: int = 200, damaged: str = "fa
         with PDF_LOCK, _open_pdf(path, damaged) as doc:
             if not 1 <= page_no <= doc.page_count:
                 raise KeyError(f"{path} 에 {page_no}쪽이 없습니다 (전체 {doc.page_count}쪽)")
-            return _render_page(doc[page_no - 1], dpi)
+            return doc.render(page_no - 1, dpi)
     if page_no != 1:
         raise KeyError(f"{path} 는 이미지 한 장입니다 ({page_no}쪽 없음)")
     return imread_gray(path)

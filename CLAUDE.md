@@ -125,6 +125,7 @@ minedocscan regress         # 사이트 팩의 기준 수치와 비교 (pytest -
 python scripts/bigdb.py make ~/big --days 252         # 합성 작업 DB 를 한 해 규모(하루 약 5,000행)로 복제
 python scripts/bigdb.py measure ~/big --label after --json after.json   # 조각·명령의 시간과 최대 메모리 (싣기는 MINEDOCSCAN_TEST_PG_URL 이 있을 때)
 python scripts/bigdb.py report before.json after.json --out docs/test-report/scale-<날짜>.json   # 기준과 같이
+python scripts/licenses.py --installed postgres --check --out THIRD_PARTY_NOTICES.txt   # 제3자 라이선스 (묶음은 --wheels DIR) — 허용 목록 밖이면 1
 ```
 
 ## 여섯 가지 원칙
@@ -143,7 +144,7 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 | 위치 | 하는 일 |
 |---|---|
 | `config.py` | 설정 (환경변수 > TOML > 기본값). 경로를 코드에 적지 않는다. `[export]`·`[publish]` — 통합 DB 의 URL 은 환경변수로만(`repr` 에도 없다) |
-| `imaging/io.py` | 이미지·PDF 읽기/쓰기. **한글 경로 때문에 `cv2.imread/imwrite` 를 직접 쓰지 않는다**. PyMuPDF 로 읽고 렌더링하는 곳은 전부 `PDF_LOCK` 안 (serve 의 두 스레드 — `load_pages` 는 쪽을 내주는 동안 놓는다) |
+| `imaging/io.py` | 이미지·PDF 읽기/쓰기. **한글 경로 때문에 `cv2.imread/imwrite` 를 직접 쓰지 않는다**. PDF 는 PDFium(pypdfium2 — ADR 0023)으로, 파일을 바이트로 읽어 열고 크기는 PyMuPDF 와 같은 규칙 `page_px` — ceil(pt × dpi / 72 − 0.001). 손상 = 열리지 않거나 마지막 1 KB 에 `%%EOF` 가 없다 (`damaged_pdf`). PDFium 을 부르는 곳은 전부 `PDF_LOCK` 안 (serve 의 두 스레드 — `load_pages` 는 쪽을 내주는 동안 놓는다, 쪽·문서는 잠금 안에서 닫는다) |
 | `imaging/grid.py` | 표 괘선 검출 |
 | `imaging/align.py` | ORB + RANSAC 으로 기준 이미지에 정합, 괘선 재검출 오차로 품질 판정. 펴기는 `warp_to_template` 하나 (인쇄 층의 다시 펴기도 같은 그림). `align_upright`: 호모그래피의 회전각이 90° 단위로 0 이 아니면 `np.rot90` 으로 세워 다시 정합(저장하는 호모그래피는 원래 쪽 → 템플릿) |
 | `imaging/signature.py` | 다시 스캔한 쪽의 서명(ADR 0020): 정합 그림 → binarize → 지울 자리(인쇄 + 표 밖 필드, `Template.signature_mask`) 0 → 2×2 열기 → 16 px 칸의 잉크 수, 코사인 유사도, base64 글자열. DB 를 모른다 |
@@ -176,6 +177,7 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 | `pipeline/lock.py` | 파이프라인은 한 번에 하나 (DB 옆 `pipeline.lock` 에 배타 트랜잭션 — 죽은 프로세스의 잠금이 남지 않는다). 명령이 잡는다 |
 | `report.py` | DB 현황 요약 (회귀 테스트가 비교하는 수치), `by_month`, `list_pages`. 인쇄 층으로 잰 쪽(`print_layer`)과 계열별 판(`variants` — `variant_summary`)은 그런 쪽이 있을 때만, 점으로 쓴 시각일 수 있는 쪽(`usage_dotted_suspect`)은 가동 기록이 있으면(0 이어도) 키가 생긴다. 낡은 장비 ID(`stale_equipment_ids` — 리포트 밖, 회귀가 비교하지 않는다, 가동 기록·작업량 행이 있을 때만) |
 | `tools/synth.py` | 합성 양식·스캔·정답 생성기 (같은 seed 면 바이트까지 같다, 행렬 개정판 선택, `low_cells` 낮은 칸 양식, `usage_logs` 가동 일보, `print_layers` 합성 쪽에서 추정한 인쇄 층, `usage_variants` 판 B, `rotate_pages`·`blank_backs`·`rescans`·`intake` — 따로 쓰는 난수, 기존 선택의 바이트는 그대로, `display_names` 표시 이름과 가릴 상자 — template.yaml 만) |
+| `tools/pdfwrite.py` | 합성 PDF 를 라이브러리 없이 쓴다 (tasks/0009 4.3): 쪽마다 회색조 그림 하나 — JPEG 는 `DCTDecode` 그대로, 무손실(`lossless`)은 `FlateDecode`, `/ID`·만든 시각 없이 (같은 입력이면 바이트까지 같다). `read_pages`·`copy_pages` — 이 모듈이 쓴 PDF 의 쪽을 다시 그리지 않고 옮긴다 (시험의 작은 묶음). 합성·시험 전용 |
 | `tools/synth_usage.py` | 합성 가동 일보 두 종: 계기(소수·시각·빈 칸), 하루 두 장, 빠진 날, 잘못 적은 시작, 총·소계 어긋남, 대응표에 없는 이름, 작업량 표 위의 메모. 근무 시각 칸의 인쇄된 "~"(선으로 그린다). 판 B(`build_usage_log("b")` — 작업 표·계기 표만 10 px 아래, 줄 간격 ×1.01). 난수는 따로 |
 | `tools/tpltools.py` | `template preview`(칸·필드·형식·역할을 그린 PNG, `--print` 는 인쇄 층 위에, 저장소 밖에만), `template check`(오류를 전부 — 인쇄 층의 크기, 인쇄에 절반 넘게 덮인 표 칸, 열 이름 `display`, 쪽 밖·넓이 없는 `redact` 상자; 쓰이지 않는 `print_image` 는 참고 줄). preview 는 `redact` 상자도 그린다 |
 | `tools/printlayer.py` | `template print-layer`: 그 양식으로 분류된 쪽(loaded·classified_only)을 날짜별로 고르게 최대 40장 — 정합 그림, 없으면 호모그래피로 다시 펴고, 분류 전용 쪽은 직접 정합(인라이어만). 3장 미만 거절·5장 미만 경고·백분위 75 미만이면 괘선을 잡는 데만 쓰라고 경고. DB 는 읽기 전용, `print.png` 만 쓴다. 요약은 수와 칸 이름만 |
@@ -264,6 +266,13 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 - 하루에 행렬 양식이 여러 장일 수 있다(상차 장비마다 한 장). 그날의 모든 장을 합쳐서 비교한다.
 - 양식의 여백 행에 손으로 장비를 추가해 적는 날이 있다. `doc_field` 에는 남지만 업무 테이블로 가는 규칙은 아직 없다.
 - PDF 는 200 dpi 회색조로 직접 렌더링한다. 렌더링 경로를 바꾸면 체크 판정 몇 개가 뒤집힌다 — 회귀 기준을 다시 잡아야 한다.
+- PyMuPDF(AGPL-3.0)를 PDFium(pypdfium2)으로 바꾸면 실제 3일치 83쪽이 모두 같은 크기·적재이고, 화소의 평균 차 2.0, 값 유무가 바뀐 필드
+  19/10,274 (수 칸 5, 글자 칸 12, 서명 2) — 스캔 그림을 늘리는 방식이 다르다. pypdfium2 의 `render(scale)` 는 올림이라 A4 가 1654 → 1655 px —
+  크기는 우리가 정해(PyMuPDF 와 같은 ceil(x − 0.001) — 반올림이 아니다: 1165.36 → 1166) 그 비트맵에 그린다 (ADR 0023).
+- **전송 중 잘린 PDF**(실제 묶음을 50 %·90 %·99.9 % 로 자름): PyMuPDF 는 셋 다 "복구해서" 0쪽으로 열었고 PDFium 은 셋 다 열지 않는다. 셋 다
+  끝 표시(`%%EOF`)가 없고, 실제 PDF 30개는 모두 마지막 1 KB 안에 있다 → 손상 = 열리지 않거나 마지막 1 KB 에 `%%EOF` 가 없다. 접수 폴더의
+  "다 쓰였나"도 같은 검사다.
+- PDF 라이브러리의 `save` 는 매번 다른 `/ID` 를 쓸 수 있다 (pypdfium2 가 그렇다) → 합성 PDF 는 직접 쓴다 (`tools/pdfwrite`).
 - OpenCV 5.0 은 내장 글꼴(`putText`)의 모양을 바꿨다. 그 글꼴로 그린 합성 숫자로 학습한 시험용 모델이 4.x 에서 시험 4개를 떨어뜨렸다 (추론은 판마다 같았다).
   학습·시험에 쓰는 합성 글씨는 자체 획(`tools/handfont.py`)으로 그리고, CI 는 하한 판(OpenCV 4.9, numpy 1.26)에서도 돈다.
 - 자동 적재 기준은 검증 칸이 적으면 아무 말도 하지 못한다 (13칸·오류 0 → 상한 23 %). 자동 적재된 검증 칸이 100개 미만이면 기준을 정하지 않고, 기준 옆엔 늘 상한 (ADR 0012).
@@ -274,7 +283,7 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
   숫자 인식기는 "무슨 숫자인가"와 함께 "이 칸에 숫자가 있기는 한가"를 답한다 — 빈 칸과 거절 (ADR 0012).
 - 값은 1–16 근처이고 두 자리가 드물지 않다. 흘려 쓰고, 연하고, 쓰는 사람이 여럿이다 — 값 전체를 분류 항목으로 두지 않고 숫자열(CTC)로 읽는다.
 - 언어모델에 문장을 다시 쓰게 하면 긴 셀에서 항목 순서가 바뀌고 수량이 달라진다 (선행 연구의 비교표). 교정은 후보 선택 + 숫자 불변 검사.
-- 합성 PDF 도 저장할 때 새 /ID 가 들어가면 같은 seed 인데 문서 해시가 달라져 테스트가 운에 따라 실패한다 → `no_new_id`.
+- 합성 PDF 도 저장할 때 새 /ID 가 들어가면 같은 seed 인데 문서 해시가 달라져 테스트가 운에 따라 실패한다 → `/ID` 없이 직접 쓴다 (`tools/pdfwrite`).
 - 회귀 검사는 검수 파일을 읽지 않는다. 검수가 쌓이면 코드 변경 없이도 `pending`·`with_trips` 가 달라진다.
 - 한 묶음 안에서 양식이 개정되면 모양으로는 못 가린다(분류 여유 ≈ 1). 날짜로 가린다 (ADR 0010).
 - 주간만 검수하고 야간은 아직인 칸은 합을 모르는 것으로 둔다. 아니면 일부 검수 중에 가짜 불일치가 생긴다.
@@ -370,6 +379,7 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 ## 하지 말 것
 
 - 범용 표 인식 모델로 셀을 찾으려 하지 않는다. 양식은 고정이고 정합이 더 정확하다 (ADR 0001).
+- PDF 를 `pymupdf` 로 다시 읽지 않는다 — AGPL-3.0 이다 (ADR 0023). 런타임 의존성의 라이선스는 `scripts/licenses.py --check` 가 막는다.
 - 인쇄된 머리글 값을 사실로 믿는 조인을 만들지 않는다 (ADR 0004).
 - 교차검증 불일치를 자동으로 "맞춰" 넣지 않는다. 보여 주고 검수로 보낸다 (ADR 0006).
 - 합성 데이터의 수치로 한글 손글씨 인식률을 말하지 않는다. 인식률은 실데이터 평가셋으로만 말한다.

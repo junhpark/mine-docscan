@@ -183,9 +183,10 @@ minedocscan pages --status error                 # 쪽 하나에서 예외가 �
 ```
 
 - 깨진 파일이 있어도 끝까지 간다. 그 문서는 `failed`, 요약에 목록이 나오고 종료 코드는 1 이다. 반쯤 쓰인 행은 남지 않는다.
-- PDF 라이브러리가 **복구해서 연** 파일(끝이 잘린 파일 등)은 기본으로 `failed` 다 (`[pipeline] damaged_pdf = "fail"`).
-  어느 스캐너의 멀쩡한 파일이 늘 "복구가 필요했습니다"로 실패하면 `damaged_pdf = "warn"` (또는 `MINEDOCSCAN_DAMAGED_PDF=warn`) —
-  그 문서는 처리하고 `doc_document.warning` 과 요약·`report` 에 경고로 남긴다 (종료 코드는 그대로 0).
+- **손상된 PDF** — 열리지 않거나 파일의 마지막 1 KB 에 끝 표시(`%%EOF`)가 없는 파일(전송 중 끊긴 파일 등) — 는 기본으로 `failed` 다
+  (`[pipeline] damaged_pdf = "fail"`, [ADR 0023](decisions/0023-pdf-with-pdfium.md)). 어느 스캐너의 멀쩡한 파일이 늘 "끝 표시가 없습니다"로
+  실패하면 `damaged_pdf = "warn"` (또는 `MINEDOCSCAN_DAMAGED_PDF=warn`) — 열리는 문서는 처리하고 `doc_document.warning` 과 요약·`report` 에
+  경고로 남긴다 (종료 코드는 그대로 0). 열리지 않는 파일은 어느 쪽이든 `failed`. 접수 폴더의 PDF 는 끝 표시가 생길 때까지 "아직 쓰이는 중"이다.
 - **`--skip-existing` 을 쓰면 안 되는 때**: 템플릿(사이트 팩)이나 인식기·판정 규칙을 바꾼 뒤. 그때는 `--fresh` 로 처음부터 다시 돌린다.
   건너뛰기는 파일 해시만 보고 결과가 유효한지는 모른다.
 - 다른 컴퓨터에서 같은 DB 를 쓰려면 `archive_root` 만 그 컴퓨터의 경로로 준다. 원본은 `source_rel`(archive_root 기준 상대경로)로 찾는다.
@@ -209,7 +210,8 @@ minedocscan doc discard|restore <문서 ID|쪽 ID> --reviewer jp    doc keep <�
 ```
 
 - **다 쓰인 파일만 가져온다**: 수정 시각이 `[intake] settle_seconds`(5) 지나고 열리는 파일 (계속 도는 감시는 크기가 바퀴 사이에 그대로여야).
-  `give_up_seconds`(120) 지나도 열리지 않으면 손상 방침(`damaged_pdf`)대로 등록한다 — 잘린 PDF 는 `failed` 문서. 잠겨서 읽을 수조차 없으면
+  `give_up_seconds`(120) 지나도 다 쓰이지 않았으면(열리지 않는다, PDF 의 끝 표시 `%%EOF` 가 없다) 손상 방침(`damaged_pdf`)대로 등록한다 —
+  잘린 PDF 는 `failed` 문서 (`warn` 이면 열리는 것은 경고와 함께 처리). 잠겨서 읽을 수조차 없으면
   `<inbox>/_failed/`. 같은 바이트의 파일은 `<inbox>/_already/` (DB 는 그대로). `_` 로 시작하는 폴더, `.`·`~` 로 시작하는 파일은 보지 않는다.
 - **지우지 않는다**: 새 파일은 보관 폴더의 `intake/…/` 로 복사하고 해시를 다시 확인해 등록한 **뒤에** 접수 폴더에서 치운다. 접수 폴더에서
   사라진 파일은 보관 폴더·`_already`·`_failed` 중 한 곳에 바이트 그대로 있다. 옮기다 실패하면(윈도우: 열려 있는 파일) 다음 바퀴에 다시 한다.

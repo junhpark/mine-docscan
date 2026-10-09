@@ -15,14 +15,16 @@ dpi = 200                    # 템플릿 좌표계의 해상도. 템플릿을 �
 auto_accept_conf = 0.90      # 이 신뢰도 이상이면 검수 없이 적재
 classify_min_margin = 1.5    # 양식 분류 1위/2위 비율이 이보다 낮으면 표시
 save_aligned = true          # 정합 이미지를 work_root/aligned 에 저장 (검수·디버깅용)
-damaged_pdf = "fail"         # 라이브러리가 복구해서 연 PDF(끝이 잘린 파일 등): fail = 문서 실패 | warn = 처리하고 경고를 남김
-                             # 멀쩡한 스캔이 늘 "복구가 필요했습니다"로 실패하는 스캐너라면 warn (MINEDOCSCAN_DAMAGED_PDF)
+damaged_pdf = "fail"         # 끝 표시(%%EOF)가 마지막 1 KB 에 없는 PDF(끝이 잘린 파일 등): fail = 문서 실패 | warn = 열리면 처리하고
+                             # 경고를 남김. 멀쩡한 스캔이 늘 "끝 표시가 없습니다"로 실패하는 스캐너라면 warn (MINEDOCSCAN_DAMAGED_PDF)
+                             # 열리지 않는 PDF 는 어느 쪽이든 실패
 blank_max_ink = 0.02         # 양식을 못 찾은 쪽 중 어두운 화소가 이 비율 미만이면 빈 쪽 (양면 스캔의 뒷면)
 dup_min_sim = 0.80           # 같은 날·같은 계열의 앞 쪽과 손글씨 자리가 이만큼 비슷하면 다시 스캔한 쪽으로 붙잡는다
 
 [intake]                     # 접수 폴더 감시 (minedocscan watch · serve)
 settle_seconds = 5           # 수정 시각이 이만큼 지나고 열리는 파일만 가져온다 (스캐너가 다 쓰기를 기다린다)
-give_up_seconds = 120        # 이만큼 지나도 열리지 않으면 손상 방침대로 등록한다 (읽을 수조차 없으면 <inbox>/_failed 로)
+give_up_seconds = 120        # 이만큼 지나도 다 쓰이지 않았으면(열리지 않는다, PDF 의 끝 표시가 없다) 손상 방침대로 등록한다
+                             # (읽을 수조차 없으면 <inbox>/_failed 로)
 poll_seconds = 3             # 접수 폴더를 훑는 간격
 
 # 엑셀 내보내기 (docs/DATA.md, ADR 0022). excel_dir 가 없으면 자동 내보내기는 꺼져 있다 — export excel 은 OUT 을 받는다.

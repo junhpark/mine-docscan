@@ -9,7 +9,7 @@
   MINEDOCSCAN_SITE          사이트 팩 폴더 (템플릿·마스터·라벨)
   MINEDOCSCAN_DB_URL        DB 주소 (기본: sqlite:///<work_root>/minedocscan.db)
   MINEDOCSCAN_REVIEWS       검수 기록 파일 (기본: <site>/reviews/reviews.jsonl — 사이트 팩 안, 추가 전용)
-  MINEDOCSCAN_DAMAGED_PDF   손상 PDF(라이브러리가 복구해서 연 파일)의 처리: fail(기본) | warn
+  MINEDOCSCAN_DAMAGED_PDF   손상 PDF(끝 표시 %%EOF 가 마지막 1 KB 에 없는 파일)의 처리: fail(기본) | warn
   MINEDOCSCAN_EXCEL_DIR     엑셀 폴더 (watch·serve 가 바퀴 끝에 쓴다 — tasks/0008 4.7)
   MINEDOCSCAN_PUBLISH_URL   통합 DB(PostgreSQL) — postgresql://사용자:비밀번호@호스트/DB. **환경변수로만** 받는다 (설정 파일에 적지
                             않는다 — 적으면 ConfigError). 어디에도 찍지 않는다 (호스트·DB 이름만 — publish/core.describe_url)
@@ -49,7 +49,7 @@ class Settings:
     classify_min_margin: float = 1.5     # 양식 분류 1위/2위 비율이 이보다 낮으면 검수 표시
     save_aligned: bool = True
     source_dpi: int = 300                # 원본 해상도 크롭을 뜰 때 PDF 를 렌더링하는 해상도 (스캔 원본이 300 dpi)
-    damaged_pdf: str = "fail"            # 라이브러리가 복구해서 연 PDF: fail(문서 실패) | warn(처리하고 경고를 남김)
+    damaged_pdf: str = "fail"            # 끝 표시(%%EOF)가 없는 PDF: fail(문서 실패) | warn(열리면 처리하고 경고를 남김)
     # 빈 쪽 (tasks/0007 4.5): 양식을 못 찾은 쪽 중 어두운 화소(binarize → 2×2 열기)가 이 비율 미만이면 blank. 0.02 의 근거:
     # 실제 쪽 83장의 최소가 0.046, 합성 흰 종이·티 0.0003 이하, 가장자리 그림자 0.011 이하, 옅게 비친 뒷면(15 %) 0.001 이하.
     # 진하게 비친 뒷면(30 % ≤ 0.028, 45 % ≤ 0.053)은 겹친다 — unknown_form 으로 남아 사람이 본다. 실제 빈 쪽 표본은 아직 없다
@@ -63,7 +63,8 @@ class Settings:
     # 접수 폴더 (tasks/0007 4.7): [paths] inbox, [intake] settle_seconds·give_up_seconds·poll_seconds
     inbox: Path | None = None
     settle_seconds: float = 5.0          # 수정 시각이 이만큼 앞이고 열리는 파일만 가져온다 (스캐너가 다 쓰기를 기다린다)
-    give_up_seconds: float = 120.0       # 이만큼 지나도 열리지 않으면 손상 방침대로 등록한다 (읽을 수조차 없으면 _failed 로)
+    give_up_seconds: float = 120.0       # 이만큼 지나도 다 쓰이지 않았으면(열리지 않는다, PDF 의 끝 표시가 없다) 손상 방침대로 등록한다
+                                         # (읽을 수조차 없으면 _failed 로)
     poll_seconds: float = 3.0            # watch·serve 가 접수 폴더를 훑는 간격
     # 엑셀 내보내기 (tasks/0008 4.7): [export] excel_dir (또는 MINEDOCSCAN_EXCEL_DIR) — 없으면 자동 내보내기는 꺼져 있다
     excel_dir: Path | None = None

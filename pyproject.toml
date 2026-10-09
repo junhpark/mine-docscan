@@ -13,7 +13,7 @@ dependencies = [
   "numpy>=1.26",
   "opencv-python-headless>=4.9",
   "openpyxl>=3.1",
-  "pymupdf>=1.24",
+  "pypdfium2>=4.30",              # PDF 읽기 (PDFium — Apache-2.0/BSD-3, ADR 0023). 하한은 CI 의 lowest 작업이 돈다
   "pyyaml>=6.0",
   "rapidfuzz>=3.6",
 ]

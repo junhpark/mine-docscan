@@ -21,9 +21,13 @@ jobs:
       - run: ruff check .
       # 합성 양식으로 전체 시험. 실데이터 회귀(-m realdata)는 데이터가 없으므로 건너뛴다
       - run: pytest
+      # 제3자 라이선스 (tasks/0009 4.3 나): .[postgres] 를 설치한 환경의 닫힘으로 같은 검사 — 윈도우 묶음의 닫힘(tzdata …)과는
+      # 조금 다르다. 묶음의 목록은 윈도우 작업이 묶음을 만들 때 wheels/ 로 검사한다 (tasks/0009 단계 5 — scripts/bundle.py)
+      - run: pip install -e ".[postgres]"
+      - run: python scripts/licenses.py --installed postgres --check --out THIRD_PARTY_NOTICES.txt
 
   lowest:
-    # pyproject 의 하한(OpenCV 4.9, numpy 1.26)에서도 같은 시험. 위 작업은 최신판만 받는다 —
+    # pyproject 의 하한(OpenCV 4.9, numpy 1.26, openpyxl 3.1.0, pypdfium2 4.30)에서도 같은 시험. 위 작업은 최신판만 받는다 —
     # OpenCV 5.0 은 내장 글꼴 모양을 바꿨고, 그 차이로 4.x 에서만 실패하던 시험이 있었다 (CLAUDE.md "실데이터에서 배운 것")
     runs-on: ubuntu-latest
     steps:
@@ -32,8 +36,8 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install -e ".[dev]" "opencv-python-headless==4.9.0.80" "numpy==1.26.4" "openpyxl==3.1.0"
-      - run: python -c "import cv2, numpy, openpyxl; print(cv2.__version__, numpy.__version__, openpyxl.__version__)"
+      - run: pip install -e ".[dev]" "opencv-python-headless==4.9.0.80" "numpy==1.26.4" "openpyxl==3.1.0" "pypdfium2==4.30.0"
+      - run: python -c "import cv2, numpy, openpyxl, pypdfium2; print(cv2.__version__, numpy.__version__, openpyxl.__version__, pypdfium2.version.PYPDFIUM_INFO)"
       - run: pytest
 
   slow:
