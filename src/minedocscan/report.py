@@ -93,7 +93,26 @@ def build_report(con: sqlite3.Connection, families: dict[str, str] | None = None
     intake = intake_summary(con)
     if intake:
         rep["intake"] = intake
+    # 옛 판의 다시 스캔 서명 (tasks/0010 4.3): 판이 다른 서명과는 다시 스캔을 견주지 않는다 — 그런 쪽이 있을 때만 키가 생긴다
+    # (지금의 판으로 만든 DB 의 리포트와 regress 의 기준은 예전과 같다). run --fresh 로 다시 만들면 없어진다
+    old = old_signatures(con)
+    if old:
+        rep["old_signatures"] = old
     return rep
+
+
+def old_signatures_line(n: int) -> str:
+    from .imaging.signature import VERSION
+
+    return (f"옛 판의 다시 스캔 서명 {n}쪽 — 그 쪽과는 다시 스캔을 견주지 않습니다 (지금 판 {VERSION}). "
+            "minedocscan run --fresh 로 다시 만드십시오")
+
+
+def old_signatures(con: sqlite3.Connection) -> int:
+    """지금의 판(signature.VERSION)이 아닌 다시 스캔 서명의 쪽 수 (글자열의 앞머리로 — 서명을 풀지 않는다)."""
+    from .imaging.signature import VERSION
+
+    return con.execute("SELECT COUNT(*) FROM doc_page_sig WHERE sig NOT LIKE ?", (f"{VERSION}|%",)).fetchone()[0] or 0
 
 
 def format_intake(it: dict) -> list[str]:
@@ -438,6 +457,8 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
         lines.append(f"동시 판 {group}: 고른 쪽 {kv(v['chosen'])}, 정합 실패 {v['align_failed']}, "
                      f"고른 쪽 중 두 판의 괘선 오차 차이가 {NEAR_TIE_PX:g} px 미만인 쪽 {v['near_tie']} (pages --variants)")
     lines += format_intake(rep.get("intake") or {})
+    if rep.get("old_signatures"):
+        lines.append(old_signatures_line(rep["old_signatures"]))
     f, i, h = rep["fields"], rep["inspection"], rep["haul"]
     lines += [
         f"필드 {f['total']}개 (값 있음 {f['with_value']}, 검수 대기 {f['pending']})",

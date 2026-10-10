@@ -481,6 +481,12 @@ def cmd_info(a) -> int:
                          + ("" if t["status"] == "cells" else "  (분류 전용 — 셀 정의 없음)") + valid + printed)
     else:
         lines.append("사이트 팩: 지정되지 않았거나 폴더가 없습니다")
+    old = _old_signatures(s)                       # 옛 판의 다시 스캔 서명 (tasks/0010 4.3) — 있을 때만 알린다
+    if old:
+        from .report import old_signatures_line
+
+        data["old_signatures"] = old
+        lines.append(old_signatures_line(old))
     _emit(a, data, "\n".join(lines))
     return 0
 
@@ -781,6 +787,25 @@ def _round_jobs(s: Settings, site, once: bool = False) -> dict:
         if job.notice:
             print(job.notice, file=sys.stderr)
     return jobs
+
+
+def _old_signatures(s: Settings) -> int:
+    """작업 DB 를 읽기 전용으로 열어 옛 판 서명의 쪽 수 (DB 가 없거나 열 수 없으면 0 — info 는 아무 말도 하지 않는다)."""
+    import sqlite3
+
+    from .report import old_signatures
+    from .store.db import SchemaVersionError, open_db_readonly
+
+    try:
+        con = open_db_readonly(s.resolved_db_url)
+    except (FileNotFoundError, SchemaVersionError, NotImplementedError, sqlite3.DatabaseError):
+        return 0
+    try:
+        return old_signatures(con)
+    except sqlite3.DatabaseError:
+        return 0
+    finally:
+        con.close()
 
 
 def _worth_showing(out: dict) -> bool:

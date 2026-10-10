@@ -58,6 +58,10 @@ jobs:
       - run: pytest --durations=30 --junitxml=junit/junit.xml
       - run: python scripts/test_report.py env --out junit/env.json
         if: always()
+      # 다시 스캔 서명의 민감도 (tasks/0010 4.3 가): 지금의 서명과 후보를 한 번에 — 요약은 스스로 ::notice 로 (산출물을 받지 못하는
+      # 검증 쪽이 읽게). 윈도우의 OpenCV 는 같은 그림을 조금 다르게 정합한다 (tasks/0009 단계 4)
+      - run: python scripts/sig_probe.py --synthetic --out junit/sig-probe.json
+        if: always()
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -269,6 +273,9 @@ jobs:
         if: always()
       # 확장성 표 (tasks/0009 4.7 다 — 시험 성적서 6절): 가상 양식(V2)·보통과 거친 글씨, 3일
       - run: python scripts/v2_metrics.py --out v2-metrics/v2-metrics.json --days 3
+      # 다시 스캔 서명의 민감도 (tasks/0010 4.3 가) — 리눅스. 요약은 스스로 ::notice 로
+      - run: python scripts/sig_probe.py --synthetic --out junit/sig-probe.json
+        if: always()
       - uses: actions/upload-artifact@v4
         if: always()
         with:

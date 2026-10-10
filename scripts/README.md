@@ -14,6 +14,8 @@
 | `test_report.py` | 시험 성적서 `시험성적서-<판>.md` — CI 산출물(JUnit·자가 시험·설치 단계·확장성·라이선스)과 `docs/test-report/scale-*.json`. `env` 는 작업마다의 환경 | CI `report` (tasks/0009 4.9) |
 | `v2_metrics.py` | 확장성 표 — 가상 양식(V2)의 쪽·분류·정합·칸·oracle CER·값 유무, 보통·거친 글씨 | CI `slow` (tasks/0009 4.7) |
 | `bigdb.py` | 규모 — 합성 묶음을 한 해 규모로 복제한 작업 DB 와 엑셀·싣기의 시간·메모리 → `docs/test-report/scale-*.json` | 손으로 (tasks/0009 4.2 마) |
+| `sig_probe.py` | 다시 스캔 서명의 민감도 — 정합 그림을 옮기고 돌린 것·합성 다시 스캔·같은 날 다른 종이의 유사도, 지금의 서명과 후보를 한 번에 (`--synthetic`, 실데이터는 `--site … --work-root …` — 수만). 요약을 CI 의 알림으로 | CI `slow`·`windows`, 사람 (tasks/0010 4.3) |
+| `ci_notice.py` | CI 의 알림(`::notice`) 한 줄 — ASCII·`key=value`·수만 (경로·이름이 들어갈 자리가 없다). 산출물을 받지 못하는 검증 쪽이 읽는다 | CI (tasks/0010 4.6) |
 
 만드는 법은 각 파일의 첫 독스트링에. 무엇을 어디에 커밋하는지: 성적서의 틀·생성기·규모의 JSON 은 저장소에, 성적서·묶음·`manual.html` 은 CI 산출물
 (`docs/test-report/README.md`).

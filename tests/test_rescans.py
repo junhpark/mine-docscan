@@ -5,8 +5,8 @@
 """
 from __future__ import annotations
 
+import json
 import shutil
-import sys
 from dataclasses import replace
 
 import numpy as np
@@ -14,11 +14,13 @@ import pytest
 
 from conftest import fast_imaging, split_pages
 from minedocscan.forms.sitepack import SitePack
-from minedocscan.imaging.signature import decode, encode, signature, similarity
+from minedocscan.imaging.signature import VERSION, decode, encode, signature, similarity, version_of
 from minedocscan.intake import decisions as decs
 from minedocscan.pipeline import Pipeline
 from minedocscan.report import build_report
 from test_reprocess import BUSINESS, RECEIVED, assert_same, doc_ids, dump, no_null_dates, settings_for
+
+SAME_PAPER = 0.95           # 합성 다시 스캔(같은 종이)은 전부 이 위 — 리눅스·윈도우 (tasks/0010 4.3 나)
 
 
 # ── 서명 (순수 함수) ───────────────────────────────────────────────────────
@@ -38,6 +40,69 @@ def test_signature_roundtrip_and_similarity_rules():
     assert signature(page, np.ones(page.shape, bool)).sum() == 0  # 지운 자리는 0
     shifted = np.roll(page, 64, axis=1)                           # 자리가 다르면 낮다
     assert similarity(s, signature(shifted, mask)) < 0.5
+    # 서명의 판 (tasks/0010 4.3): 글자열 앞에 판. 판이 없는 옛 글자열은 판 1 — 풀지 않고(None) 견주지 않는다
+    text = encode(s)
+    assert text.startswith(f"{VERSION}|10x20:") and version_of(text) == VERSION == 2
+    old = text.split("|", 1)[1]                                   # tasks/0010 전의 꼴 "10x20:…"
+    assert version_of(old) == 1 and decode(old) is None and similarity(s, decode(old)) is None
+    assert similarity(decode(old), decode(old)) is None
+
+
+def test_widened_mask_keeps_the_signature_under_small_misalignment(held):
+    """4.3 나의 기준을 시험 하나로 (기본 시험의 시간 안에서 — 합성 쪽 다섯 장과 다시 스캔 넉 쌍): 정합한 쪽을 (2, 1) px 옮기거나
+    0.2° 돌리거나 둘을 같이 해도 같은 그림끼리 0.93 위 (최소 0.85 — 다섯 장이라 5 % 와 최소가 같다). 판 1(넓히지 않은 마스크)은
+    0.2° + (2, 1) px 에서 0.6 근처였다 (scripts/sig_probe.py). 합성 다시 스캔은 0.95 위 (위의 시험)."""
+    import cv2
+
+    from minedocscan.imaging.grid import binarize
+    from minedocscan.imaging.io import imread_gray
+
+    st = replace(held["st"], save_aligned=True, work_root=held["root"] / "aligned")
+    p = Pipeline(st, site=held["site"])
+    p.run([held["scans"] / "x_2030-01-07.pdf", held["scans"] / "o_2030-01-07.pdf"])
+    rows = p.con.execute("SELECT template_name, aligned_image FROM doc_page WHERE status = 'loaded' ORDER BY page_id").fetchall()
+    assert len(rows) == 5
+
+    def moved(gray, dx, dy, deg):
+        h, w = gray.shape
+        m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), deg, 1.0)
+        m[0, 2] += dx
+        m[1, 2] += dy
+        return cv2.warpAffine(gray, m, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=255)
+
+    for dx, dy, deg in ((2, 1, 0.0), (0, 0, 0.2), (2, 1, 0.2)):
+        sims = []
+        for r in rows:
+            mask = held["site"].templates[r["template_name"]].signature_mask
+            gray = imread_gray(st.work_root / r["aligned_image"])
+            sims.append(similarity(signature(gray, mask), signature(None, mask, binary=binarize(moved(gray, dx, dy, deg)))))
+        assert min(sims) >= 0.93, (dx, dy, deg, sims)
+
+
+def test_signatures_of_another_version_are_not_compared(held, capsys):
+    """판이 다른 서명끼리는 견주지 않는다 — 옛 판(1)의 서명만 있는 앞 문서의 다시 스캔은 붙잡히지 않는다. report 는 옛 판 서명의 쪽이
+    있을 때만 그 수의 키를 내고 info 가 run --fresh 를 안내한다. 지금의 판으로 다시 만들면(run --fresh) 다시 붙잡힌다."""
+    from minedocscan.cli import main
+
+    p = run(held, "old", [held["scans"] / "x_2030-01-07.pdf", held["scans"] / "o_2030-01-07.pdf"])
+    assert "old_signatures" not in build_report(p.con)
+    with p.con:                                                   # 판 1 의 꼴 ("높이x너비:…") — tasks/0010 전의 DB
+        p.con.execute("UPDATE doc_page_sig SET sig = substr(sig, instr(sig, '|') + 1)")
+    assert build_report(p.con)["old_signatures"] == 5
+    p.run([held["scans"] / "y_2030-01-07.pdf"])
+    y = doc_ids(p.con)["y_2030-01-07"]
+    assert {r["status"] for r in pages_of(p.con, y).values()} == {"loaded"}         # 견주지 않았다
+    assert build_report(p.con)["old_signatures"] == 5                               # 새로 적재한 쪽은 지금의 판
+    st = p.settings
+    assert main(["info", "--json", "--site", str(st.site), "--work-root", str(st.work_root)]) == 0
+    assert json.loads(capsys.readouterr().out)["old_signatures"] == 5
+    assert main(["info", "--site", str(st.site), "--work-root", str(st.work_root)]) == 0
+    assert "run --fresh" in capsys.readouterr().out
+    fresh = run(held, "fresh")
+    assert {r["status"] for r in pages_of(fresh.con, doc_ids(fresh.con)["y_2030-01-07"]).values()} == {"duplicate"}
+    assert "old_signatures" not in build_report(fresh.con)
+    assert main(["info", "--json", "--site", str(st.site), "--work-root", str(fresh.settings.work_root)]) == 0
+    assert "old_signatures" not in json.loads(capsys.readouterr().out)
 
 
 def test_signature_mask_covers_print_and_free_fields(site):
@@ -87,9 +152,9 @@ def test_rescanned_pages_are_held_after_the_original(held):
     assert [t["how"] for t in held["truth"]["rescans"]] == ["shake", "jpeg", "rotated", "shake"]
     for n, page in py.items():
         assert (page["status"], page["duplicate_of"]) == ("duplicate", f"{x}-p{of[n]}"), n
-        # 리눅스 0.9985–0.9999. 윈도우의 OpenCV 는 같은 그림을 조금 다르게 정합한다 (첫 쪽 x#1 의 인라이어 635 → 571, 괘선 오차 0.0 → 1.0 px —
-        # 실행마다·스레드 수와 무관하게 같은 값이다, tasks/0009 단계 4 의 윈도우 탐침) — 그 쪽의 유사도가 0.8626. 붙잡는 기준(dup_min_sim)은 넘는다
-        assert page["duplicate_sim"] >= (0.99 if sys.platform != "win32" else held["st"].dup_min_sim)
+        # 리눅스·윈도우 같은 단언 (tasks/0010 4.3 — 서명의 판 2). 판 1 에서는 윈도우의 OpenCV 가 같은 그림을 조금 다르게 정합해 (첫 쪽 x#1 의
+        # 인라이어 635 → 571, 괘선 오차 0.0 → 1.0 px) 그 쪽의 유사도가 0.8626 이었다 — 넓힌 마스크로 1 px 의 어긋남에 흔들리지 않는다
+        assert page["duplicate_sim"] >= SAME_PAPER
     assert py[3]["rotation"] == 90
     assert {r["status"] for r in pages_of(p.con, x).values()} == {"loaded"}
     assert {r["status"] for r in pages_of(p.con, ids["o_2030-01-07"]).values()} == {"loaded"}
@@ -100,7 +165,7 @@ def test_rescanned_pages_are_held_after_the_original(held):
     without = run(held, "without", [held["scans"] / "x_2030-01-07.pdf", held["scans"] / "o_2030-01-07.pdf"])
     assert dump(p.con, tables=list(BUSINESS)) == dump(without.con, tables=list(BUSINESS))
     rep = build_report(p.con)["intake"]["duplicates"]
-    assert rep["pages"] == 4 and rep["sim"]["min"] >= (0.99 if sys.platform != "win32" else held["st"].dup_min_sim)
+    assert rep["pages"] == 4 and rep["sim"]["min"] >= SAME_PAPER
     assert p.summary["duplicates"] and {d["page_id"] for d in p.summary["duplicates"]} == {f"{y}-p{n}" for n in py}
 
 
