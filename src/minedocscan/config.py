@@ -9,7 +9,7 @@
   MINEDOCSCAN_SITE          사이트 팩 폴더 (템플릿·마스터·라벨)
   MINEDOCSCAN_DB_URL        DB 주소 (기본: sqlite:///<work_root>/minedocscan.db)
   MINEDOCSCAN_REVIEWS       검수 기록 파일 (기본: <site>/reviews/reviews.jsonl — 사이트 팩 안, 추가 전용)
-  MINEDOCSCAN_DAMAGED_PDF   손상 PDF(라이브러리가 복구해서 연 파일)의 처리: fail(기본) | warn
+  MINEDOCSCAN_DAMAGED_PDF   손상 PDF(끝 표시 %%EOF 가 마지막 1 KB 에 없는 파일)의 처리: fail(기본) | warn
   MINEDOCSCAN_EXCEL_DIR     엑셀 폴더 (watch·serve 가 바퀴 끝에 쓴다 — tasks/0008 4.7)
   MINEDOCSCAN_PUBLISH_URL   통합 DB(PostgreSQL) — postgresql://사용자:비밀번호@호스트/DB. **환경변수로만** 받는다 (설정 파일에 적지
                             않는다 — 적으면 ConfigError). 어디에도 찍지 않는다 (호스트·DB 이름만 — publish/core.describe_url)
@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -48,7 +49,7 @@ class Settings:
     classify_min_margin: float = 1.5     # 양식 분류 1위/2위 비율이 이보다 낮으면 검수 표시
     save_aligned: bool = True
     source_dpi: int = 300                # 원본 해상도 크롭을 뜰 때 PDF 를 렌더링하는 해상도 (스캔 원본이 300 dpi)
-    damaged_pdf: str = "fail"            # 라이브러리가 복구해서 연 PDF: fail(문서 실패) | warn(처리하고 경고를 남김)
+    damaged_pdf: str = "fail"            # 끝 표시(%%EOF)가 없는 PDF: fail(문서 실패) | warn(열리면 처리하고 경고를 남김)
     # 빈 쪽 (tasks/0007 4.5): 양식을 못 찾은 쪽 중 어두운 화소(binarize → 2×2 열기)가 이 비율 미만이면 blank. 0.02 의 근거:
     # 실제 쪽 83장의 최소가 0.046, 합성 흰 종이·티 0.0003 이하, 가장자리 그림자 0.011 이하, 옅게 비친 뒷면(15 %) 0.001 이하.
     # 진하게 비친 뒷면(30 % ≤ 0.028, 45 % ≤ 0.053)은 겹친다 — unknown_form 으로 남아 사람이 본다. 실제 빈 쪽 표본은 아직 없다
@@ -62,11 +63,15 @@ class Settings:
     # 접수 폴더 (tasks/0007 4.7): [paths] inbox, [intake] settle_seconds·give_up_seconds·poll_seconds
     inbox: Path | None = None
     settle_seconds: float = 5.0          # 수정 시각이 이만큼 앞이고 열리는 파일만 가져온다 (스캐너가 다 쓰기를 기다린다)
-    give_up_seconds: float = 120.0       # 이만큼 지나도 열리지 않으면 손상 방침대로 등록한다 (읽을 수조차 없으면 _failed 로)
+    give_up_seconds: float = 120.0       # 이만큼 지나도 다 쓰이지 않았으면(열리지 않는다, PDF 의 끝 표시가 없다) 손상 방침대로 등록한다
+                                         # (읽을 수조차 없으면 _failed 로)
     poll_seconds: float = 3.0            # watch·serve 가 접수 폴더를 훑는 간격
     # 엑셀 내보내기 (tasks/0008 4.7): [export] excel_dir (또는 MINEDOCSCAN_EXCEL_DIR) — 없으면 자동 내보내기는 꺼져 있다
     excel_dir: Path | None = None
     export_sweep_minutes: float = 30.0   # 전체 훑기의 간격 (분). 0 이면 시작할 때만 — 다른 프로세스가 쓴 검수와 놓친 것을 잡는다
+    # 바꾸지 못한 엑셀 파일(윈도우에서 엑셀이 열고 있다)을 다시 해 보는 간격 (tasks/0009 4.2 라: 바퀴마다(3초) 모델을 만들고 임시 파일을 쓰고
+    # 실패하고 한 줄을 찍었다 — 20초에 8줄). 그 사이의 바퀴는 그 파일의 모델을 만들지 않는다
+    export_retry_seconds: float = 60.0
     machine_values: bool = False         # 업무 시트·긴 표에 "기계 값(확정 아님)" 열을 따로 둔다 (기본은 싣지 않는다 — ADR 0008)
     # 통합 DB 로 싣기 (tasks/0008 4.8): URL 은 환경변수로만 (repr 에도 나오지 않게). enabled 가 None 이면 URL 이 있을 때 켜진다
     publish_url: str | None = field(default=None, repr=False)
@@ -119,21 +124,28 @@ class Settings:
 
 
 def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> Settings:
-    path = Path(config_path or os.environ.get("MINEDOCSCAN_CONFIG", "minedocscan.toml"))
+    # 빈 MINEDOCSCAN_CONFIG 는 없는 것과 같다 (Path("") 는 지금 폴더 — 폴더를 열다 트레이스백으로 죽었다)
+    path = Path(config_path or os.environ.get("MINEDOCSCAN_CONFIG", "").strip() or "minedocscan.toml")
     raw: dict = {}
+    if path.is_dir():
+        raise ConfigError(f"설정 파일 자리에 폴더가 있습니다 ({path}) — --config 나 MINEDOCSCAN_CONFIG 에는 .toml 파일을 줍니다")
     if path.exists():
         try:
             with open(path, "rb") as f:
                 raw = tomllib.load(f)
         except tomllib.TOMLDecodeError as e:
             raise ConfigError(f"설정 파일을 읽을 수 없습니다 ({path}): {e}") from e
+        except OSError as e:                                           # 잠긴 파일·권한 — 트레이스백 없이 한 줄로
+            raise ConfigError(f"설정 파일을 열 수 없습니다 ({path}): {type(e).__name__}") from e
     paths = _table(raw, "paths", path)
     pipe = _table(raw, "pipeline", path)
     intake = _table(raw, "intake", path)
     export = _table(raw, "export", path)
     publish = _table(raw, "publish", path)
-    if any(k in publish for k in ("url", "dsn", "password")):
+    if any(str(k).strip().lower() in ("url", "dsn", "password", "conninfo") for k in publish):   # URL·Password 도 (tasks/0009 4.1 사)
         raise ConfigError("[publish] 에 URL·비밀번호를 적지 않습니다 — 환경변수 MINEDOCSCAN_PUBLISH_URL 로만 받습니다")
+    if export.get("excel_dir") is not None and not isinstance(export["excel_dir"], str):
+        raise ConfigError(f"[export] excel_dir 는 폴더 경로(글자)여야 합니다: {export['excel_dir']!r}")
     rec = _table(raw, "recognize", path)
     by_kind = rec.get("by_kind", {}) or {}
     if not isinstance(by_kind, dict):
@@ -162,6 +174,7 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         poll_seconds=_number(intake, "poll_seconds", 3.0, float, "[intake] poll_seconds", lo=0.1),
         excel_dir=_p(export.get("excel_dir")),
         export_sweep_minutes=_number(export, "sweep_minutes", 30.0, float, "[export] sweep_minutes", lo=0.0),
+        export_retry_seconds=_number(export, "retry_seconds", 60.0, float, "[export] retry_seconds", lo=0.0),
         machine_values=_flag(export, "machine_values", False, "[export] machine_values"),
         publish_schema=str(publish.get("schema", "minedocscan")),
         publish_enabled=(None if "enabled" not in publish else _flag(publish, "enabled", True, "[publish] enabled")),
@@ -189,7 +202,7 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         s.inbox = Path(env["MINEDOCSCAN_INBOX"])
     if env.get("MINEDOCSCAN_EXCEL_DIR"):
         s.excel_dir = Path(env["MINEDOCSCAN_EXCEL_DIR"])
-    if env.get("MINEDOCSCAN_PUBLISH_URL"):
+    if (env.get("MINEDOCSCAN_PUBLISH_URL") or "").strip():                   # 공백뿐이면 없는 것으로 (tasks/0009 4.1 사)
         s.publish_url = env["MINEDOCSCAN_PUBLISH_URL"]
     if env.get("MINEDOCSCAN_PUBLISH_SCHEMA"):
         s.publish_schema = env["MINEDOCSCAN_PUBLISH_SCHEMA"]
@@ -220,10 +233,14 @@ def _number(table: dict, key: str, default, cast, label: str, lo: float | None =
     v = table.get(key, default)
     if isinstance(v, bool):
         raise ConfigError(f"{label} 는 숫자여야 합니다: {v!r}")
+    if isinstance(v, float) and not math.isfinite(v):                 # TOML 의 nan·inf (int(inf) 는 OverflowError, nan 은 범위 검사를 지나간다)
+        raise ConfigError(f"{label} 는 유한한 숫자여야 합니다: {v!r}")
     try:
         x = cast(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ConfigError(f"{label} 는 숫자여야 합니다: {v!r}") from None
+    if isinstance(x, float) and not math.isfinite(x):                 # 글자 "nan"·"inf" 를 float 로 바꾼 것
+        raise ConfigError(f"{label} 는 유한한 숫자여야 합니다: {v!r}")
     if cast is int and isinstance(v, float) and v != x:
         raise ConfigError(f"{label} 는 정수여야 합니다: {v!r}")
     if (lo is not None and x < lo) or (hi is not None and x > hi):

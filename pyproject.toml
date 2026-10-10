@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "minedocscan"
-version = "0.2.0"
+version = "1.0.0"
 description = "광산 현장 수기 문서 스캔 → 인식 → 데이터베이스 파이프라인"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,7 +13,7 @@ dependencies = [
   "numpy>=1.26",
   "opencv-python-headless>=4.9",
   "openpyxl>=3.1",
-  "pymupdf>=1.24",
+  "pypdfium2>=4.30",              # PDF 읽기 (PDFium — Apache-2.0/BSD-3, ADR 0023). 하한은 CI 의 lowest 작업이 돈다
   "pyyaml>=6.0",
   "rapidfuzz>=3.6",
 ]
@@ -24,7 +24,9 @@ dev = ["pytest>=8.0", "ruff>=0.5"]
 # onnxscript 는 torch 의 새 ONNX 내보내기(dynamo)가 쓴다 — 예전 내보내기가 없어진 torch 에서의 대비
 train = ["torch>=2.2", "onnx>=1.15", "onnxscript>=0.1"]
 # 통합 DB(PostgreSQL)로 싣기 (minedocscan publish, watch·serve 의 바퀴 끝 — tasks/0008 4.8). 없어도 다른 명령은 전부 돈다
-postgres = ["psycopg[binary]>=3.1"]
+postgres = ["psycopg[binary]>=3.2"]
+# 설명서·갈무리를 만드는 도구 (scripts/manual_html.py, manual_shots.py, 묶음의 manual.html). 런타임·설치 묶음에는 들어가지 않는다
+docs = ["markdown>=3.5", "playwright>=1.40"]
 
 [project.scripts]
 minedocscan = "minedocscan.cli:main"
@@ -40,7 +42,7 @@ markers = [
   "realdata: 실제 현장 데이터가 필요한 회귀 테스트 (MINEDOCSCAN_SITE, MINEDOCSCAN_ARCHIVE_ROOT 가 없으면 건너뜀)",
   "train: 숫자 인식기를 학습하는 테스트 (torch 필요, 몇 분 걸린다). `pytest -m train` 으로만 돈다",
   "postgres: 통합 DB(PostgreSQL)에 싣는 시험 (tasks/0008 4.8). MINEDOCSCAN_TEST_PG_URL 이 없으면 건너뛴다 — CI 의 postgres 작업 (`pytest -m postgres`)",
-  "slow: 기본 시험 시간을 지금의 1.25배(0007)·1.15배(0008) 안에 두려고 떼어 낸 무거운 시험 (다시 처리의 불변식 흔들기, 합성 접수 시나리오, 정확히 돌린 쪽의 비교, 처리 순서 흔들기, 접수 묶음의 엑셀·싣기 끝에서 끝까지, 가린 그림, 월 경계·표시 이름 묶음, 몇 분). `pytest -m slow` 로만 돈다 — CI 의 slow 작업",
+  "slow: 기본 시험 시간을 지금의 1.25배(0007)·1.15배(0008) 안에 두려고 떼어 낸 무거운 시험 (다시 처리의 불변식 흔들기, 합성 접수 시나리오, 정확히 돌린 쪽의 비교, 처리 순서 흔들기, 접수 묶음의 엑셀·싣기 끝에서 끝까지, 가린 그림, 월 경계·표시 이름 묶음; 0009 — 자가 시험 한 번 통째로·깨뜨리기, 거친 글씨·템플릿 도구의 V2, 설명서의 명령 보기, 분류 전용에서 세 표·회귀 왕복·판의 날짜, 몇 분). `pytest -m slow` 로만 돈다 — CI 의 slow 작업",
 ]
 
 [tool.ruff]

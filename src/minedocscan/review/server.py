@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import sqlite3
 import sys
 from dataclasses import replace
@@ -312,11 +313,23 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(500, {"error": f"서버 오류: {type(e).__name__}"})
 
 
+class _Server(HTTPServer):
+    """포트를 혼자 쓴다 (tasks/0009 4.4). HTTPServer 는 SO_REUSEADDR 를 켜는데, 윈도우에서 그것은 다른 프로세스가 듣고 있는 포트에도
+    같이 묶인다 — serve 를 두 번 띄우면 둘째도 "떴다"고 하고 요청이 아무 쪽으로나 간다 (윈도우 CI 에서 쓰이는 포트로 띄워도 실패하지
+    않았다). 윈도우는 SO_EXCLUSIVEADDRUSE 로, 다른 OS 는 지금처럼 (TIME_WAIT 에 남은 포트를 다시 쓸 수 있게)."""
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self) -> None:
+        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def make_server(app: ReviewApp, host: str = "127.0.0.1", port: int = 8765) -> HTTPServer:
     """서버를 만든다 (아직 돌리지는 않는다). port 0 이면 빈 포트를 고른다 — 테스트용."""
     handler = type("ReviewHandler", (_Handler,), {"app": app})
     try:
-        return HTTPServer((host, port), handler)
+        return _Server((host, port), handler)
     except OSError as e:
         raise OSError(f"포트 {port} 를 열 수 없습니다 ({e.strerror}). 다른 프로그램이 쓰고 있으면 --port 로 바꾸세요") from e
 

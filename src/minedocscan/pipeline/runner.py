@@ -98,7 +98,8 @@ class Pipeline:
                                      else {"path": None, "imported": 0, "skipped": 0})
         self.on_page = None             # 쪽 하나를 커밋한 뒤 부르는 훅 (document_id, page_no) — 시험과 화면의 작업 상태
         self.on_document = None         # 문서 하나의 처리를 시작할 때 (document_id) — 화면의 작업 상태
-        # 처리가 건드린 것 (날짜·문서·장비 — tasks/0008 4.7): 작업 스레드가 바퀴의 끝에 가져가 엑셀·통합 DB 에 다시 볼 범위로 쓴다
+        # 처리가 건드린 것 (날짜·문서·지운 문서 — tasks/0008 4.7, 연속성 행이 바뀐 쪽의 날짜·문서 — 0009 4.2 다): 작업 스레드가
+        # 바퀴의 끝에 가져가 엑셀·통합 DB 에 다시 볼 범위로 쓴다
         self.touched = Touched()
         self._unreachable_seen: set[tuple[str, int]] = set()    # 건드린 것으로 남긴 닿지 않는 문서 (문서, 요청 번호)
 
@@ -242,7 +243,24 @@ class Pipeline:
     def process_document(self, document_id: str, template: str | None = None, strict: bool = False) -> dict:
         """처리 (4.8): ① 원본을 찾는다 (닿지 않으면 건드리지 않고 다음에) ② 그 문서가 만든 것을 지운다 — 있던 날짜·장비를 바로 다시
         계산해 두고, 상태는 received ③ 버린 문서면 discarded, 날짜가 없으면 needs_date ④ 쪽마다: 결정 → 분류 → 정합 → 빈 쪽 →
-        핸들러 (쪽마다 커밋) ⑤ 그 문서가 있는 날짜·장비를 다시 계산하고 상태와 work_done 을 적는다."""
+        핸들러 (쪽마다 커밋) ⑤ 그 문서가 있는 날짜·장비를 다시 계산하고 상태와 work_done 을 적는다.
+        장비 마스터(eq_equipment)가 바뀌었으면(점검표 템플릿의 장비 행이 바뀌었다 — 모든 날짜의 점검 시트에 나온다) 건드린 것은 "전부"
+        (tasks/0009 4.1 바)."""
+        eq = self._equipment_rows()
+        try:
+            return self._process_document(document_id, template, strict)
+        finally:
+            if eq is None or self._equipment_rows() != eq:
+                self.touched.everything = True
+
+    def _equipment_rows(self) -> list[tuple] | None:
+        """장비 마스터의 행 전부 (작다 — 점검표의 장비 행). 읽지 못하면 None (그때는 바뀐 것으로 본다)."""
+        try:
+            return [tuple(r) for r in self.con.execute("SELECT * FROM eq_equipment ORDER BY equipment_id")]
+        except sqlite3.Error:
+            return None
+
+    def _process_document(self, document_id: str, template: str | None, strict: bool) -> dict:
         row = self._doc(document_id)
         if row is None:
             raise KeyError(f"등록되지 않은 문서입니다: {document_id}")
@@ -330,6 +348,10 @@ class Pipeline:
         """② 그 문서가 만든 것을 지우고(store.db.PAGE_TABLES) 있던 날짜·장비를 다시 계산한다 — 부른 쪽의 트랜잭션 안에서.
         doc_review·doc_decision 은 지우지 않는다. 상태는 received (끊기면 다시 처리된다). 돌려주는 값: 지우기 전의 범위."""
         before = self._footprint(document_id)
+        # 문서의 날짜도 건드린 것에 (쪽이 없는 문서 — 버린 문서·날짜를 기다리는 문서 — 는 문서 날짜로 대기 수에 든다, tasks/0009 4.1 바)
+        doc_date = self.con.execute("SELECT work_date FROM doc_document WHERE document_id = ?", (document_id,)).fetchone()
+        if doc_date is not None and doc_date[0]:
+            self.touched.dates.add(doc_date[0])
         delete_pages(self.con, sorted(before.pages))
         self.con.execute("UPDATE doc_document SET status = 'received', error = NULL WHERE document_id = ?", (document_id,))
         if before.pages:
@@ -353,6 +375,8 @@ class Pipeline:
                 sets.update(n_pages=n_pages, warning=warning)
             self.con.execute(f"UPDATE doc_document SET {', '.join(f'{k} = ?' for k in sets)} WHERE document_id = ?",
                              (*sets.values(), document_id))
+            if date[0]:
+                self.touched.dates.add(date[0])                       # 처리한 뒤의 문서 날짜 (앞의 것은 _clear_document 가)
             if status is None:
                 self.con.execute("UPDATE doc_document SET status = ? WHERE document_id = ?",
                                  (document_status(self.con, document_id), document_id))
@@ -647,9 +671,10 @@ class Pipeline:
             self.touched.everything = True
         else:
             self.touched.dates.update(d for d in (dates or ()) if d)
-            self.touched.refs.update(r for r in (equipment or ()) if r)
         for name in REGISTRY:
             extra = self._handler(name).finalize(self.con, self.site, self.settings, dates=dates, equipment=equipment)
+            if extra and "continuity_pages" in extra:              # 연속성 행이 바뀐 쪽 — 건드린 것에만 (요약에 쪽 ID 를 남기지 않는다)
+                self.touched.add_pages(self.con, (extra := dict(extra)).pop("continuity_pages"))
             if extra and any(extra.values()):
                 self.summary.setdefault("finalize", {})[name] = extra
         if commit and self.con.in_transaction:

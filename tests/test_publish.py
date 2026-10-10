@@ -7,9 +7,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import select
+import socket
 import sqlite3
 import sys
+import threading
+import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -361,7 +366,7 @@ def test_a_conflict_in_a_dirty_publish_falls_back_to_a_full_sweep(monkeypatch):
 
     monkeypatch.setattr(core, "publish", fake_publish)
     target = core.Target(conn, "minedocscan")
-    r = core.run(None, None, full=False, documents={"d"}, dates={"2030-01-07"}, target=target)
+    r = core.run(None, None, full=False, documents={"d"}, dates={"2030-01-07"}, target=target, site="synthetic")
     # 시간 제한은 트랜잭션마다 건다 — 되돌린 뒤의 전체 훑기에도
     assert calls == [False, True] and r.fell_back and conn.log == ["limit", "rollback", "limit", "commit"]
     # 충돌이 아닌 실패는 되돌리고 알린다 (드라이버의 글 없이)
@@ -370,7 +375,7 @@ def test_a_conflict_in_a_dirty_publish_falls_back_to_a_full_sweep(monkeypatch):
 
     monkeypatch.setattr(core, "publish", broken)
     with pytest.raises(core.PublishError) as e:
-        core.run(None, None, full=False, target=target)
+        core.run(None, None, full=False, target=target, site="synthetic")
     assert SECRET not in str(e.value) and conn.log[-1] == "rollback"
 
 
@@ -428,13 +433,13 @@ def test_timeouts_become_their_own_failure_and_roll_back(exc, kind, monkeypatch)
     st = Settings(publish_url=URL, publish_lock_timeout_s=3.0)
     conn = FakeConn(fail=exc)
     with pytest.raises(core.PublishError) as e:
-        core.run(None, st, target=core.Target(conn, "minedocscan"))
+        core.run(None, st, target=core.Target(conn, "minedocscan"), site="synthetic")
     assert e.value.kind == kind and conn.log[:2] == ["limit", "rollback"] and "commit" not in conn.log
     assert SECRET not in str(e.value) and "canceling" not in str(e.value)
     assert ("3초" in str(e.value)) == (kind == "lock_timeout")
     conn = FakeConn(fail=exc)
     with pytest.raises(core.PublishError) as e:
-        core.run(None, st, target=core.Target(conn, "minedocscan"), rebuild=True)
+        core.run(None, st, target=core.Target(conn, "minedocscan"), rebuild=True, site="synthetic")
     assert e.value.kind == kind
 
 
@@ -503,3 +508,348 @@ def test_a_stuck_target_is_visible_and_the_next_round_still_works(world, monkeyp
     assert worker.status == {"state": "idle"} and pub.status["behind"] >= 1      # 기다리는 동안에도 밀린 것이 보인다
     clock.t += 6                                                       # 실패한 때부터 61초 — 다시 한다
     assert worker.run_once()["publish"]["error"] == "lock_timeout" and len(seen) == 2
+
+
+# ── tasks/0009 4.1 사 — 작은 것들 ───────────────────────────────────────────────
+def test_describe_url_refuses_a_url_missing_its_host():
+    """'@호스트'를 빠뜨린 URL(postgresql://이름:비밀/db)은 읽을 수 없는 URL — 비밀번호를 호스트로 찍지 않는다. IPv6 는 그대로 읽는다.
+    키워드 꼴의 host·dbname 에 ':' 이 있으면 ? (이름:비밀을 잘못 적었을 수 있다). 공백뿐이면 없는 것."""
+    for bad in (f"postgresql://writer:{SECRET}/site", "postgresql://writer:/site", f"postgres://writer:{SECRET}"):
+        assert core.describe_url(bad) == "(읽을 수 없는 URL)", bad
+    v6 = core.describe_url("postgresql://[::1]:5432/db")
+    assert v6 != "(읽을 수 없는 URL)" and "::1" in v6 and "5432" in v6 and v6.endswith("/db")
+    assert core.describe_url("postgresql://db.example.invalid:5432/site") == "db.example.invalid:5432/site"   # 숫자 포트는 그대로
+    assert core.describe_url("host=a:b dbname=c:d") == "?/?"
+    assert core.describe_url(f"host=db.example.invalid dbname=writer:{SECRET}") == "db.example.invalid/?"
+    for blank in ("", "   ", "\t\n", None):
+        assert core.describe_url(blank) == "(없음)", repr(blank)
+
+
+def test_a_blank_publish_url_is_no_url(tmp_path, monkeypatch):
+    """공백뿐인 MINEDOCSCAN_PUBLISH_URL 은 없는 것 — 싣기는 꺼져 있다 (연결하지 않는다)."""
+    from minedocscan.config import load_settings
+
+    monkeypatch.setenv("MINEDOCSCAN_PUBLISH_URL", "   ")
+    s = load_settings(tmp_path / "none.toml")
+    assert s.publish_url is None and s.publish_on is False
+    assert AutoPublish(s).reason == "off"
+
+
+@pytest.fixture
+def cmd_env(tmp_path, monkeypatch):
+    """publish 명령을 서버 없이: 이름이 있는 사이트 팩, [site] name 이 없는 사이트 팩, 빈 작업 DB. 연결 함수는 부른 것을 적고 거절한다
+    (설정이 틀리면 연결하기 전에 끝나야 한다)."""
+    from minedocscan.store.db import open_db
+
+    for k in ("MINEDOCSCAN_CONFIG", "MINEDOCSCAN_SITE", "MINEDOCSCAN_WORK_ROOT", "MINEDOCSCAN_DB_URL", "MINEDOCSCAN_ARCHIVE_ROOT",
+              "MINEDOCSCAN_PUBLISH_URL", "MINEDOCSCAN_PUBLISH_SCHEMA", "MINEDOCSCAN_INBOX", "MINEDOCSCAN_EXCEL_DIR",
+              "MINEDOCSCAN_REVIEWS", "MINEDOCSCAN_DAMAGED_PDF"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.chdir(tmp_path)
+    named, unnamed = tmp_path / "site", tmp_path / "site-unnamed"
+    for p, text in ((named, '[site]\nname = "synthetic"\n'), (unnamed, '[site]\ntitle = "Synthetic mine"\n')):
+        p.mkdir()
+        (p / "site.toml").write_text(text, encoding="utf-8")
+    work = tmp_path / "work"
+    open_db(f"sqlite:///{(work / 'minedocscan.db').as_posix()}").close()
+    calls: list = []
+    monkeypatch.setattr(core, "connect", refusing(calls))
+    return SimpleNamespace(root=tmp_path, named=named, unnamed=unnamed, work=work, calls=calls)
+
+
+def test_publish_exit_code_is_2_when_the_setup_is_wrong(cmd_env, monkeypatch, capsys):
+    """설정이 틀리면 publish 도 --check 도 종료 코드 2 (그 전에는 1 — --check 의 '다르다'와 같았다): URL 이 없다, 설정 파일이 깨졌다,
+    작업 DB 가 없다·SQLite 가 아니다·DB 가 아닌 파일이다, [site] name 이 없다, 사이트 팩이 없다. 모두 연결하기 전에 — 비밀번호를 찍지
+    않는다 (트레이스백도 없다)."""
+    from minedocscan.cli import main
+
+    e = cmd_env
+    bad = e.root / "bad.toml"
+    secret_cfg = e.root / "secret.toml"
+    bad.write_text("[publish\nschema = 1\n", encoding="utf-8")
+    secret_cfg.write_text(f'[publish]\nURL = "{URL}"\n', encoding="utf-8")
+    ok = ["--site", str(e.named), "--work-root", str(e.work)]
+    for check in ([], ["--check"]):
+        capsys.readouterr()
+        assert main(["publish", *check, *ok]) == 2, check                                  # URL 이 없다
+        assert "MINEDOCSCAN_PUBLISH_URL" in capsys.readouterr().err
+        monkeypatch.setenv("MINEDOCSCAN_PUBLISH_URL", URL)
+        assert main(["publish", *check, "--config", str(bad), *ok]) == 2, check           # 설정 파일이 깨졌다
+        assert "설정 오류" in capsys.readouterr().err
+        assert main(["publish", *check, "--config", str(secret_cfg), *ok]) == 2, check    # [publish] 에 URL
+        err = capsys.readouterr().err
+        assert "설정 오류" in err and SECRET not in err and "writer" not in err
+        assert main(["publish", *check, "--site", str(e.named), "--work-root", str(e.root / "no-work")]) == 2, check
+        assert "DB 가 없습니다" in capsys.readouterr().err                                  # 작업 DB 가 없다
+        assert main(["publish", *check, "--site", str(e.unnamed), "--work-root", str(e.work)]) == 2, check
+        err = capsys.readouterr().err
+        assert "[site] name" in err and err.strip().count("\n") == 0                       # 한 줄
+        assert main(["publish", *check, "--work-root", str(e.work)]) == 2, check            # 사이트 팩이 없다
+        assert "--site" in capsys.readouterr().err
+        monkeypatch.setenv("MINEDOCSCAN_DB_URL", f"postgresql://writer:{SECRET}@db.example.invalid/work")
+        assert main(["publish", *check, *ok]) == 2, check                                  # 작업 DB 주소가 SQLite 가 아니다
+        err = capsys.readouterr().err
+        assert "작업 DB 를 열 수 없습니다" in err and SECRET not in err and "Traceback" not in err
+        monkeypatch.delenv("MINEDOCSCAN_DB_URL")
+        junk = e.root / f"junk{len(check)}"
+        junk.mkdir(exist_ok=True)
+        (junk / "minedocscan.db").write_bytes(b"not a database " * 100)
+        assert main(["publish", *check, "--site", str(e.named), "--work-root", str(junk)]) == 2, check   # DB 가 아닌 파일
+        assert "작업 DB 를 열 수 없습니다" in capsys.readouterr().err
+        assert e.calls == [], check                                                          # 연결하지 않았다
+        monkeypatch.delenv("MINEDOCSCAN_PUBLISH_URL")
+    # 설정이 맞으면 연결한다 (위의 '연결하지 않았다'가 헛것이 아니다) — 닿지 못하면 2
+    monkeypatch.setenv("MINEDOCSCAN_PUBLISH_URL", URL)
+    assert main(["publish", "--check", *ok]) == 2 and len(e.calls) == 1
+    printed = "".join(capsys.readouterr())
+    assert "닿지 못했습니다" in printed and SECRET not in printed
+
+
+def test_a_rebuild_stopped_by_a_lock_says_run_it_again(cmd_env, monkeypatch, capsys):
+    """--rebuild 가 잠금으로 그만두면 명령의 글은 '다시 실행하십시오' (바퀴 끝의 싣기의 '다음에 다시 합니다'가 아니다). 종료 코드 2."""
+    from minedocscan.cli import main
+
+    e = cmd_env
+    monkeypatch.setenv("MINEDOCSCAN_PUBLISH_URL", URL)
+    seen = []
+
+    def locked(con, settings, **kw):
+        seen.append(kw)
+        raise core._failure(LockNotAvailable("canceling statement due to lock timeout"), settings)
+
+    monkeypatch.setattr(core, "run", locked)
+    capsys.readouterr()
+    assert main(["publish", "--rebuild", "--site", str(e.named), "--work-root", str(e.work)]) == 2
+    err = capsys.readouterr().err
+    assert seen[0]["rebuild"] is True and seen[0]["site"] == "synthetic"
+    assert "다시 실행하십시오" in err and "다음에 다시 합니다" not in err and SECRET not in err
+
+
+def test_a_rebuild_through_the_driver_stopped_by_a_lock_says_run_it_again(cmd_env, monkeypatch, capsys):
+    """같은 것을 core.run 을 거쳐 (가짜 연결이 DROP 앞의 첫 문장에서 55P03): 종료 코드 2, '다시 실행하십시오', 되돌리고 닫는다."""
+    from minedocscan.cli import main
+
+    e = cmd_env
+    monkeypatch.setenv("MINEDOCSCAN_PUBLISH_URL", URL)
+    conns = []
+
+    def connect(url, timeout_s):
+        conns.append(FakeConn(fail=LockNotAvailable("canceling statement due to lock timeout")))
+        return conns[-1]
+
+    monkeypatch.setattr(core, "connect", connect)
+    capsys.readouterr()
+    assert main(["publish", "--rebuild", "--site", str(e.named), "--work-root", str(e.work)]) == 2
+    err = capsys.readouterr().err
+    assert "다시 실행하십시오" in err and "다음에 다시 합니다" not in err and "canceling" not in err
+    assert "commit" not in conns[0].log and conns[0].log[-1] == "close" and "rollback" in conns[0].log
+
+
+@pytest.mark.parametrize("exc, kind", [(LockNotAvailable("lock timeout"), "lock_timeout"),
+                                       (QueryCanceled("statement timeout"), "statement_timeout"),
+                                       (OperationalError("server closed the connection"), "connection_lost")])
+def test_for_command_turns_try_next_round_into_run_it_again(exc, kind):
+    """시간 제한·끊김의 글: 바퀴 끝의 싣기는 '다음에 다시 합니다', 명령(for_command)은 '다시 실행하십시오'. 그 밖의 글은 그대로."""
+    err = core._failure(exc, None)
+    assert err.kind == kind and core.AGAIN in str(err)
+    assert "다시 실행하십시오" in err.for_command() and core.AGAIN not in err.for_command()
+    other = core.PublishError(core.OTHER_SITE, 2, "other_site")
+    assert other.for_command() == str(other)
+
+
+# ── tasks/0009 4.1 다 — [site] name 이 없으면 자동 싣기는 꺼진다 ────────────────────────
+def test_without_a_site_name_auto_publish_is_off_and_says_so_once(tmp_path, capsys):
+    """URL 이 있어도 사이트 팩에 [site] name 이 없으면 자동 싣기는 꺼지고(no_site_name) 시작할 때 한 줄 — 폴더 이름으로 대신하지 않는다.
+    바퀴 끝의 싣기는 아무것도 하지 않는다 (연결하지 않는다). 엑셀 자동 내보내기도 같다."""
+    from minedocscan.cli import _round_jobs
+    from minedocscan.config import Settings
+    from minedocscan.forms.sitepack import SitePack
+
+    site = tmp_path / "synthetic"                                   # 폴더 이름이 그럴듯해도
+    site.mkdir()
+    (site / "site.toml").write_text('[site]\nname = "   "\ntitle = "Synthetic mine"\n', encoding="utf-8")
+    (tmp_path / "엑셀").mkdir()
+    st = Settings(site=site, work_root=tmp_path / "work", publish_url=URL, excel_dir=tmp_path / "엑셀")
+    calls: list = []
+    pub = AutoPublish(st, connect=refusing(calls))
+    assert not pub.enabled and pub.reason == "no_site_name" and "[site] name" in pub.notice
+    assert pub.status["enabled"] is False and pub.status["reason"] == "no_site_name"
+    assert pub.after_round(None, Touched(everything=True)) is None and calls == []
+    capsys.readouterr()
+    jobs = _round_jobs(st, SitePack(site))
+    err = capsys.readouterr().err
+    assert jobs["publish"].reason == "no_site_name" and jobs["excel"].reason == "no_site_name"
+    assert err.count(pub.notice) == 1 and err.count(jobs["excel"].notice) == 1 and len(err.strip().splitlines()) == 2
+    assert SECRET not in err
+    with pytest.raises(core.PublishError) as e:
+        core.site_name(None, None)
+    assert e.value.kind == "no_site_name" and e.value.code == 2
+    with pytest.raises(core.PublishError):
+        core.site_name(st)
+    assert core.site_name(None, "synthetic") == "synthetic"
+
+
+# ── tasks/0009 4.1 라 — 우리 쪽의 기다림의 상한 (서버 없이: 소켓 한 쌍) ─────────────────────────
+class SocketConn:
+    """가짜 대상 연결: 소켓 한 쌍의 한쪽(a)이 '서버로 가는 소켓'이다. 시간 제한을 거는 문장 밖의 문장은 a 에서 답 한 바이트를 기다리고,
+    끝(b"")을 읽으면 드라이버처럼 OperationalError(SQLSTATE 없음). cancel: "hang"(취소도 돌아오지 않는다) | "works"(답이 온다).
+    기다리는 것은 psycopg 의 윈도우 대기(waiting.wait_select)와 같이 0.1초마다 다시 거는 select — select 의 OSError 는 OperationalError
+    (윈도우에서 감시 타이머가 깨우는 길이 그것이다 — 윈도우의 shutdown() 은 select·recv 를 깨우지 않는다)."""
+
+    def __init__(self, cancel: str = "hang"):
+        self.a, self.b = socket.socketpair()
+        self.pgconn = SimpleNamespace(socket=self.a.fileno())
+        self.cancel, self.cancels, self.log = cancel, 0, []
+        self.release = threading.Event()
+
+    def cursor(self):
+        conn = self
+
+        class Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def execute(self, sql, args=()):
+                if "set_config" in sql:
+                    return
+                while True:
+                    try:
+                        r, _w, x = select.select([conn.a], [], [conn.a], 0.1)
+                    except OSError:
+                        raise OperationalError("connection socket closed") from None
+                    if r or x:
+                        break
+                if conn.a.recv(1) == b"":
+                    raise OperationalError("server closed the connection unexpectedly")
+
+            def fetchone(self):
+                return (1,)
+
+        return Cur()
+
+    def cancel_safe(self, timeout):
+        self.cancels += 1
+        if self.cancel == "hang":                                    # 멈춘 서버: 취소도 새 연결이라 기다린다
+            self.release.wait(10)
+            raise TimeoutError("cancel timed out")
+        self.b.send(b"x")                                            # 취소가 들었다 — 문장이 돌아온다
+
+    def commit(self):
+        self.log.append("commit")
+
+    def rollback(self):
+        self.log.append("rollback")
+
+    def close(self):
+        self.log.append("close")
+
+    def dispose(self):
+        self.release.set()
+        self.a.close()
+        self.b.close()
+
+
+def _stalled(conn: SocketConn, dog: core.Watchdog) -> float:
+    t0 = time.monotonic()
+    with core.Target(conn, "minedocscan", dog).cur() as c:
+        c.execute("SELECT pg_sleep(3600)")
+    return time.monotonic() - t0
+
+
+def test_watchdog_shuts_the_socket_when_the_cancel_hangs():
+    """취소도 돌아오지 않으면(멈춘 서버) 감시 타이머가 소켓에 shutdown() — 기다리던 문장이 끝을 읽고 드라이버의 예외로 끝난다.
+    기술자는 닫지 않는다 (libpq 의 것이다)."""
+    conn = SocketConn("hang")
+    dog = core.Watchdog(conn, limit_s=0.3, cancel_timeout_s=0.3, grace_s=0.1)
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(OperationalError):
+            _stalled(conn, dog)
+        took = time.monotonic() - t0
+        assert dog.fired == "shutdown" and conn.cancels == 1
+        assert 0.3 <= took < 0.3 + 0.3 + 3.0, took                       # 상한은 바쁜 CI 를 생각해 넉넉히
+        conn.a.getsockname()                                         # 닫지 않았다 — 기술자는 그대로 열려 있다 (윈도우에서도 되는 검사)
+        assert conn.b.recv(1) == b""                                 # 끊었다 (반대쪽이 끝을 읽는다)
+    finally:
+        conn.dispose()
+        dog.close()
+
+
+def test_psycopg_waits_with_select_on_windows():
+    """감시 타이머의 윈도우 길(interrupt_waits)은 psycopg 가 윈도우에서 select 로 기다린다는 것에 기댄다 — 그것을 확인한다."""
+    waiting = pytest.importorskip("psycopg.waiting")
+    if sys.platform == "win32":
+        assert waiting.wait is waiting.wait_select
+    core.interrupt_waits(SimpleNamespace())                          # 끊긴 연결에도 조용히 (어느 OS 에서나)
+    core.interrupt_waits(SimpleNamespace(pgconn=SimpleNamespace(socket=-1)))
+
+
+def test_watchdog_cancel_that_works_does_not_shut_the_socket():
+    """취소가 들으면(서버가 살아 있다) 문장이 돌아오고 소켓은 그대로 — fired 는 cancel 에서 멈춘다."""
+    conn = SocketConn("works")
+    dog = core.Watchdog(conn, limit_s=0.3, cancel_timeout_s=1.0, grace_s=1.0)   # 바쁜 기계에서도 취소 스레드를 기다리게 넉넉히
+    try:
+        took = _stalled(conn, dog)
+        assert dog.fired == "cancel" and conn.cancels == 1 and 0.3 <= took < 3.5, took
+        conn.b.send(b"y")                                            # 소켓이 살아 있다 — 끊지 않았다
+        assert conn.a.recv(1) == b"y"
+    finally:
+        conn.dispose()
+        dog.close()
+
+
+def test_watchdog_does_not_fire_for_a_statement_that_returns_in_time():
+    """제한 안에 돌아온 문장에는 아무것도 하지 않는다 — 문장이 끝나면 그 기한도 지운다 (다음 문장이 옛 기한에 걸리지 않는다)."""
+    conn = SocketConn("hang")
+    dog = core.Watchdog(conn, limit_s=0.3, cancel_timeout_s=0.3, grace_s=0.1)
+    try:
+        for _ in range(2):
+            conn.b.send(b"x")                                        # 답이 이미 와 있다
+            assert _stalled(conn, dog) < 0.3
+        with dog._cv:                                                # 잠들지 않는다 — 돌아온 문장의 기한이 지워졌는지를 본다
+            assert dog._deadline is None and dog._active is None
+        assert dog.fired is None and conn.cancels == 0
+        conn.b.send(b"y")
+        assert conn.a.recv(1) == b"y"
+    finally:
+        conn.dispose()
+        dog.close()
+    core.shutdown_socket(SimpleNamespace())                          # 이미 끊긴 연결(pgconn 이 없다)에도 조용히
+
+
+def test_a_stalled_target_ends_the_publish_as_connection_lost(monkeypatch):
+    """core.run: 멈춘 문장을 감시 타이머가 끊으면 지금의 실패 경로 — PublishError(connection_lost), 되돌리고 커밋하지 않는다."""
+    from minedocscan.config import Settings
+
+    monkeypatch.setattr(core, "publish", lambda con, target, **kw: target.exists())     # 대상에 보내는 첫 문장에서 멈춘다
+    conn = SocketConn("hang")
+    dog = core.Watchdog(conn, limit_s=0.3, cancel_timeout_s=0.3, grace_s=0.1)
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(core.PublishError) as e:
+            core.run(None, Settings(publish_url=URL), target=core.Target(conn, "minedocscan", dog), site="synthetic")
+        assert time.monotonic() - t0 < 0.3 + 0.3 + 3.0
+        assert e.value.kind == "connection_lost" and e.value.code == 2 and dog.fired == "shutdown"
+        assert "rollback" in conn.log and "commit" not in conn.log
+        assert SECRET not in str(e.value) and "unexpectedly" not in str(e.value)
+    finally:
+        conn.dispose()
+        dog.close()
+
+
+def test_open_target_watches_each_statement_for_the_statement_timeout_plus_a_margin(monkeypatch):
+    """연결마다 감시 타이머 하나 — 상한은 statement_timeout_s + 30초 (서버가 살아 있으면 서버의 시간 제한이 먼저 끊는다)."""
+    from minedocscan.config import Settings
+
+    monkeypatch.setattr(core, "connect", lambda url, timeout_s: FakeConn())
+    t = core.open_target(Settings(publish_url=URL, publish_statement_timeout_s=20))
+    try:
+        assert isinstance(t.watchdog, core.Watchdog) and t.watchdog.limit_s == 20 + core.WATCH_MARGIN_S == 50
+        t.limit(5, 20)                                               # 감시 안에서 보내고, 돌아오면 아무것도 하지 않는다
+        assert t.conn.log == ["limit"] and t.watchdog.fired is None
+    finally:
+        t.close()
+    assert t.conn.log[-1] == "close"

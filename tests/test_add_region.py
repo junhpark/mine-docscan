@@ -50,6 +50,7 @@ def loader_gen() -> dict:
 
 
 # ── 수용 기준 1: 분류 전용 → print-layer → add-region 세 번 ──────────────────────────
+@pytest.mark.slow                       # 기본 시험 시간을 0008 의 1.15배 안에 (tasks/0009 — CI 의 slow 작업)
 def test_classification_only_template_to_three_tables(usage_classify_only, loader_gen, tmp_path, capsys):
     """사이트 팩의 분류 전용 템플릿(regions: [], fields: [] — 쪽은 classified_only) 그대로에서 시작한다: 그 템플릿에
     `template print-layer`(쪽을 직접 정합 — 4.2, 칸 정의가 없어도 만든다)를 돌리고 사람이 `print_image: print.png` 를 적은 뒤,

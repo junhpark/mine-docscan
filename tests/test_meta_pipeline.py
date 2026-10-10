@@ -266,7 +266,7 @@ def test_queues_eval_and_info(meta_truth, meta_nolabels, tmp_path, capsys):
     cfg = tmp_path / "c.toml"
     from conftest import meta_options
 
-    lines = ["[recognize.meta]"] + [f'"{k}" = "{v}"' for k, v in meta_options()["meta"].items()]
+    lines = ["[recognize.meta]"] + [f'"{k}" = {json.dumps(str(v))}' for k, v in meta_options()["meta"].items()]   # 윈도우 경로의 역슬래시
     cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
     capsys.readouterr()
     assert main(["info", "--config", str(cfg), "--site", str(s.site), "--json"]) == 0
@@ -275,7 +275,7 @@ def test_queues_eval_and_info(meta_truth, meta_nolabels, tmp_path, capsys):
     assert main(["info", "--config", str(cfg), "--site", str(s.site)]) == 0
     assert "메타 필드 [operator]: 모델 meta-operator (choice" in capsys.readouterr().out
     # 다른 키에 꽂은 모델: 시작할 때 오류 (트레이스백 없이)
-    cfg.write_text(f'[recognize.meta]\noperator = "{meta_options()["meta"]["vehicle_no"]}"\n', encoding="utf-8")
+    cfg.write_text(f'[recognize.meta]\noperator = {json.dumps(str(meta_options()["meta"]["vehicle_no"]))}\n', encoding="utf-8")
     import pytest
 
     with pytest.raises(SystemExit, match="operator"):

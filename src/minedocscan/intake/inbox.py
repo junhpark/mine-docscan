@@ -1,9 +1,10 @@
 """접수 폴더 (tasks/0007 4.7): 스캐너 프로그램의 저장 폴더에서 다 쓰인 파일만 가져와 보관 폴더로 옮기고 문서를 등록한다.
 
   보는 것     접수 폴더와 하위 폴더의 SUPPORTED_EXT 파일. "_" 로 시작하는 폴더, "." · "~" 로 시작하는 파일은 보지 않는다
-  다 쓰였나   수정 시각이 지금보다 settle_seconds 이상 앞이고, 열린다 (PDF 는 복구 없이, 이미지는 디코딩 — JPEG 는 끝 표시까지).
+  다 쓰였나   수정 시각이 지금보다 settle_seconds 이상 앞이고, 열린다 (PDF 는 마지막 1 KB 에 %%EOF 까지, 이미지는 디코딩 — JPEG 는 끝 표시까지).
               계속 도는 감시(watch·serve)는 지난 바퀴에 잰 크기와 같아야 한다 (수정 시각을 옛것 그대로 두고 복사하는 프로그램이 있다).
-              열리지 않아도 수정 시각이 give_up_seconds 이상 앞이면 손상 방침(damaged_pdf)대로 등록한다 (fail 이면 그 문서는 failed)
+              다 쓰이지 않았어도(열리지 않는다, PDF 의 끝 표시가 없다) 수정 시각이 give_up_seconds 이상 앞이면 손상 방침(damaged_pdf)대로
+              등록한다 (fail 이면 그 문서는 failed)
   접수        해시 → 이미 있는 문서(같은 바이트)면 <inbox>/_already/ 로 옮기고 DB 는 건드리지 않는다. 새 문서면
               archive_root/intake/<받은 해-달>/<받은 시각>-<document_id>/<원래 파일명> 으로 복사하고(임시 이름 → 이름 바꾸기) 해시를
               다시 확인한 뒤 등록·커밋하고, 그다음에 접수 폴더의 것을 치운다 (끊겨도 바이트가 한 곳 이상에 있다)
@@ -28,6 +29,8 @@ from ..imaging.io import IMAGE_EXT, SUPPORTED_EXT, count_pages, imread_gray
 from ..store.order import INTAKE_DIR, document_id
 
 TEMP_SUFFIX = ".part"                    # 복사 중인 임시 파일 — SUPPORTED_EXT 가 아니라 run 이 줍지 않는다
+PATH_MAX = 259                          # 보관 경로의 최대 글자 수: 윈도우의 MAX_PATH(260, 끝의 NUL 포함) — 긴 경로를 켜지 않은 PC 에서
+                                        # 그보다 긴 경로는 만들지도 열지도 못한다 (tasks/0009 4.4). 리눅스에서도 같은 규칙 (같은 보관 폴더)
 ALREADY, FAILED = "_already", "_failed"
 _TS = re.compile(r"^(?P<ts>\d{8}T\d{9}Z)-(?P<doc>[0-9a-f]{16})$")
 
@@ -41,12 +44,10 @@ def check_paths(inbox: Path, archive_root: Path | None, others: dict[str, Path |
     안 된다 (보관 폴더의 파일을 다시 접수하거나, 접수가 작업 폴더를 옮기게 된다). 윈도우에서는 대소문자를 가리지 않고 견준다."""
     if archive_root is None:
         raise InboxError("접수 폴더를 쓰려면 archive_root 가 있어야 합니다 (보관 폴더 — [paths] archive_root)")
-    me = _norm(inbox)
     for name, other in {"archive_root": archive_root, **others}.items():
         if other is None:
             continue
-        o = _norm(other)
-        if me == o or _inside(me, o) or _inside(o, me):
+        if within(inbox, other) or within(other, inbox):
             raise InboxError(f"접수 폴더가 {name} 와 겹칩니다 — 안이거나 그것을 품으면 안 됩니다: {inbox}")
 
 
@@ -56,6 +57,28 @@ def _norm(p: Path) -> str:
 
 def _inside(a: str, b: str) -> bool:
     return a.startswith(b.rstrip(os.sep) + os.sep)
+
+
+def _identity(p: Path) -> tuple[int, int] | None:
+    try:
+        st = os.stat(p)
+    except (OSError, ValueError):
+        return None
+    return (st.st_dev, st.st_ino) if st.st_ino else None
+
+
+def within(path: str | Path, folder: str | Path) -> bool:
+    """path 가 folder 이거나 그 안인가 (tasks/0009 4.4). 먼저 글자로 — 절대 경로·구분자·윈도우의 대소문자(normcase)를 맞춘 뒤 —, 아니면
+    파일의 정체로: path 와 그 위 폴더들 가운데 있는 것이 folder 와 같은 파일(장치·번호)인가 — 같은 폴더를 다른 이름(UNC \\서버\공유 와
+    연결한 드라이브 문자 Z:, 바로 가기)으로 적어도 잡는다. 없는 경로는 있는 위 폴더까지만 본다."""
+    a, b = _norm(path), _norm(folder)
+    if a == b or _inside(a, b):
+        return True
+    target = _identity(Path(folder))
+    if target is None:
+        return False
+    p = Path(os.path.abspath(path))
+    return any(_identity(q) == target for q in (p, *p.parents))
 
 
 # ── 받은 시각 ──────────────────────────────────────────────────────────────
@@ -116,6 +139,8 @@ class Inbox:
         self.sizes: dict[str, int] | None = {} if continuous else None
         self.first_seen: dict[str, float] = {}
         self._last_ms: int | None = None
+        # 보관할 때 쓰는 가장 긴 경로의 앞부분 (받은 시각·문서 ID 는 길이가 늘 같다 — 그 자리에 같은 길이의 글자)
+        self._longest = os.path.join(os.path.abspath(self.archive), INTAKE_DIR, "0000-00", ts_of(0) + "-" + "0" * 16, "")
 
     def files(self) -> list[Path]:
         """보는 파일 — (수정 시각, 이름) 순서."""
@@ -137,12 +162,16 @@ class Inbox:
     def round(self, pipe) -> dict:
         """한 바퀴: 다 쓰인 파일을 접수하고 등록한다. 돌려주는 값 — 수와 문서 ID 만:
         {"received": [문서 ID], "already": n, "failed": [문서 ID] (등록에서 failed), "moved_failed": n (_failed 로),
-         "waiting": n (아직 다 쓰이지 않았다), "retry": n (옮기다 실패 — 다음 바퀴에)}."""
-        out = {"received": [], "already": 0, "failed": [], "moved_failed": 0, "waiting": 0, "retry": 0}
+         "waiting": n (아직 다 쓰이지 않았다), "retry": n (옮기다 실패 — 다음 바퀴에),
+         "too_long": n (보관 경로가 PATH_MAX 를 넘는다 — 접수하지 않고 접수 폴더에 둔다)}."""
+        out = {"received": [], "already": 0, "failed": [], "moved_failed": 0, "waiting": 0, "retry": 0, "too_long": 0}
         seen = set()
         for path in self.files():
             key = str(path)
             seen.add(key)
+            if self.too_long(path.name):                               # 이름을 줄이지 않는다 — 보관한 이름이 source_name 이 되고
+                out["too_long"] += 1                                   # 날짜 규칙이 그것을 다시 읽는다. 사람이 줄이거나 옮긴다
+                continue
             try:
                 verdict = self._ready(path)
                 if verdict == "wait":
@@ -166,6 +195,10 @@ class Inbox:
             self.sizes = {k: v for k, v in self.sizes.items() if k in seen}
             self.first_seen = {k: v for k, v in self.first_seen.items() if k in seen}
         return out
+
+    def too_long(self, name: str) -> bool:
+        """그 이름의 파일을 보관하면 경로(쓰는 동안의 임시 이름까지)가 PATH_MAX 를 넘는가."""
+        return len(self._longest + name + TEMP_SUFFIX) > PATH_MAX
 
     def _age(self, path: Path, mtime: float) -> float:
         now = self.now()
@@ -274,8 +307,9 @@ class Inbox:
 
 
 def complete(path: Path) -> bool:
-    """다 쓰인 파일인가: PDF 는 복구 없이 열린다, 이미지는 디코딩된다 (JPEG 는 끝 표시 FF D9 까지 — OpenCV 4.9 는 잘린 JPEG 도
-    디코딩한다). 여러 쪽 TIFF 처럼 등록이 거절할 것은 "다 쓰였다"로 보고 등록에 맡긴다."""
+    """다 쓰인 파일인가: PDF 는 열리고 끝 표시(%%EOF)가 있다 (손상 방침 fail 그대로 — tasks/0009 4.3), 이미지는 디코딩된다
+    (JPEG 는 끝 표시 FF D9 까지 — OpenCV 4.9 는 잘린 JPEG 도 디코딩한다). 여러 쪽 TIFF 처럼 등록이 거절할 것은 "다 쓰였다"로 보고
+    등록에 맡긴다."""
     ext = path.suffix.lower()
     try:
         if ext == ".pdf":

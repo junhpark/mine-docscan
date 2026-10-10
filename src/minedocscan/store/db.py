@@ -71,9 +71,19 @@ class SchemaVersionError(RuntimeError):
     pass
 
 
+def describe_db_url(url: str) -> str:
+    """작업 DB 의 주소를 찍을 꼴로: sqlite:///… 는 그대로(경로), 그 밖의 URL 은 호스트·DB 만 (비밀번호가 든 PostgreSQL URL 을
+    MINEDOCSCAN_DB_URL 에 잘못 넣었을 때 — tasks/0009 4.1 사, 0008 이전부터 그대로 찍혔다)."""
+    if url.startswith("sqlite:///"):
+        return url
+    from ..publish.core import describe_url
+
+    return describe_url(url)
+
+
 def open_db(url: str) -> sqlite3.Connection:
     if not url.startswith("sqlite:///"):
-        raise NotImplementedError(f"아직 SQLite 만 지원합니다 (docs/ROADMAP.md): {url}")
+        raise NotImplementedError(f"아직 SQLite 만 지원합니다 (docs/ROADMAP.md): {describe_db_url(url)}")
     path = url[len("sqlite:///"):]
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -94,7 +104,7 @@ def open_db_readonly(url: str) -> sqlite3.Connection:
     """있는 DB 를 읽기 전용으로 연다 (만들지도, 스키마를 쓰지도 않는다) — DB 에 쓰지 않는 도구용 (template print-layer).
     파일이 없으면 FileNotFoundError, 버전이 다르면 SchemaVersionError."""
     if not url.startswith("sqlite:///"):
-        raise NotImplementedError(f"아직 SQLite 만 지원합니다 (docs/ROADMAP.md): {url}")
+        raise NotImplementedError(f"아직 SQLite 만 지원합니다 (docs/ROADMAP.md): {describe_db_url(url)}")
     path = Path(url[len("sqlite:///"):])
     if not path.is_file():
         raise FileNotFoundError(f"DB 가 없습니다: {path}")

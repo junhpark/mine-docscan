@@ -110,7 +110,8 @@ def test_settle_then_ingest_and_once_twice_is_once(box):
     assert row["received_at"] == "2030-01-01T00:00:00.001Z"
     assert sha(box["st"].archive_root / row["source_rel"]) == digest
     once = dump(box["pipe"].con)
-    assert w.run_once() == {"received": [], "already": 0, "moved_failed": 0, "waiting": 0, "retry": 0, "processed": 0}
+    assert w.run_once() == {"received": [], "already": 0, "moved_failed": 0, "waiting": 0, "retry": 0, "too_long": 0,
+                            "too_long_changed": False, "processed": 0}
     assert dump(box["pipe"].con) == once
     assert "a_2030-01-07" not in format_round(r) and doc in format_round(r)      # 요약에 파일명이 없다
 
@@ -363,3 +364,50 @@ def test_complete_checks_the_jpeg_end_marker(tmp_path):
     whole.write_bytes(buf.tobytes())
     cut.write_bytes(buf.tobytes()[:-40])
     assert ib.complete(whole) and not ib.complete(cut)
+
+
+def test_complete_waits_for_the_pdf_end_marker(tmp_path):
+    """끝이 덜 쓰인 PDF(마지막 1 KB 에 %%EOF 가 없다 — 열리더라도)는 "아직 쓰이는 중"이다 (tasks/0009 4.3 — 손상 방침 fail 과 같다)."""
+    import numpy as np
+
+    from minedocscan.tools.pdfwrite import write_images
+
+    whole = write_images(tmp_path / "w.pdf", [np.full((300, 200), 220, np.uint8)])
+    data = whole.read_bytes()
+    noeof, cut = tmp_path / "n.pdf", tmp_path / "c.pdf"
+    noeof.write_bytes(data.rstrip()[: -len(b"%%EOF")])
+    cut.write_bytes(data[: len(data) // 2])
+    assert ib.complete(whole) and not ib.complete(noeof) and not ib.complete(cut)
+
+
+def test_a_name_whose_archive_path_is_too_long_stays_in_the_inbox(box):
+    """보관 경로(intake/<해-달>/<받은 시각>-<문서 ID>/<원래 이름>, 쓰는 동안의 임시 이름까지)가 259자를 넘는 파일은 접수하지 않고
+    접수 폴더에 그대로 두고 이유를 수로 알린다 — 요약(수가 바뀐 바퀴에만)과 홈. 이름을 줄이지 않는다 (보관한 이름이 source_name 이
+    되고 날짜 규칙이 그것을 다시 읽는다). 긴 한글 이름 (tasks/0009 4.4) — 리눅스의 이름 한 칸은 255 바이트라 80자."""
+    import sys
+
+    from minedocscan.cli import _worth_showing
+    from minedocscan.intake.worker import Worker, format_round
+    from minedocscan.review.ops import OpsApp
+
+    st = box["st"]
+    long_name = "가동일보" * (27 if sys.platform == "win32" else 20) + "_2030-01-07.pdf"
+    probe = inbox_of(box)
+    extra = max(1, ib.PATH_MAX + 20 - len(probe._longest) - len(long_name + ib.TEMP_SUFFIX))
+    archive = box["root"] / ("보관" + "x" * extra)                    # 보관 폴더를 그만큼 깊게 — 접수 폴더의 경로는 짧다
+    archive.mkdir()
+    box["st"] = st = replace(st, archive_root=archive)
+    drop(box, long_name, "a_2030-01-07")
+    drop(box, "u1_2030-01-07.pdf", "u1_2030-01-07")
+    inbox = inbox_of(box)
+    assert inbox.too_long(long_name) and not inbox.too_long("u1_2030-01-07.pdf")
+    worker = Worker(box["pipe"], inbox)
+    r = worker.run_once()
+    assert r["too_long"] == 1 and len(r["received"]) == 1 and long_name in visible(box)
+    assert "보관 경로가 너무 길어" in format_round(r) and _worth_showing(r)
+    assert OpsApp(box["pipe"].con, box["site"], st, "jp", worker=worker).home_json()["todo"]["too_long"] == 1
+    r = worker.run_once()                                              # 그대로 — 요약은 수가 바뀐 바퀴에만
+    assert r["too_long"] == 1 and not r["too_long_changed"] and not _worth_showing(r)
+    (st.inbox / long_name).rename(st.inbox / "a_2030-01-07.pdf")      # 사람이 이름을 줄였다
+    r = worker.run_once()
+    assert r["too_long"] == 0 and len(r["received"]) == 1 and visible(box) == []

@@ -517,15 +517,10 @@ def fast_imaging(monkeypatch) -> dict:
 
 
 def split_pages(src: Path, pages: list[int], out: Path) -> Path:
-    """합성 PDF 의 쪽 몇 개(1부터)를 새 PDF 로 — 다시 그리지 않고 옮긴다 (no_new_id: 같은 입력이면 바이트까지 같다)."""
-    import pymupdf
+    """합성 PDF 의 쪽 몇 개(1부터)를 새 PDF 로 — 다시 그리지 않고 옮긴다 (tools/pdfwrite: 같은 입력이면 바이트까지 같다)."""
+    from minedocscan.tools.pdfwrite import copy_pages
 
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with pymupdf.open(str(src)) as s, pymupdf.open() as d:
-        for n in pages:
-            d.insert_pdf(s, from_page=n - 1, to_page=n - 1)
-        d.save(str(out), no_new_id=True)
-    return out
+    return copy_pages([(src, pages)], out)
 
 
 # 다시 처리 시험의 작은 묶음 (2–3쪽): 이름 → [(원본 묶음, 날짜 i, [쪽])]. 운반·점검표는 synth, 가동 일보는 usage_synth 의 쪽.
@@ -562,7 +557,7 @@ def bundles(synth, usage_synth, rescan_synth, tmp_path_factory) -> dict:
     import json
     import shutil
 
-    import pymupdf
+    from minedocscan.tools.pdfwrite import copy_pages
 
     root = tmp_path_factory.mktemp("bundles")
     site = root / "site"
@@ -573,14 +568,7 @@ def bundles(synth, usage_synth, rescan_synth, tmp_path_factory) -> dict:
            "rescan": sorted(rescan_synth.scans.glob("*_rescan.pdf"))}
     files = {}
     for name, parts in BUNDLES.items():
-        with pymupdf.open() as d:
-            for kind, day, pages in parts:
-                with pymupdf.open(str(src[kind][day])) as s:
-                    for p in pages:
-                        d.insert_pdf(s, from_page=p - 1, to_page=p - 1)
-            files[name] = root / "scans" / f"{name}.pdf"
-            files[name].parent.mkdir(parents=True, exist_ok=True)
-            d.save(str(files[name]), no_new_id=True)
+        files[name] = copy_pages([(src[kind][day], pages) for kind, day, pages in parts], root / "scans" / f"{name}.pdf")
     return {"scans": root / "scans", "site": site, "files": files}
 
 

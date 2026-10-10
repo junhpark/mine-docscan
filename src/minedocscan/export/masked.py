@@ -6,7 +6,8 @@
   redact     템플릿의 redact 상자 (결재란, 인쇄된 이름·등록번호 열 — 판마다 따로)
   text       글자 칸 전부: 표의 handwritten_text 열(칸은 괘선까지 — cells(inset=0))과 표 밖의 글자 필드. --keep-text 면 남긴다
              (그때는 meta_key 가 없는 이름 필드도 남는다)
-표 밖 필드와 redact 상자는 pad_px 만큼 넓힌다 (글씨가 상자를 넘는다). 수 칸·✓ 칸·인쇄는 남는다.
+표 밖 필드와 redact 상자는 pad_px 만큼 넓힌다 (글씨가 상자를 넘는다). 수 칸·✓ 칸·인쇄는 남는다 — 다만 넓힌 상자에 걸친 만큼은
+가려진다 (기본 48 px 이면 표 밖 필드 옆의 수 칸을 덮을 수 있다 — 가리는 쪽으로 틀리는 편이 낫다).
 
 **템플릿이 아는 자리만 가린다** — 표 위에 걸쳐 쓴 메모, 수 칸에 적은 이름, 템플릿에 적지 않은 인쇄는 남는다. 내보낸 그림은 사람이 보고
 나서 쓴다. 내보낸 폴더도 현장 데이터다 (저장소 밖에 — 명령이 저장소 안을 거절한다). 작업 DB 는 읽기만 한다.
@@ -23,10 +24,12 @@ from ..forms.template import Template
 from ..imaging.io import imwrite
 
 DEFAULT_META_KEYS = ("operator", "vehicle_no")
-# 표 밖 필드·redact 상자를 넓히는 폭 (px, 200 dpi 템플릿 좌표). 합성 세 묶음(기본·메타 필드·가동 일보, 사흘씩)의 표 밖 필드 206개에서
-# 그 칸의 글씨(기준 이미지에 없는 잉크의 연결 성분 중 절반 넘게 상자 안인 것)가 상자를 넘은 거리: 최대 11 px(작성자), 99 % 9 px,
-# 95 % 5 px. 16 px(약 2 mm)로 둔다. 실제 글씨는 더 넘을 수 있다 — 현장의 값은 site.toml [redact] pad_px (8절 5).
-DEFAULT_PAD_PX = 16
+# 표 밖 필드·redact 상자를 넓히는 폭 (px, 200 dpi 템플릿 좌표 — 48 px 은 약 6 mm).
+# 실제 일보 30쪽(검증용으로 그린 초안 템플릿, tasks/0009 1절 다): 16 px 로는 약 25쪽에서 작성자 이름의 첫 획이 상자 밖에 남았고, 48 px 로는
+# 이름이 30쪽 모두 가려졌다 (끝 획의 꼬리 2쪽). 번호를 칸 위에 크게 쓴 1쪽은 48 px 로도 일부가 남는다 — 그때는 상자 자체를 넓힌다
+# (docs/SITE_PACK.md). 가리는 쪽으로 틀리는 편이 낫다. (그 전의 16 px 은 합성 세 묶음의 표 밖 필드 206개에서 글씨가 상자를 넘은 거리 —
+# 최대 11 px — 로 잡은 값이었다. 합성 글씨는 실제보다 덜 넘는다.) 현장의 값은 site.toml [redact] pad_px.
+DEFAULT_PAD_PX = 48
 FILL = 0                         # 채우는 색 (검정 — 가린 자리가 가린 것으로 보이게)
 KINDS = ("signature", "meta", "redact", "text")
 
@@ -54,6 +57,14 @@ def page_boxes(tpl: Template, meta_keys, pad: int, keep_text: bool = False) -> l
     return out
 
 
+def redact_settings(site) -> tuple[tuple[str, ...] | list[str], int]:
+    """사이트 팩의 [redact] — (가릴 메타 키, 넓히는 폭). 없으면 기본값 (자가 시험이 같은 상자를 다시 그린다)."""
+    cfg = getattr(site, "redact", None) or {}
+    meta_keys = cfg.get("meta_keys") if cfg.get("meta_keys") is not None else DEFAULT_META_KEYS
+    pad = cfg.get("pad_px") if cfg.get("pad_px") is not None else DEFAULT_PAD_PX
+    return meta_keys, pad
+
+
 def mask(gray: np.ndarray, boxes) -> np.ndarray:
     """상자들을 FILL 로 채운 사본 (쪽 밖은 잘라서)."""
     out = gray.copy()
@@ -71,9 +82,7 @@ def export_masked(con: sqlite3.Connection, site, settings, out: Path, date: str 
     (tools/printlayer.page_image — 파이프라인의 정합 그림과 같은 함수). 돌려주는 값: 수만 (이름·값·파일명 없이)."""
     from ..tools.printlayer import page_image
 
-    cfg = getattr(site, "redact", None) or {}
-    meta_keys = cfg.get("meta_keys") if cfg.get("meta_keys") is not None else DEFAULT_META_KEYS
-    pad = cfg.get("pad_px") if cfg.get("pad_px") is not None else DEFAULT_PAD_PX
+    meta_keys, pad = redact_settings(site)
     sql = ("SELECT p.page_id, p.document_id, p.page_no, p.status, p.work_date, p.template_name, p.aligned_image, p.homography, "
            "p.render_dpi, d.source_path, d.source_rel FROM doc_page p JOIN doc_document d ON p.document_id = d.document_id ")
     if page_ids:
@@ -87,7 +96,6 @@ def export_masked(con: sqlite3.Connection, site, settings, out: Path, date: str 
     if missing:
         skipped["missing"] = missing
     written = 0
-    out.mkdir(parents=True, exist_ok=True)
     for r in rows:
         tpl = site.templates.get(r["template_name"]) if r["template_name"] else None
         if r["status"] != "loaded":
@@ -101,6 +109,7 @@ def export_masked(con: sqlite3.Connection, site, settings, out: Path, date: str 
             skipped[how] += 1
             continue
         bx = page_boxes(tpl, meta_keys, pad, keep_text)
+        out.mkdir(parents=True, exist_ok=True)                # 내보낼 쪽이 있을 때만 만든다 (tasks/0009 4.1 마)
         imwrite(out / f"{r['page_id']}.png", mask(img, bx))
         boxes.update(k for k, _b in bx)
         written += 1
@@ -112,7 +121,8 @@ def format_summary(r: dict, out: Path) -> str:
     b, sk = r["boxes"], r["skipped"]
     reasons = {"not_loaded": "적재되지 않은 쪽", "missing": "없는 쪽 ID", "no_template": "템플릿이 없는 쪽", "no_source": "원본에 닿지 않는 쪽",
                "no_homography": "호모그래피가 없는 쪽", "unreadable": "원본을 읽지 못한 쪽"}
-    lines = [f"가린 쪽 {r['pages']}장 → {out} (파일 이름은 쪽 ID)",
+    lines = [f"가린 쪽 {r['pages']}장 → {out} (파일 이름은 쪽 ID)" if r["pages"]
+             else f"내보낼 쪽이 없습니다 — {out} 을 만들지 않았습니다",
              f"  가린 상자: 서명 {b['signature']}, 메타 필드 {b['meta']}, redact {b['redact']}, 글자 칸 {b['text']} "
              f"(표 밖 필드·redact 는 {r['pad_px']} px 넓혀서)"]
     if sk:

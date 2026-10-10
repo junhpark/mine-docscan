@@ -18,7 +18,15 @@ from minedocscan.config import Settings
 from minedocscan.export import labels as L
 from minedocscan.export.daily import daily_book
 from minedocscan.export.model import UNSURE, field_cell, typed
-from minedocscan.export.writer import RECORD_NAME, ExportError, check_out_dir, daily_path, export_excel
+from minedocscan.export.writer import (
+    RECORD_NAME,
+    ExportError,
+    check_out_dir,
+    daily_path,
+    export_excel,
+    format_result,
+    monthly_path,
+)
 from minedocscan.export.xlsx import read_values
 from minedocscan.forms.equipment import is_equipment_row, layout
 from minedocscan.forms.sitepack import SitePack
@@ -704,6 +712,18 @@ def test_refusals_and_non_iso_dates(null_run, tmp_path):
     assert files == {*r.written, RECORD_NAME}                              # 이름 규칙에 맞는 파일만 — 날짜가 경로가 되지 않았다
     assert daily(r.written) == sorted(daily_path(d) for d in days_of(con) if d != '07/01/2030')
     assert {p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_dir()} <= {"daily", "daily/2030-01", "monthly"}
+    # 바퀴 끝의 내보내기도 알린다: 바퀴를 시작할 때(어느 조각에도 들지 않는 날짜 — 한 번), 그 날짜를 건드린 바퀴, 그 달의 조각
+    from minedocscan.export.auto import AutoExport
+    from minedocscan.touched import Touched
+
+    x = AutoExport(Settings(excel_dir=out, export_sweep_minutes=0.0), null_run.site, clock=lambda: 0.0)
+    assert x.after_round(con, Touched()).skipped_dates == 1
+    while x.sweep.running:
+        assert x.after_round(con, Touched()).skipped_dates == 0
+    assert x.after_round(con, Touched(dates={"07/01/2030"})).skipped_dates == 1
+    con.execute("UPDATE doc_page SET work_date = '2030-01-3x' WHERE work_date = '07/01/2030'")
+    con.commit()
+    assert export_excel(con, null_run.site, out, slices=["2030-01"]).skipped_dates == 1
 
 
 def test_export_command_refuses_while_the_pipeline_runs(null_run, tmp_path, capsys):
@@ -1084,9 +1104,10 @@ def test_template_drift_in_meter_checks_is_not_confirmed(usage_run, monkeypatch)
         raise KeyError("tally")
 
     monkeypatch.setattr(biz, "check_cells", gone)
-    for day in days_of(con):
-        for r in business_rows(book(con, site, day), "xcheck_usage"):
-            assert (r["값 A"], r["값 B"], r["차이"]) == (None, None, None)
+    rows = [r for day in days_of(con) for r in business_rows(book(con, site, day), "xcheck_usage")]
+    assert rows and len(rows) == con.execute("SELECT COUNT(*) FROM xcheck_usage").fetchone()[0]    # 볼 행이 있다 (tasks/0009 4.1 자)
+    for r in rows:
+        assert (r["값 A"], r["값 B"], r["차이"]) == (None, None, None)
 
 
 def test_a_machine_meta_value_marked_illegible_is_hidden_in_business_sheets(null_run):
@@ -1104,3 +1125,257 @@ def test_a_machine_meta_value_marked_illegible_is_hidden_in_business_sheets(null
     src = next(r[L.SOURCE] for r in business_rows(book(con, site, day), "haul_log") if r[L.FIELD_ID].startswith(pid))
     rows = [r for r in business_rows(book(con, site, day), "haul_log") if r[L.SOURCE] == src]
     assert src in shown and rows and all(r["차량번호"] is None for r in rows)
+
+
+# ── 기록 파일의 글자, 사본의 주인, 빈 작업 DB, 날짜 고르기 (tasks/0009 4.1 나·다·사·자) ─────────────────
+OTHER_SITE = "OTHER-SITE-X"                        # 다른 사이트 팩의 이름 (합성 — 글에 찍히지 않아야 한다)
+
+
+def snapshot(out: Path) -> dict[str, tuple[bytes, int]]:
+    """폴더의 파일 전부(기록 파일 포함): 경로 → (바이트, 수정 시각)."""
+    return {p.relative_to(out).as_posix(): (p.read_bytes(), p.stat().st_mtime_ns) for p in sorted(out.rglob("*")) if p.is_file()}
+
+
+def record_of(out: Path) -> dict:
+    """기록 파일을 UTF-8 JSON 으로 읽는다 (쓰는 것은 늘 UTF-8)."""
+    import json
+
+    return json.loads((out / RECORD_NAME).read_bytes().decode("utf-8"))
+
+
+def all_files(con) -> list[str]:
+    days = days_of(con)
+    return sorted([daily_path(d) for d in days] + [monthly_path(m) for m in {d[:7] for d in days}])
+
+
+def test_a_record_that_is_not_utf8_json_is_lost_and_a_locked_record_stops_the_export(null_run, tmp_path, monkeypatch):
+    """기록 파일을 다른 인코딩으로 다시 저장했다(UTF-16)·쓰레기 바이트·빈 파일 → 깨졌다: 범위를 주어도 전부 다시 쓰고 기록을 UTF-8 로
+    다시 적는다. 사이트 자리가 글자가 아니거나 빈 기록도 깨진 것이다. 있는데 읽지 못하는 기록(잠겨 있다) → 아무것도 쓰지 않고
+    기록도 그대로 (4.1 나)."""
+    import json
+
+    con, site = null_run.con, null_run.site
+    out = tmp_path / "out"
+    out.mkdir()
+    export_excel(con, site, out, full=True)
+    rec = out / RECORD_NAME
+    good = record_of(out)
+    assert good["site"] == "synthetic" and sorted(good["files"]) == all_files(con)
+    day = days_of(con)[0]
+    odd_site = [json.dumps(dict(good, site=v)).encode() for v in (123, "", "  ", None)]   # 사이트 자리가 글자가 아니다·비었다
+    for raw in (json.dumps(good, ensure_ascii=False).encode("utf-16"), b"\xff\xfe\x00{\x80 garbage \xc3", b"", *odd_site[:3]):
+        rec.write_bytes(raw)
+        r = export_excel(con, site, out, days={day}, months={day[:7]})
+        assert r.record_lost and sorted(r.written) == all_files(con) and not r.deleted and not r.failed, raw[:8]
+        again = record_of(out)                                           # UTF-8 JSON 으로 다시 적었다
+        assert again["site"] == "synthetic" and sorted(again["files"]) == all_files(con)
+        assert {k: v["sha"] for k, v in again["files"].items()} == {k: v["sha"] for k, v in good["files"].items()}
+    rec.write_bytes(odd_site[3])                                         # "site": null 은 옛 기록(키가 없다)과 같다 — 받아들이고 적는다
+    r = export_excel(con, site, out, days={day}, months={day[:7]})
+    assert not r.record_lost and not r.other_site and not r.written and record_of(out)["site"] == "synthetic"
+    # 있는데 읽지 못한다 (기록 파일만 — 엑셀 파일·DB 는 읽힌다): 이번에는 하지 않는다 — 기록을 덮어쓰지 않는다
+    before = snapshot(out)
+    real = Path.read_bytes
+
+    def locked(self):
+        if self.name == RECORD_NAME:
+            raise PermissionError("잠겨 있다")
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", locked)
+    r = export_excel(con, site, out, full=True)
+    monkeypatch.undo()
+    assert r.failed == [RECORD_NAME] and not r.written and not r.deleted and not r.record_lost
+    assert snapshot(out) == before
+
+
+def test_a_folder_of_another_site_is_neither_written_nor_cleaned(null_run, tmp_path, capsys):
+    """기록 파일의 사이트가 다른 이름이면 쓸 것(검수한 칸)도 지울 것(쪽이 없어진 날짜)도 그대로 둔다. 명령은 종료 코드 1 과 한 줄 —
+    두 사이트의 이름 없이 (4.1 다)."""
+    import json
+
+    from minedocscan.cli import main
+
+    con = clone_db(null_run.con)
+    site = null_run.site
+    st = Settings(site=site.root, reviews=tmp_path / "reviews.jsonl")
+    out = tmp_path / "out"
+    out.mkdir()
+    export_excel(con, site, out, full=True)
+    data = record_of(out)
+    data["site"] = OTHER_SITE
+    (out / RECORD_NAME).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    days = days_of(con)
+    fid = con.execute("SELECT source_field_id FROM prod_haul WHERE work_date = ? AND source_role = 'log' AND "
+                      "review_status = 'pending' ORDER BY haul_id LIMIT 1", (days[1],)).fetchone()[0]
+    save(con, site, st, review_from_field(con, fid, "value", "5", "jp"))             # 쓸 파일
+    con.execute("DELETE FROM doc_page WHERE work_date = ?", (days[0],))               # 지울 파일
+    con.commit()
+    before = snapshot(out)
+    for kw in ({"full": True}, {"days": {days[0], days[1]}, "months": {days[0][:7]}}):
+        r = export_excel(con, site, out, **kw)
+        assert r.other_site and (r.written, r.deleted, r.failed, r.unchanged, r.kept) == ([], [], [], 0, 0), kw
+        assert not r.record_lost
+        assert snapshot(out) == before
+    text = format_result(r)
+    assert "다른 사이트 팩의 사본" in text and OTHER_SITE not in text and "synthetic" not in text
+    s = null_run.settings
+    assert main(["export", "excel", str(out), "--site", str(s.site), "--work-root", str(s.work_root)]) == 1
+    cap = capsys.readouterr()
+    assert "다른 사이트 팩의 사본" in cap.out and len(cap.out.strip().splitlines()) == 1
+    assert all(name not in cap.out + cap.err for name in (OTHER_SITE, "synthetic"))
+    assert snapshot(out) == before
+
+
+def test_an_old_record_without_a_site_is_accepted_and_gets_one(null_run, tmp_path):
+    """옛 기록(사이트 없음)은 받아들인다 — 여느 내보내기이고(바뀐 것이 없으면 쓰지 않는다), 끝나면 기록에 이 사이트의 이름이 있다."""
+    import json
+
+    con, site = null_run.con, null_run.site
+    out = tmp_path / "out"
+    out.mkdir()
+    export_excel(con, site, out, full=True)
+    data = record_of(out)
+    del data["site"]
+    (out / RECORD_NAME).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    xlsx = {k: v for k, v in snapshot(out).items() if k != RECORD_NAME}
+    r = export_excel(con, site, out, full=True)
+    assert not r.other_site and not r.record_lost and not r.failed
+    assert r.written == [] and r.unchanged == len(all_files(con))
+    assert {k: v for k, v in snapshot(out).items() if k != RECORD_NAME} == xlsx       # 엑셀 파일은 그대로
+    again = record_of(out)
+    assert again["site"] == "synthetic" and again["files"] == data["files"]
+
+
+def test_a_site_pack_without_a_site_name_is_refused(site, null_run, tmp_path, capsys):
+    """site.toml 에 [site] name 이 없으면: export_excel 은 ExportError, 명령은 한 줄로 거절, 자동 내보내기는 켜지 않는다 (한 줄 알림).
+    폴더 이름(site)으로 대신하지 않는다 (4.1 다)."""
+    import shutil
+
+    from minedocscan.cli import _round_jobs, main
+    from minedocscan.export.auto import AutoExport
+    from minedocscan.touched import Touched
+
+    root = tmp_path / "site"
+    shutil.copytree(site.root, root)
+    toml = root / "site.toml"
+    text = toml.read_text(encoding="utf-8")
+    assert text.count('name = "synthetic"\n') == 1
+    toml.write_text(text.replace('name = "synthetic"\n', ""), encoding="utf-8")
+    noname = SitePack(root)
+    assert noname.declared_name is None and noname.name == "site"                     # 폴더 이름은 표식이 아니다
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(ExportError) as e:
+        export_excel(null_run.con, noname, out, full=True)
+    assert "[site] name" in str(e.value)
+    s = null_run.settings
+    with pytest.raises(SystemExit) as e:
+        main(["export", "excel", str(out), "--site", str(root), "--work-root", str(s.work_root)])
+    msg = str(e.value)
+    assert "[site] name" in msg and "\n" not in msg
+    st = Settings(site=root, excel_dir=out, reviews=tmp_path / "reviews.jsonl")
+    x = AutoExport(st, noname)
+    assert not x.enabled and x.reason == "no_site_name" and x.status["reason"] == "no_site_name"
+    assert "[site] name" in x.notice and "\n" not in x.notice
+    assert x.after_round(null_run.con, Touched(everything=True)) is None
+    capsys.readouterr()
+    assert _round_jobs(st, noname)["excel"].reason == "no_site_name"
+    err = capsys.readouterr().err
+    assert "[site] name" in err and len([ln for ln in err.splitlines() if "엑셀" in ln]) == 1
+    assert list(out.iterdir()) == []
+
+
+def test_an_empty_work_db_does_not_clean_the_folder(null_run, tmp_path):
+    """쪽이 하나도 없는 작업 DB 로 전부 훑어도 기록된 파일을 지우지 않는다 — "남겨 둔 파일"로 센다 (4.1 다)."""
+    from minedocscan.intake.worker import format_round
+    from minedocscan.store.db import open_db
+
+    con, site = null_run.con, null_run.site
+    out = tmp_path / "out"
+    out.mkdir()
+    export_excel(con, site, out, full=True)
+    before = snapshot(out)
+    n = len(list(out.rglob("*.xlsx")))
+    assert n == len(all_files(con))
+    empty = open_db(f"sqlite:///{tmp_path / 'empty' / 'minedocscan.db'}")
+    try:
+        assert empty.execute("SELECT COUNT(*) FROM doc_page").fetchone()[0] == 0
+        r = export_excel(empty, site, out, full=True)
+    finally:
+        empty.close()
+    assert r.empty_db and not r.deleted and not r.written and not r.failed and r.kept == n
+    assert snapshot(out) == before                                       # 기록 파일도 그대로
+    assert "작업 DB 에 쪽이 없어" in format_result(r)
+    assert "작업 DB 에 쪽이 없어" in format_round({"excel": r.as_dict()})
+    r = export_excel(con, site, out, full=True)                          # 쪽이 있는 DB 로 돌아오면 여느 때처럼
+    assert not r.empty_db and r.written == [] and r.unchanged == n
+
+
+def test_date_selection_is_honoured_on_a_folder_with_a_record(world, tmp_path, capsys):
+    """기록 파일이 있는 폴더에서 --date·--month·--from/--to: 고른 날짜(달)의 파일만 다시 쓴다 — 전부 훑지 않는다 (4.1 자).
+    두 달에 걸치게 d(01-08)를 2030-02-08 로 옮기고, 고르지 않은 쪽에도 늘 바뀐 칸을 남겨 둔다 (전부 훑으면 그 파일도 쓴다)."""
+    import json
+
+    from minedocscan.cli import main
+    from minedocscan.intake import decisions as decs
+
+    pipe, site, st = world["pipe"], world["site"], world["st"]
+    con = pipe.con
+    decs.save(con, st.decisions_path(site.root), [{"target": world["ids"]["d_2030-01-08"], "kind": "date",
+                                                   "value": "2030-02-08"}], "jp")
+    assert pipe.process_pending() == 1
+    x, y = "2030-01-07", "2030-02-08"
+    assert y in days_of(con) and x in days_of(con)
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    common = ["--site", str(st.site), "--work-root", str(st.work_root), "--json"]
+    used: set[str] = set()
+
+    def export(*args) -> list[str]:
+        assert main(["export", "excel", str(out), *common, *args]) == 0
+        return sorted(json.loads(capsys.readouterr().out)["written"])
+
+    def change(day: str) -> None:
+        """그 날짜의 운반 횟수 칸 하나를 검수한다 — 그 날짜의 일별 파일과 그 달의 파일이 바뀐다."""
+        fid = next(r[0] for r in con.execute("SELECT source_field_id FROM prod_haul WHERE work_date = ? AND source_role = 'log' "
+                                             "AND review_status = 'pending' ORDER BY haul_id", (day,)) if r[0] not in used)
+        used.add(fid)
+        save(con, site, st, review_from_field(con, fid, "value", "3", "jp"))
+
+    assert export() == all_files(con)                                   # 처음: 전부
+    files_x, files_y = [daily_path(x), monthly_path(x[:7])], [daily_path(y), monthly_path(y[:7])]
+    change(x)
+    change(y)
+    assert export("--date", x) == files_x                               # y 의 바뀐 칸은 남는다
+    change(x)
+    assert export("--month", y[:7]) == files_y                          # x 의 바뀐 칸은 남는다
+    change(y)
+    assert export("--from", "2030-01-01", "--to", "2030-01-31") == files_x
+    assert export() == files_y                                          # 남겨 둔 y 의 바뀐 칸은 전부 훑기가 쓴다
+    assert export() == []
+
+
+def test_export_command_date_arguments(null_run, tmp_path, capsys):
+    """--month 9999-12(date 가 다룰 수 있는 마지막 달)는 여느 실행이다 (OverflowError 가 아니다). --date 는 YYYY-MM-DD 만
+    (20300107 은 거절), --month 는 YYYY-MM 만 (4.1 사)."""
+    from minedocscan.cli import main
+
+    s = null_run.settings
+    out = tmp_path / "out"
+    out.mkdir()
+    common = ["export", "excel", str(out), "--site", str(s.site), "--work-root", str(s.work_root)]
+    assert main(common) == 0
+    capsys.readouterr()
+    before = snapshot(out)
+    for args in (["--month", "9999-12"], ["--date", "9999-12-31"], ["--from", "9999-12-01", "--to", "9999-12-31"]):
+        assert main([*common, *args]) == 0, args
+        assert "쓴 파일 0" in capsys.readouterr().out
+    assert snapshot(out) == before
+    for args, want in ((["--date", "20300107"], "YYYY-MM-DD"), (["--from", "20300107"], "YYYY-MM-DD"),
+                       (["--month", "2030-1"], "YYYY-MM"), (["--month", "203001"], "YYYY-MM"),
+                       (["--month", "2030-13"], "YYYY-MM")):
+        with pytest.raises(SystemExit) as e:
+            main([*common, *args])
+        assert want in str(e.value), args
+    assert snapshot(out) == before

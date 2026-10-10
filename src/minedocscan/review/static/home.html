@@ -100,28 +100,37 @@
     return '작업: 쉬는 중' + err;
   }
   function docLink(d) { return '<a href="/doc?id=' + encodeURIComponent(d.document_id) + '">' + esc(d.source_name) + '</a>'; }
-  // 엑셀 내려받기 (tasks/0008 4.7): 그 날짜·달의 파일을 그때 만들어 준다 — 날짜가 있는 문서에만
+  // 엑셀 내려받기 (tasks/0008 4.7): 그 날짜·달의 파일을 그때 만들어 준다 — 그 날짜에 쪽이 있는 문서에만 (has_day)
   function xlsxLinks(day) {
     if (!day) return '';
     return ' <a class="xl" href="/export/day.xlsx?date=' + encodeURIComponent(day) + '" title="그 날짜의 엑셀">엑셀</a>'
       + ' <a class="xl" href="/export/month.xlsx?month=' + encodeURIComponent(day.slice(0, 7)) + '" title="그 달의 엑셀">월</a>';
   }
+  // 조각으로 나눈 전체 훑기 (tasks/0009 4.2 가): 도는 중이면 "처음 훑는 중 3/13", 아니면 마지막으로 다 돈 시각
+  function sweepText(j) {
+    if (j.sweep) return ' · ' + (j.sweep.first ? '처음 훑는 중 ' : '훑는 중 ') + j.sweep.done + '/' + j.sweep.total;
+    return j.last_sweep_at ? ' · 전체 훑기 ' + esc(j.last_sweep_at) : '';
+  }
   // 통합 DB 싣기 (tasks/0008 4.8): 대상은 호스트·DB·스키마만 (비밀번호 없이 — 서버가 그렇게 준다)
   function publishText(p) {
-    if (!p || !p.enabled) return '통합 DB: ' + ({no_driver: '꺼짐 (psycopg 없음)', disabled: '꺼짐 ([publish] enabled = false)', no_watch: '꺼짐 (--no-watch)'}[p && p.reason] || '꺼짐 (MINEDOCSCAN_PUBLISH_URL 없음)');
+    if (!p || !p.enabled) return '통합 DB: ' + ({no_driver: '꺼짐 (psycopg 없음)', disabled: '꺼짐 ([publish] enabled = false)', no_watch: '꺼짐 (--no-watch)',
+                                             no_site_name: '꺼짐 (사이트 팩에 [site] name 없음)'}[p && p.reason] || '꺼짐 (MINEDOCSCAN_PUBLISH_URL 없음)');
     let t = '통합 DB ' + esc(p.target) + '/' + esc(p.schema) + ': ' + (p.last_ok_at ? '마지막 ' + esc(p.last_ok_at) : '실은 적 없음');
     const WHY = {lock_timeout: '대상의 잠금을 기다리다 그만둠', statement_timeout: '대상의 시간 제한을 넘김', connect: '닿지 못함',
-                 connection_lost: '싣는 가운데 연결이 끊김'};
+                 connection_lost: '싣는 가운데 연결이 끊김', other_site: '다른 사이트의 대상', not_ours: '이 프로그램이 만들지 않은 표',
+                 version: '판이 다름 — publish --rebuild'};
     if (p.last_error) t += ' · <span class="status-failed">싣지 못함 (' + esc(WHY[p.last_error] || p.last_error) + ', 밀린 범위 ' + p.behind + ')</span>';
     if (p.skipped) t += ' · <span class="status-failed">실을 수 없는 값이 있어 건너뛴 범위 ' + p.skipped + '</span>';
-    return t;
+    return t + sweepText(p);
   }
   function exportText(x) {
-    if (!x || !x.enabled) return '엑셀: ' + ({refused: '꺼짐 (저장소·접수 폴더 안이라 쓰지 않습니다)', no_watch: '꺼짐 (--no-watch)'}[x && x.reason] || '꺼짐 (excel_dir 없음)');
+    if (!x || !x.enabled) return '엑셀: ' + ({refused: '꺼짐 (저장소·접수 폴더 안이라 쓰지 않습니다)', no_watch: '꺼짐 (--no-watch)',
+                                           no_site_name: '꺼짐 (사이트 팩에 [site] name 없음)'}[x && x.reason] || '꺼짐 (excel_dir 없음)');
     let t = '엑셀: ' + (x.last_at ? '마지막 ' + esc(x.last_at) + ' · ' + x.written + '개 씀' + (x.deleted ? ', ' + x.deleted + '개 지움' : '') : '쓴 적 없음');
-    if (x.failed) t += ' · <span class="status-failed">쓰지 못함 ' + x.failed + '개 (다음 바퀴에 다시)</span>';
+    if (x.failed) t += ' · <span class="status-failed">쓰지 못함 ' + x.failed + '개 (열려 있는 파일 — 잠시 뒤에 다시)</span>';
     if (x.missing_dir) t += ' · <span class="status-failed">폴더가 없습니다</span>';
-    return t;
+    if (x.other_site) t += ' · <span class="status-failed">다른 사이트의 폴더 (쓰지도 지우지도 않음)</span>';
+    return t + sweepText(x);
   }
   function statusCell(d) {
     return '<span class="status-' + esc(d.status) + '">' + esc(STATUS[d.status] || d.status) + '</span>'
@@ -163,6 +172,8 @@
     if (t.page_errors) out += '<span class="hot">오류 난 쪽 <b>' + t.page_errors + '</b></span>';
     if (t.failed_documents) out += '<span class="hot">실패한 문서 <b>' + t.failed_documents + '</b></span>';
     if (t.waiting) out += '<span>다시 처리 대기 <b>' + t.waiting + '</b></span>';
+    if (t.too_long) out += '<span class="hot" title="보관 경로가 259자를 넘는다 — 파일 이름을 줄이거나 보관 폴더를 짧은 경로로 옮기십시오">'
+      + '경로가 너무 길어 접수하지 않은 파일 <b>' + t.too_long + '</b> (접수 폴더에 그대로)</span>';
     out += '</div><h2>대기열</h2><div class="box todo">';
     for (const [tpl, n] of Object.entries(q.pending || {})) {
       out += '<a href="/?name=pending&template=' + encodeURIComponent(tpl) + '">검수 대기 · ' + esc(templates[tpl] || tpl) + ' <b>' + n + '</b></a>';
@@ -187,7 +198,7 @@
     out += '<h2>최근 문서</h2><div class="box"><table><tr><th>받은 시각</th><th>파일명</th><th>쪽</th><th>날짜</th><th>상태</th></tr>';
     for (const d of h.recent) {
       out += '<tr><td>' + esc(d.received_at) + '</td><td>' + docLink(d) + '</td><td class="n">' + esc(d.n_pages)
-        + '</td><td>' + esc(d.work_date || '') + xlsxLinks(d.work_date) + '</td><td>' + statusCell(d) + '</td></tr>';
+        + '</td><td>' + esc(d.work_date || '') + xlsxLinks(d.has_day ? d.work_date : null) + '</td><td>' + statusCell(d) + '</td></tr>';
     }
     out += '</table></div>';
     $('view').innerHTML = out;
@@ -202,7 +213,7 @@
     document.title = 'minedocscan 문서 ' + d.document_id;
     let out = '<h2>' + esc(d.source_name) + ' <span class="muted">' + esc(d.document_id) + '</span></h2>';
     out += '<div class="box">받은 시각 ' + esc(d.received_at) + ' · 쪽 ' + esc(d.n_pages) + ' · 날짜 <b>' + esc(d.work_date || '없음') + '</b>'
-      + (d.date_source ? ' <span class="muted">(' + esc(d.date_source) + ')</span>' : '') + xlsxLinks(d.work_date) + ' · ' + statusCell(d)
+      + (d.date_source ? ' <span class="muted">(' + esc(d.date_source) + ')</span>' : '') + xlsxLinks(d.has_day ? d.work_date : null) + ' · ' + statusCell(d)
       + (d.error ? '<div class="muted">' + esc(d.error) + '</div>' : '') + '</div>';
     out += '<div class="box">문서의 날짜 <input class="date" id="docdate" inputmode="numeric" placeholder="예: 250326" autocomplete="off"> '
       + '<button class="main" id="savedate">날짜 저장</button> <span class="muted">종이의 날짜를 읽어 넣고 <kbd>Enter</kbd> — 25.03.26 · 250326 · 0326 도 됩니다</span> '
@@ -305,7 +316,7 @@
     }
     function closeZoom() {
       $('zoom').hidden = true; $('zbody').innerHTML = ''; $('zact').innerHTML = '';
-      zoomed = null; dateBox.focus();
+      zoomed = null; dateBox.focus({ preventScroll: true });   // 날짜 칸으로 초점만 — 보던 자리에서 맨 위로 뛰지 않게
     }
     $('zclose').onclick = closeZoom;
     $('zfit').onclick = () => $('zbody').classList.toggle('actual');
@@ -313,7 +324,9 @@
     document.onkeydown = (ev) => {
       if ($('zoom').hidden) return;
       if (ev.key === 'Escape') { ev.preventDefault(); closeZoom(); }
-      else if ((ev.key === 'r' || ev.key === 'R') && !$('zturn').hidden) { ev.preventDefault(); turn(zoomed); }
+      else if ((ev.key === 'r' || ev.key === 'R') && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !$('zturn').hidden) {
+        ev.preventDefault(); turn(zoomed);           // Ctrl·Cmd + R 은 새로 고침 — 가로채지 않는다
+      }
     };
     dateBox.focus();
     if (location.hash) {                           // 홈의 "다시 스캔 의심 쪽" 링크(#p<n>) — 그 쪽으로

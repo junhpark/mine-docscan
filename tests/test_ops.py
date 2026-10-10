@@ -4,9 +4,14 @@
 """
 from __future__ import annotations
 
+import contextlib
 import http.client
+import io
 import json
+import re
 import threading
+import zipfile
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -14,12 +19,15 @@ import pytest
 
 from conftest import split_pages
 from minedocscan.cli import main
+from minedocscan.export.daily import daily_book
+from minedocscan.export.monthly import monthly_book
+from minedocscan.export.xlsx import read_values
 from minedocscan.intake import decisions as decs
 from minedocscan.intake.worker import Worker
 from minedocscan.review import queue as rq
 from minedocscan.review.ops import OPS_QUEUES, OpsApp
-from minedocscan.review.server import ApiError, ReviewApp, make_server
-from minedocscan.store.db import open_db
+from minedocscan.review.server import XLSX_TYPE, ApiError, ReviewApp, home_html, make_server
+from minedocscan.store.db import open_db, read_txn
 from minedocscan.tools.synth import _write_pdf, rotate_scan
 
 
@@ -218,7 +226,7 @@ def test_http_routes_checks_and_the_log_has_no_names(ops, capsys):
 # ── 스레드 둘 ───────────────────────────────────────────────────────────────
 def test_screen_saves_and_crops_while_the_worker_is_in_the_middle_of_a_document(ops):
     """작업 스레드가 문서를 처리하는 중(쪽 하나를 커밋하고 다음 쪽 전)에 화면 스레드의 검수 저장과 크롭 요청이 성공한다 —
-    연결 둘, WAL, PyMuPDF 잠금. 순서는 신호로 맞춘다 (시간을 재지 않는다)."""
+    연결 둘, WAL, PDF 잠금(PDFium). 순서는 신호로 맞춘다 (시간을 재지 않는다)."""
     pipe = ops["pipe"]
     b, a = ops["ids"]["b_2030-01-07"], ops["ids"]["a_2030-01-07"]
     screen = open_db(ops["st"].resolved_db_url)
@@ -302,3 +310,166 @@ def test_serve_command_wires_the_worker_and_the_screen(ops, monkeypatch):
     assert seen["app"].ops.worker is None and not seen["app"].ops.watching
     with pytest.raises(SystemExit, match="--reviewer"):
         main(["serve", *common])
+
+
+# ── 엑셀 내려받기 (tasks/0009 4.1 사·자) ────────────────────────────────────────
+@contextlib.contextmanager
+def served(app):
+    """app 을 포트 0 의 스레드에 띄운다. 돌려주는 값: (포트, req) — req(method, path, body, headers) → (상태, 머리글(소문자), 본문).
+    Host 는 127.0.0.1:포트 (headers 로 바꿀 수 있다)."""
+    httpd = make_server(app, port=0)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    def req(method, path, body=None, headers=None):
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+        c.request(method, path, body=body, headers={"Host": f"127.0.0.1:{port}", **(headers or {})})
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        return r.status, {k.lower(): v for k, v in r.getheaders()}, data
+
+    try:
+        yield port, req
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_xlsx_downloads_over_http(ops, tmp_path, capsys):
+    """/export/day.xlsx·/export/month.xlsx 를 HTTP 로: 200 이면 xlsx 의 Content-Type, 내려받기 머리글(attachment, 파일 이름 = 날짜·달),
+    남기지 않는 응답(no-store), 본문은 모델과 같은 시트를 가진 xlsx(zip). 로컬이 아닌 Host 는 403 이고 파일을 주지 않는다. 달력에 없는
+    날짜·꼴이 틀린 날짜·달은 400, 쪽이 없는 날짜·달은 404 (JSON 의 오류). 서버 로그에 날짜가 없다. 검수 화면(ops 없이)에는 이 길이 없다."""
+    con, site = ops["pipe"].con, ops["site"]
+    with read_txn(con):
+        days = [r[0] for r in con.execute("SELECT DISTINCT work_date FROM doc_page WHERE work_date LIKE '2030-01-%' ORDER BY 1")]
+        books = {"2030-01-07.xlsx": daily_book(con, site, "2030-01-07"), "2030-01.xlsx": monthly_book(con, site, "2030-01", days)}
+    app = ReviewApp(con, site, ops["st"], "jp", "pending", ops=ops["ops"])
+    with served(app) as (port, req):
+        for path, name in (("/export/day.xlsx?date=2030-01-07", "2030-01-07.xlsx"),
+                           ("/export/month.xlsx?month=2030-01", "2030-01.xlsx")):
+            s, h, body = req("GET", path)
+            assert s == 200 and h["content-type"] == XLSX_TYPE, path
+            assert h["content-disposition"] == f'attachment; filename="{name}"' and h["cache-control"] == "no-store"
+            assert int(h["content-length"]) == len(body) and body[:2] == b"PK"
+            with zipfile.ZipFile(io.BytesIO(body)) as z:
+                assert z.testzip() is None and "xl/workbook.xml" in z.namelist()
+            (tmp_path / name).write_bytes(body)
+            assert list(read_values(tmp_path / name)) == [sh["name"] for sh in books[name]["sheets"]], name
+        for host in ("evil.example", f"evil.example:{port}", f"127.0.0.1.evil.example:{port}"):   # DNS 를 바꿔 들어온 요청
+            s, h, body = req("GET", "/export/day.xlsx?date=2030-01-07", headers={"Host": host})
+            assert s == 403 and "content-disposition" not in h and json.loads(body)["error"], host
+        for path, status in (("/export/day.xlsx?date=2030-02-30", 400), ("/export/day.xlsx?date=20300107", 400),
+                             ("/export/day.xlsx?date=2030-1-07", 400), ("/export/day.xlsx", 400),
+                             ("/export/month.xlsx?month=2030-13", 400), ("/export/month.xlsx?month=2030-1", 400),
+                             ("/export/month.xlsx", 400), ("/export/day.xlsx?date=2031-01-07", 404),
+                             ("/export/month.xlsx?month=2031-01", 404)):
+            s, h, body = req("GET", path)
+            assert s == status and h["content-type"].startswith("application/json"), path
+            assert "content-disposition" not in h and json.loads(body)["error"], path
+    with served(ReviewApp(con, site, ops["st"], "jp", "pending")) as (_port, req):
+        s, h, body = req("GET", "/export/day.xlsx?date=2030-01-07")
+        assert s == 404 and "content-disposition" not in h
+    log = capsys.readouterr().err
+    assert "GET /export/day.xlsx 200" in log and "GET /export/month.xlsx 200" in log
+    assert "GET /export/day.xlsx 403" in log and "GET /export/month.xlsx 404" in log
+    for secret in ("2030-01", "2031", "evil.example"):
+        assert secret not in log, secret
+
+
+def test_xlsx_links_only_for_documents_with_a_page_on_their_date(ops):
+    """홈·문서 화면의 has_day: 쪽이 다 쪽의 날짜 결정으로 다른 날짜로 간 문서는 False (그 문서 날짜의 내려받기는 404 다). 쪽 하나라도
+    문서 날짜에 남으면 True, 날짜를 기다리는 문서는 False. has_day 인 문서의 날짜는 내려받을 수 있다."""
+    app, con = ops["ops"], ops["pipe"].con
+    u3, b, a = (ops["ids"][k] for k in ("u3_2030-01-09", "b_2030-01-07", "a_2030-01-07"))
+    nd = undated(ops)
+    assert app.home_json()["recent"] and all(d["has_day"] is (d["work_date"] is not None) for d in app.home_json()["recent"])
+    items = [{"target": f"{u3}-p1", "kind": "date", "value": "2030-01-10"},
+             {"target": f"{u3}-p2", "kind": "date", "value": "2030-01-10"},
+             {"target": f"{b}-p1", "kind": "date", "value": "2030-01-10"}]
+    assert app.post_decision({"items": items, "confirm": True})["ok"]
+    Worker(ops["pipe"]).run_once()
+    pages = {r[0]: (r[1], r[2]) for r in con.execute(
+        "SELECT page_id, work_date, status FROM doc_page WHERE document_id IN (?, ?)", (u3, b))}
+    assert pages == {f"{u3}-p1": ("2030-01-10", "loaded"), f"{u3}-p2": ("2030-01-10", "loaded"),
+                     f"{b}-p1": ("2030-01-10", "loaded"), f"{b}-p2": ("2030-01-07", "loaded")}
+    home = app.home_json()
+    recent = {d["document_id"]: d for d in home["recent"]}
+    assert recent[u3]["work_date"] == "2030-01-09" and recent[u3]["has_day"] is False
+    assert recent[b]["has_day"] is True and recent[a]["has_day"] is True
+    assert recent[nd]["work_date"] is None and recent[nd]["has_day"] is False
+    assert [d["has_day"] for d in home["todo"]["needs_date"]] == [False]
+    for doc, want in ((u3, False), (b, True), (a, True), (nd, False)):
+        assert app.doc_json({"id": doc})["document"]["has_day"] is want, doc
+    with pytest.raises(ApiError) as e:                                 # 연결을 두었다면 누르면 404 였다
+        app.export_xlsx("day", {"date": "2030-01-09"})
+    assert e.value.status == 404
+    for day in sorted({d["work_date"] for d in recent.values() if d["has_day"]}):
+        data, name = app.export_xlsx("day", {"date": day})
+        assert name == f"{day}.xlsx" and data[:2] == b"PK"
+
+
+def test_home_page_links_and_zoom_keys_in_the_html():
+    """home.html (글자로 본다): 엑셀 연결은 has_day 일 때만 만든다 (xlsxLinks 를 부르는 곳마다). 크게 보기를 Esc 로 닫으면 날짜 칸으로
+    초점을 옮기되 스크롤하지 않는다 (preventScroll). R 은 Ctrl·Cmd 와 같이 누르면 가로채지 않는다 (새로 고침)."""
+    html = home_html().decode("utf-8")
+    assert re.search(r"function xlsxLinks\(day\) \{\s*if \(!day\) return '';", html)
+    calls = re.findall(r"(?<!function )xlsxLinks\(([^()]*)\)", html)
+    assert len(calls) >= 2 and all(re.fullmatch(r"(\w+)\.has_day \? \1\.work_date : null", c) for c in calls), calls
+    close = html[html.index("function closeZoom()"):html.index("$('zclose').onclick")]
+    assert re.search(r"dateBox\.focus\(\{\s*preventScroll:\s*true\s*\}\)", close) and ".focus()" not in close
+    keys = html[html.index("document.onkeydown"):]
+    keys = keys[:keys.index("\n    };")]
+    assert re.search(r"ev\.key === 'Escape'\)\s*\{[^}]*closeZoom\(\)", keys)
+    cond = re.search(r"if \(\(ev\.key === 'r' \|\| ev\.key === 'R'\)([^{]*)\{", keys)
+    assert cond and "!ev.ctrlKey" in cond.group(1) and "!ev.metaKey" in cond.group(1), keys
+    assert len(re.findall(r"ev\.key === 'r'", html)) == 1                # R 을 받는 곳은 거기 하나
+
+
+CHROMIUM = "/opt/pw-browsers/chromium"                 # 개발 환경의 Chromium (playwright 의 판과 맞지 않아도 띄울 수 있다)
+
+
+def test_zoom_keys_in_a_browser(ops):
+    """크게 보기를 Chromium 에서 (playwright 와 브라우저가 있을 때만 — 없으면 건너뛴다): 내려 본 자리에서 Esc 로 닫으면 날짜 칸에
+    초점이 가고 스크롤이 그대로다. Ctrl·Cmd 와 같이 누른 R 은 가로채지 않고(기본 동작 그대로) 돌리지도 않는다. R 만 누르면 돌린다."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    nd = undated(ops)                                    # 날짜를 기다리는 문서 — 방향을 모르는 쪽이라 돌리기(R)가 있다
+    app = ReviewApp(ops["pipe"].con, ops["site"], ops["st"], "jp", "pending", ops=ops["ops"])
+    with served(app) as (port, _req), sync_api.sync_playwright() as pw:
+        browser = None
+        for exe in [x for x in (CHROMIUM,) if Path(x).exists()] + [None]:     # 설치된 Chromium, 없으면 playwright 의 것
+            try:
+                browser = pw.chromium.launch(executable_path=exe)
+                break
+            except sync_api.Error:
+                continue
+        if browser is None:
+            pytest.skip("Chromium 을 띄울 수 없다")
+        try:
+            page = browser.new_page(viewport={"width": 900, "height": 500})
+            page.goto(f"http://127.0.0.1:{port}/doc?id={nd}")
+            page.wait_for_selector("img[data-zoom]")
+            zoomed = "!document.getElementById('zoom').hidden"
+            page.evaluate("document.body.style.paddingBottom = '4000px'; window.scrollTo(0, 1500)")
+            page.evaluate("document.querySelector('img[data-zoom]').click()")       # 스크롤하지 않고 연다
+            page.wait_for_function(zoomed)
+            y = page.evaluate("window.scrollY")
+            assert y >= 1000
+            page.keyboard.press("Escape")
+            page.wait_for_function("document.getElementById('zoom').hidden")
+            assert page.evaluate("document.activeElement.id") == "docdate"
+            assert page.evaluate("window.scrollY") == y                             # 날짜 칸(맨 위)으로 뛰지 않았다
+            page.evaluate("document.querySelector('img[data-zoom]').click()")
+            page.wait_for_function(zoomed)
+            press = """(mods) => {
+                const ev = new KeyboardEvent('keydown', Object.assign({key: 'r', bubbles: true, cancelable: true}, mods));
+                const passed = document.activeElement.dispatchEvent(ev);
+                return [passed, document.querySelector('#zbody img').getAttribute('src')];
+            }"""
+            for mods in ({"ctrlKey": True}, {"metaKey": True}, {"key": "R", "ctrlKey": True, "shiftKey": True}):
+                passed, src = page.evaluate(press, mods)
+                assert passed and "rot=" not in src, mods                          # 기본 동작을 막지 않았고 돌리지도 않았다
+            passed, src = page.evaluate(press, {})
+            assert not passed and "rot=90" in src
+        finally:
+            browser.close()

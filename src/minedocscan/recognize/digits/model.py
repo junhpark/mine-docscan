@@ -263,8 +263,14 @@ def _pid_alive(pid: int) -> bool:
         kernel32 = ctypes.windll.kernel32
         handle = kernel32.OpenProcess(0x1000, False, pid)       # PROCESS_QUERY_LIMITED_INFORMATION
         if handle:
-            kernel32.CloseHandle(handle)
-            return True
+            # 끝난 프로세스도 누가 핸들을 쥐고 있으면(띄운 쪽의 Popen) 열린다 — 끝났는지는 종료 코드로 (STILL_ACTIVE = 259)
+            try:
+                code = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return code.value == 259
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
         return kernel32.GetLastError() == 5                    # ERROR_ACCESS_DENIED: 있지만 볼 권한이 없다
     try:
         os.kill(pid, 0)

@@ -298,6 +298,7 @@ def test_failed_files_and_a_missing_folder_are_retried_and_the_home_counts(world
     assert r["excel"]["failed"] == 1 and ops.home_json()["export"]["failed"] == 1
     assert "쓰지 못함 1" in format_round(r)
     monkeypatch.setattr(w, "_replace", real)
+    x.clock.t += 61                                                # retry_seconds 가 지나면
     r = worker.run_once()                                          # 건드린 것이 없어도 쓰지 못한 날짜를 다시 본다
     assert r["excel"]["written"] == 1 and ops.home_json()["export"]["failed"] == 0
     nothing_missed(world, out)
@@ -312,6 +313,11 @@ def test_failed_files_and_a_missing_folder_are_retried_and_the_home_counts(world
     out.mkdir()                                                    # 돌아오면 그 바퀴에 밀린 날짜를 쓴다
     r = worker.run_once()
     assert r["excel"]["written"] and not r["excel"]["missing_dir"]
+    assert x.sweep.due()                                           # 기록이 없다 — 나머지는 새 조각 바퀴가 다시 쓴다
+    for _ in range(5):
+        worker.run_once()
+        if not x.sweep.running:
+            break
     assert same_as_db(con, site, out) == 4
 
 
@@ -456,13 +462,14 @@ def test_info_shows_the_export_settings(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setenv("MINEDOCSCAN_EXCEL_DIR", str(tmp_path / "엑셀"))
     cfg = tmp_path / "minedocscan.toml"
-    cfg.write_text("[export]\nsweep_minutes = 5\nmachine_values = true\n", encoding="utf-8")
+    cfg.write_text("[export]\nsweep_minutes = 5\nmachine_values = true\nretry_seconds = 30\n", encoding="utf-8")
     assert main(["info", "--config", str(cfg), "--json"]) == 0
     data = json.loads(capsys.readouterr().out)["export"]
-    assert data == {"excel_dir": str(tmp_path / "엑셀"), "sweep_minutes": 5.0, "machine_values": True}
-    cfg.write_text("[export]\nsweep_minutes = -1\n", encoding="utf-8")
-    with pytest.raises(SystemExit):
-        main(["info", "--config", str(cfg)])
+    assert data == {"excel_dir": str(tmp_path / "엑셀"), "sweep_minutes": 5.0, "machine_values": True, "retry_seconds": 30.0}
+    for bad in ("sweep_minutes = -1", "retry_seconds = -1"):
+        cfg.write_text(f"[export]\n{bad}\n", encoding="utf-8")
+        with pytest.raises(SystemExit):
+            main(["info", "--config", str(cfg)])
 
 
 def test_a_decision_from_the_screen_marks_its_documents(world, tmp_path):
@@ -494,3 +501,383 @@ def test_a_decision_from_the_screen_marks_its_documents(world, tmp_path):
     pipe.process_pending()                                    # 같은 요청 번호로 다시 닿지 않으면 다시 건드리지 않는다
     assert not pipe.touched.documents
     shutil.move(str(moved / "d_2030-01-08.pdf"), world["scans"] / "d_2030-01-08.pdf")
+
+
+# ── 사본의 주인과 더러운 범위의 구멍 (tasks/0009 4.1 다·바) ─────────────────────────────────
+def record_shas(out) -> dict[str, str]:
+    """기록 파일의 파일 → 모델의 해시."""
+    from minedocscan.export.writer import load_record
+
+    files, lost, _site = load_record(out)
+    assert not lost
+    return {k: v["sha"] for k, v in files.items()}
+
+
+def full_export_shas(con, site, root) -> dict[str, str]:
+    """같은 DB 를 새 폴더에 전부 내보낸 것의 해시 — "엑셀 폴더 = 그 DB 를 전부 내보낸 것"의 기준."""
+    fresh = root / "견줄 폴더"
+    fresh.mkdir()
+    r = export_excel(con, site, fresh, full=True)
+    assert not r.failed and r.written
+    return record_shas(fresh)
+
+
+def test_a_folder_of_another_site_is_said_once_and_left_alone(world, tmp_path):
+    """기록 파일이 다른 사이트의 것이면 자동 내보내기는 바퀴마다 아무것도 쓰거나 지우지 않는다: 첫 바퀴만 요약(Result.other_site,
+    "다른 사이트의 폴더"), 다음 바퀴는 None — 홈의 상태에는 늘 보인다. 기록 파일을 지우면(안내대로) 다음 바퀴에 전부 쓴다."""
+    import json
+
+    from minedocscan.export.model import MODEL_VERSION
+    from minedocscan.export.writer import RECORD_NAME
+
+    pipe, site, st = world["pipe"], world["site"], world["st"]
+    con = pipe.con
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    rec = out / RECORD_NAME
+    rec.write_text(json.dumps({"model": MODEL_VERSION, "site": "OTHER-SITE-X", "files": {}}), encoding="utf-8")
+    raw = rec.read_bytes()
+    x = auto(world, out)
+    assert x.enabled and x.status["other_site"] is False
+    worker = Worker(pipe, after={"excel": x})
+    ops = OpsApp(con, site, st, "jp", worker=worker, excel=x)
+    first = x.after_round(con, Touched())                               # 시작할 때의 전체 훑기
+    assert first is not None and first.other_site and (first.written, first.deleted, first.failed) == ([], [], [])
+    assert x.status["other_site"] and ops.home_json()["export"]["other_site"]
+    text = format_round({"processed": 0, "excel": first.as_dict()})
+    assert "다른 사이트의 폴더" in text and "OTHER-SITE-X" not in text and site.declared_name not in text
+    assert x.after_round(con, Touched(everything=True)) is None         # 요약은 처음 한 번
+    assert x.status["other_site"] and x.status["rounds"] == 2
+    r = worker.run_once()
+    assert "excel" not in r and "excel_error" not in r and ops.home_json()["export"]["other_site"]
+    assert [p.name for p in out.rglob("*") if p.is_file()] == [RECORD_NAME] and rec.read_bytes() == raw
+    rec.unlink()                                                        # 이 사이트로 바꾼다
+    r = worker.run_once()
+    assert r["excel"]["written"] == 4 and r["excel"]["record_lost"] and not r["excel"]["other_site"]
+    assert not x.status["other_site"] and same_as_db(con, site, out) == 4
+
+
+def test_a_document_without_pages_reports_its_old_document_date(world, tmp_path):
+    """쪽이 없는 문서(버린 문서)의 문서 날짜를 결정이 D1 → D2 로 옮긴다: 처리 전에는 D1 의 파일에 "다시 처리 대기"가 하나 있고,
+    처리한 뒤 건드린 날짜에 D1·D2 가 다 있어 더러운 바퀴가 D1 의 파일을 다시 쓴다 — 폴더 = 전부 내보낸 것 (4.1 바)."""
+    pipe, site, st, ids = world["pipe"], world["site"], world["st"], world["ids"]
+    con = pipe.con
+    doc, d1, d2 = ids["d_2030-01-08"], "2030-01-08", "2030-01-09"
+    path = st.decisions_path(site.root)
+    decs.save(con, path, [{"target": doc, "kind": "discard"}], "jp")
+    pipe.process_pending()
+    pipe.touched = Touched()
+
+    def doc_state() -> tuple:
+        n = con.execute("SELECT COUNT(*) FROM doc_page WHERE document_id = ?", (doc,)).fetchone()[0]
+        return (n, *con.execute("SELECT status, work_date FROM doc_document WHERE document_id = ?", (doc,)).fetchone())
+
+    assert doc_state() == (0, "discarded", d1)
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    x = auto(world, out)
+    x.after_round(con, Touched())                                       # 시작할 때의 전체 훑기
+    ops = OpsApp(con, site, st, "jp", excel=x)
+    assert ops.post_decision({"items": [{"target": doc, "kind": "date", "value": d2}], "confirm": True})["ok"]
+    r = x.after_round(con, Touched())                                   # 화면이 넘긴 문서: D1 에 "다시 처리 대기" 1
+    assert daily_path(d1) in r.written and daily_path(d2) not in r.written
+    pipe.process_pending()
+    t, pipe.touched = pipe.touched, Touched()
+    assert doc_state() == (0, "discarded", d2)
+    assert {d1, d2} <= t.dates and not t.everything
+    r = x.after_round(con, t)
+    assert daily_path(d1) in r.written                                  # 대기가 0 으로 — 옛 문서 날짜의 파일
+    assert record_shas(out) == full_export_shas(con, site, tmp_path)
+    nothing_missed(world, out)
+
+
+def test_a_changed_equipment_master_rewrites_the_inspection_sheets_of_every_date(world, tmp_path):
+    """점검표 템플릿의 장비 행(모델)을 바꾼 사이트 팩으로 점검표 문서 하나를 다시 처리하면 eq_equipment 가 바뀐다 — 모든 날짜의 점검
+    시트에 나오므로 건드린 것은 "전부"이고, 더러운 바퀴가 다른 날짜(그 문서가 없는 날짜)의 점검 시트도 다시 쓴다 (4.1 바)."""
+    import yaml
+
+    from minedocscan.export import labels as L
+    from minedocscan.forms.equipment import is_equipment_row
+    from minedocscan.forms.sitepack import SitePack
+    from minedocscan.pipeline import Pipeline
+
+    pipe, site, st, ids = world["pipe"], world["site"], world["st"], world["ids"]
+    con = pipe.con
+    # 점검표가 있는 날짜를 둘로: c(점검표 + T01)를 01-08 로 (지금의 사이트 팩으로)
+    decs.save(con, st.decisions_path(site.root), [{"target": ids["c_2030-01-07"], "kind": "date", "value": "2030-01-08"}], "jp")
+    pipe.process_pending()
+    pipe.touched = Touched()
+    insp_days = sorted(r[0] for r in con.execute("SELECT DISTINCT inspection_date FROM insp_daily"))
+    assert insp_days == ["2030-01-07", "2030-01-08"]
+    # 장비 행 하나의 모델만 바꾼 사이트 팩 (키는 그대로 — 같은 장비 ID)
+    root = tmp_path / "site2"
+    shutil.copytree(site.root, root)
+    ty = root / "templates" / "synth_inspection" / "template.yaml"
+    spec = yaml.safe_load(ty.read_text(encoding="utf-8"))
+    row = next(r for r in spec["regions"][0]["rows"] if is_equipment_row(r))
+    row["model"] = new_model = f"{row['model']}-X2"
+    ty.write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    site2 = SitePack(root)
+    st2 = replace(st, site=root)
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    x = AutoExport(replace(st2, excel_dir=out, export_sweep_minutes=0), site2, clock=Clock(),
+                   now=lambda: "2030-02-01T00:00:00Z")
+    assert x.after_round(con, Touched()).written                        # 시작할 때의 전체 훑기 (장비 마스터는 옛 모델)
+    pipe2 = Pipeline(st2, site=site2, con=con)
+    decs.request_work(con, [ids["a_2030-01-07"]])
+    con.commit()
+    assert pipe2.process_pending() >= 1
+    t = pipe2.touched
+    assert t.everything
+    narrow = Touched(dates=set(t.dates), documents=set(t.documents), removed=set(t.removed))
+    assert "2030-01-08" not in narrow.all_dates(con)                    # "전부"가 아니면 01-08 은 범위 밖이다
+    hid = con.execute("SELECT hid FROM eq_equipment WHERE equipment_key = ?", (str(row["key"]),)).fetchone()[0]
+    assert new_model in hid
+    r = x.after_round(con, t)
+    assert {daily_path(d) for d in insp_days} | {monthly_path("2030-01")} <= set(r.written)
+    for d in insp_days:                                                 # 두 날짜의 점검 시트에 새 모델
+        sheet = read_values(out / daily_path(d))[L.SHEETS["inspection"]]
+        assert any(isinstance(v, str) and new_model in v for row_ in sheet for v in row_), d
+    assert record_shas(out) == full_export_shas(con, site2, tmp_path)
+
+
+# ── 조각으로 나눈 전체 훑기 (tasks/0009 4.2 가) ───────────────────────────────────────
+def two_months(world) -> None:
+    """d 문서를 2030-02-08 로 옮겨 달이 둘이 되게 한다 (결정 → 처리)."""
+    pipe, site, st = world["pipe"], world["site"], world["st"]
+    decs.save(pipe.con, st.decisions_path(site.root), [{"target": world["ids"]["d_2030-01-08"], "kind": "date",
+                                                       "value": "2030-02-08"}], "jp")
+    pipe.process_pending()
+    pipe.touched = Touched()
+
+
+def test_a_sweep_goes_one_month_per_round_and_ends_equal_to_a_full_export(world, tmp_path):
+    """전체 훑기는 바퀴마다 달 하나씩: 달의 목록은 작업 DB 의 달과 기록·폴더에만 있는 달 — 기록에만 있는 달의 파일도 지워진다.
+    도는 동안 홈에 "처음 훑는 중 n/N", 다 돌면 마지막 전체 훑기의 시각. 다 돈 폴더 = 전부 내보낸 것. sweep_minutes = 0 이면 시작할 때
+    한 바퀴만."""
+    import json
+
+    from minedocscan.export.model import MODEL_VERSION
+    from minedocscan.export.writer import RECORD_NAME
+
+    con, site, st = world["pipe"].con, world["site"], world["st"]
+    two_months(world)
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    export_excel(con, site, out, full=True)
+    stray = out / "daily" / "2029-12" / "2029-12-31.xlsx"            # 기록에만 있는 달 (그 날짜의 쪽은 없다)
+    stray.parent.mkdir(parents=True)
+    shutil.copy(out / daily_path("2030-01-07"), stray)
+    rec = json.loads((out / RECORD_NAME).read_text(encoding="utf-8"))
+    rec["files"]["daily/2029-12/2029-12-31.xlsx"] = {"sha": "0" * 64, "model": MODEL_VERSION, "written_at": "x"}
+    (out / RECORD_NAME).write_text(json.dumps(rec), encoding="utf-8")
+    x = auto(world, out)
+    ops = OpsApp(con, site, st, "jp", excel=x)
+    r = x.after_round(con, Touched())                                   # 첫 조각: 2029-12
+    assert r.deleted == ["daily/2029-12/2029-12-31.xlsx"] and not stray.exists()
+    assert x.status["sweep"] == {"done": 1, "total": 3, "first": True} and x.status["last_sweep_at"] is None
+    assert ops.home_json()["export"]["sweep"] == {"done": 1, "total": 3, "first": True}
+    r = x.after_round(con, Touched())                                   # 2030-01
+    assert x.status["sweep"]["done"] == 2 and not any("2030-02" in p for p in r.written)
+    x.after_round(con, Touched())                                       # 2030-02 — 다 돌았다
+    assert x.status["sweep"] is None and x.status["last_sweep_at"] == "2030-02-01T00:00:00Z" and x.last_sweep == x.clock()
+    assert record_shas(out) == full_export_shas(con, site, tmp_path)
+    x.clock.t += 10_000
+    assert x.after_round(con, Touched()) is None                        # sweep_minutes = 0 — 다시 시작하지 않는다
+
+
+def test_an_empty_folder_and_a_lost_record_are_written_one_month_per_round(world, tmp_path):
+    """처음 쓰는 빈 폴더(기록 파일이 없다)도 한 번에 전부 쓰지 않고 바퀴마다 달 하나씩. 도는 사이에 기록을 잃으면(누가 지웠다) 그 바퀴는
+    더러운 범위와 그 조각만 하고 새 조각 바퀴를 시작한다 — 다 돌면 전부 내보낸 것과 같다. 명령(export_excel)은 지금처럼 한 번에 전부."""
+    from minedocscan.export.writer import RECORD_NAME
+
+    con, site = world["pipe"].con, world["site"]
+    two_months(world)
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    x = auto(world, out)
+    r = x.after_round(con, Touched())                                   # 2030-01 만
+    assert r.record_lost and r.written and all("2030-01" in p for p in r.written), r.as_dict()
+    assert x.status["sweep"] == {"done": 1, "total": 2, "first": True}
+    (out / RECORD_NAME).unlink()                                        # 도는 사이에 기록을 잃었다
+    r = x.after_round(con, Touched())                                   # 2030-02 를 하고 — 새 바퀴로
+    assert r.record_lost and all("2030-02" in p for p in r.written) and x.sweep.due()
+    n = 0
+    while True:
+        x.after_round(con, Touched())
+        n += 1
+        if not x.sweep.running:
+            break
+    assert n == 2 and x.status["last_sweep_at"]
+    assert record_shas(out) == full_export_shas(con, site, tmp_path)
+    one = tmp_path / "명령"
+    one.mkdir()
+    r = export_excel(con, site, one, days=["2030-01-07"])               # 명령: 기록이 없으면 전부
+    assert r.record_lost and any("2030-02" in p for p in r.written)
+
+
+def test_watch_once_does_the_whole_sweep_in_its_one_round(world, tmp_path):
+    """watch --once 는 다음 바퀴가 없다 — 할 때가 된 전체 훑기를 조각으로 나누지 않고 그 바퀴에 한 번에 한다 (나누면 실행마다 첫 달만
+    훑어 다음 달은 영영 훑지 않는다)."""
+    from minedocscan.cli import _round_jobs
+
+    con, site, st = world["pipe"].con, world["site"], world["st"]
+    two_months(world)
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    x = _round_jobs(replace(st, excel_dir=out), site, once=True)["excel"]
+    assert x.once and not _round_jobs(replace(st, excel_dir=out), site)["excel"].once
+    x.after_round(con, Touched())
+    assert x.status["sweep"] is None and x.status["last_sweep_at"]
+    assert record_shas(out) == full_export_shas(con, site, tmp_path)
+
+
+def test_a_cycle_that_could_not_start_starts_again(world, tmp_path):
+    """바퀴를 시작하는 바퀴에 아무것도 하지 못했으면(폴더가 없다) 그 바퀴는 없던 것으로 — 폴더가 돌아오면 달의 목록부터 다시 시작해
+    끝까지 간다 (멈춰 서지 않는다)."""
+    con, site = world["pipe"].con, world["site"]
+    two_months(world)
+    out = tmp_path / "엑셀"
+    x = auto(world, out)
+    r = x.after_round(con, Touched())
+    assert r.missing_dir and not x.sweep.running and x.sweep.due() and x.status["sweep"] is None
+    out.mkdir()
+    n = 0
+    while True:
+        x.after_round(con, Touched())
+        n += 1
+        if not x.sweep.running:
+            break
+    assert n == 2 and x.status["last_sweep_at"]
+    assert record_shas(out) == full_export_shas(con, site, tmp_path)
+
+
+def test_an_unreadable_record_shows_on_the_home_and_in_the_summary_once(world, tmp_path):
+    """기록 파일을 읽지 못하면(잠겨 있다 — 여기서는 그 이름의 폴더) 홈의 "쓰지 못함"에 들고 요약에는 수가 바뀐 바퀴에만. 풀리면 0."""
+    from minedocscan.cli import _worth_showing
+    from minedocscan.export.writer import RECORD_NAME
+
+    con, site = world["pipe"].con, world["site"]
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    (out / RECORD_NAME).mkdir()
+    x = auto(world, out)
+    r = x.after_round(con, Touched())
+    assert RECORD_NAME in r.failed and x.status["failed"] == 1 and r.failing == 1
+    assert _worth_showing({"excel": r.as_dict()}) and "쓰지 못함 1" in format_round({"excel": r.as_dict()})
+    r = x.after_round(con, Touched(dates={"2030-01-07"}))
+    assert x.status["failed"] == 1 and not _worth_showing({"excel": r.as_dict()})
+    (out / RECORD_NAME).rmdir()
+    while True:
+        r = x.after_round(con, Touched())
+        if not x.sweep.running:
+            break
+    assert x.status["failed"] == 0 and record_shas(out) == full_export_shas(con, site, tmp_path)
+
+
+def test_touched_is_kept_when_reading_the_dirty_range_fails(world, tmp_path, monkeypatch):
+    """바퀴 끝의 내보내기가 더러운 범위를 읽다가 실패하면(DB 가 잠겼다 …) 건드린 것을 다음 바퀴로 넘긴다 (버리지 않는다)."""
+    con = world["pipe"].con
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    x = auto(world, out)
+    while True:
+        x.after_round(con, Touched())
+        if not x.sweep.running:
+            break
+
+    def boom(self, con_):
+        raise RuntimeError("시험용")
+
+    monkeypatch.setattr(Touched, "all_dates", boom)
+    with pytest.raises(RuntimeError):
+        x.after_round(con, Touched(dates={"2030-01-07"}, documents={world["ids"]["a_2030-01-07"]}))
+    held = x.box.take()
+    assert held.dates == {"2030-01-07"} and held.documents == {world["ids"]["a_2030-01-07"]}
+    # 바퀴를 시작하는 바퀴에서 실패해도 그 바퀴는 없던 것으로 — 다음에 다시 시작한다 (빈 달 목록으로 멈춰 서지 않는다)
+    y = auto(world, tmp_path / "없는 폴더")
+    with pytest.raises(RuntimeError):
+        y.after_round(con, Touched())
+    assert not y.sweep.running and y.sweep.due()
+    monkeypatch.undo()
+
+
+def test_a_sweep_restarts_every_sweep_minutes_and_dirty_dates_ride_along(world, tmp_path):
+    """sweep_minutes 마다 새 바퀴. 도는 동안 더러운 날짜는 그 바퀴에 같이 한다 (조각과 겹치면 한 번만 — 파일은 한 번 쓴다)."""
+    con, site, st = world["pipe"].con, world["site"], world["st"]
+    two_months(world)
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    x = auto(world, out, sweep=1.0)
+    x.after_round(con, Touched())
+    x.after_round(con, Touched())                                       # 처음 바퀴를 다 돌았다 (달 둘)
+    assert x.status["sweep"] is None and x.last_sweep == x.clock()
+    assert x.after_round(con, Touched()) is None                        # 1분이 지나지 않았다
+    x.clock.t += 61
+    fid, day = con.execute("SELECT source_field_id, work_date FROM prod_haul WHERE source_role = 'log' AND review_status = 'pending' "
+                           "AND work_date LIKE '2030-01-%' ORDER BY haul_id LIMIT 1").fetchone()
+    t = Touched()
+    save(con, site, st, review_from_field(con, fid, "value", "7", "jp"), touched=t)
+    r = x.after_round(con, t)                                           # 새 바퀴의 첫 조각(2030-01) + 그 달의 더러운 날짜
+    assert x.status["sweep"] == {"done": 1, "total": 2, "first": False}
+    assert sorted(r.written) == [daily_path(day), monthly_path("2030-01")]
+    r = x.after_round(con, Touched())
+    assert r.written == [] and x.status["sweep"] is None
+    assert record_shas(out) == full_export_shas(con, site, tmp_path)
+
+
+def test_a_file_that_stays_open_is_retried_every_retry_seconds_and_said_once(world, tmp_path, monkeypatch):
+    """바꾸지 못하는 파일 하나가 10바퀴 동안 열려 있으면 그 파일의 모델은 retry_seconds 마다만 만들고(그 사이의 바퀴는 만들지 않는다),
+    바퀴의 요약 줄은 쓰지 못한 파일의 수가 바뀔 때만. 홈의 수는 그대로 보인다 (tasks/0009 4.2 라)."""
+    import minedocscan.export.writer as w
+    from minedocscan.cli import _worth_showing
+
+    con, site, st = world["pipe"].con, world["site"], world["st"]
+    out = tmp_path / "엑셀"
+    out.mkdir()
+    x = auto(world, out)
+    x.after_round(con, Touched())                                       # 처음 바퀴
+    fid, day = con.execute("SELECT source_field_id, work_date FROM prod_haul WHERE source_role = 'log' AND "
+                           "review_status = 'pending' ORDER BY haul_id LIMIT 1").fetchone()
+    real_replace, real_book = w._replace, w.daily_book
+    built = []
+    locked = (day + ".xlsx", day[:7] + ".xlsx")                        # 그 날짜의 파일과 그 달의 파일을 엑셀이 열고 있다
+    monkeypatch.setattr(w, "_replace", lambda src, dst: (_ for _ in ()).throw(PermissionError("열려 있다"))
+                        if str(dst).endswith(locked) else real_replace(src, dst))
+    monkeypatch.setattr(w, "daily_book", lambda con_, site_, d, *a, **kw: (built.append(d) if d == day else None) or
+                        real_book(con_, site_, d, *a, **kw))
+    lines = []
+    for n in range(10):                                                 # 10바퀴, 바퀴마다 7초 — 그 날짜의 칸을 바퀴마다 검수한다
+        t = Touched()
+        save(con, site, st, review_from_field(con, fid, "value", str(3 + n % 2), "jp"), touched=t)
+        out_ = {"excel": x.after_round(con, t).as_dict()}
+        lines.append(_worth_showing(out_))
+        assert x.status["failed"] == 2
+        x.clock.t += 7
+    assert built == [day, day]                                          # 처음과 60초 뒤의 한 번 (7초 × 9 = 63초)
+    assert lines == [True] + [False] * 9                                # 요약은 수가 바뀐 처음 바퀴에만
+    monkeypatch.setattr(w, "_replace", real_replace)
+    x.clock.t += 60
+    r = x.after_round(con, Touched())                                   # 닫았다 — 다음 시도에서 쓰고 수가 0 으로
+    assert {daily_path(day), monthly_path(day[:7])} <= set(r.written) and x.status["failed"] == 0
+    assert _worth_showing({"excel": r.as_dict()})
+    assert record_shas(out) == full_export_shas(con, site, tmp_path)
+
+
+def test_a_meter_review_dirties_only_the_neighbouring_records(world, tmp_path):
+    """가동 일보의 계기 칸 하나의 검수 → 그 칸의 날짜와 연속성 행이 바뀐 쪽의 날짜만 (장비의 모든 날짜로 넓히지 않는다 — 4.2 다).
+    장비 이름을 고치면 옛 장비의 사슬(앞 기록이 바뀐 셋째 날)과 새 장비의 사슬을 둘 다 잡는다. Touched 에 장비가 없다."""
+    con, site, st = world["pipe"].con, world["site"], world["st"]
+    pages = chain(world, st)
+    assert not hasattr(Touched(), "refs")
+    t = Touched()
+    save(con, site, st, review_from_field(con, meter_fields(con, pages[2]["page_id"])["start"], "value", "121.0", "jp"), touched=t)
+    assert t.all_dates(con) == {"2030-01-08", "2030-01-09"}             # 셋째 날의 시작 — 그 행과 그 행이 가리키는 앞 기록의 날짜
+    t = Touched()
+    save(con, site, st, review_from_field(con, meter_fields(con, pages[0]["page_id"])["end"], "value", "111.0", "jp"), touched=t)
+    assert t.all_dates(con) == {"2030-01-07", "2030-01-08"}             # 첫날의 종료 → 둘째 날의 연속성 (셋째 날은 아니다)
+    t = Touched()
+    save(con, site, st, review_from_field(con, f"{pages[1]['page_id']}:fields:equipment:-1", "value", "SHOVEL", "jp"), touched=t)
+    # 둘째 날이 빠진 TRUCK 사슬 — 셋째 날의 앞 기록이 첫날로 (셋 다), 새 장비(SHOVEL)의 사슬은 둘째 날 하나
+    assert t.all_dates(con) == {"2030-01-07", "2030-01-08", "2030-01-09"}

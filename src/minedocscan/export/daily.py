@@ -9,7 +9,17 @@ from collections import Counter
 
 from . import labels as L
 from .business import Ctx, daily_business
-from .model import cell, family_of, family_title, finish, form_sheets, head, load_pages, waiting_documents
+from .model import (
+    Pages,
+    cell,
+    family_of,
+    family_title,
+    finish,
+    form_sheets,
+    head,
+    load_pages,
+    waiting_documents,
+)
 
 PAGE_ORDER = tuple(L.PAGE_STATUS)
 
@@ -44,9 +54,11 @@ def summary_rows(con: sqlite3.Connection, site, key_label: str, key: str, pages,
     return rows
 
 
-def daily_book(con: sqlite3.Connection, site, day: str, machine_values: bool = False) -> dict:
-    """그 날짜의 일별 파일 모델. 한 읽기 트랜잭션 안에서 부른다 (store.db.read_txn — 표마다 다른 시점을 보지 않게)."""
-    pages = load_pages(con, [day])
+def daily_book(con: sqlite3.Connection, site, day: str, machine_values: bool = False, pages: Pages | None = None) -> dict:
+    """그 날짜의 일별 파일 모델. 한 읽기 트랜잭션 안에서 부른다 (store.db.read_txn — 표마다 다른 시점을 보지 않게).
+    pages: 이미 읽은 그 날짜의 쪽 (그 달을 읽은 것의 Pages.day — 같은 모델이다). 없으면 읽는다."""
+    if pages is None:
+        pages = load_pages(con, [day])
     forms, pending = form_sheets(site, pages)
     biz = daily_business(Ctx(con, site, pages, machine_values), day)
     summary = {"name": L.SUMMARY, "rows": summary_rows(con, site, L.SEC_DATE, day, pages, pending, [day],

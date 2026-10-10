@@ -104,7 +104,10 @@ def test_decisions_and_reprocessing_with_dirty_scopes_only(world, pg):
     con = pipe.con
     auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0))
     first = auto.after_round(con, Touched())
-    assert first.created and first.full                                       # 시작할 때의 전체 훑기
+    assert first.created and first.slices                                     # 시작할 때의 전체 훑기 (조각으로)
+    whole = first.checked
+    while auto.sweep.running:
+        whole += auto.after_round(con, Touched()).checked
     path = world["st"].decisions_path(site.root)
     a, b, e = ids["a_2030-01-07"], ids["b_2030-01-07"], ids["e_2030-01-07"]
     winner = {r[0]: r[1] for r in con.execute("SELECT inspection_id, page_id FROM insp_daily")}
@@ -120,7 +123,7 @@ def test_decisions_and_reprocessing_with_dirty_scopes_only(world, pg):
         t, pipe.touched = pipe.touched, Touched()
         r = auto.after_round(con, t)
         assert r is not None and not isinstance(r, Exception) and not getattr(r, "kind", None), r
-        assert not r.fell_back and not r.full and r.checked < first.checked   # 더러운 범위만 (전체 훑기가 아니다)
+        assert not r.fell_back and not r.full and r.checked < whole           # 더러운 범위만 (전체 훑기가 아니다)
         assert_same(con, pg)
         now = {r_[0]: r_[1] for r_ in con.execute("SELECT inspection_id, page_id FROM insp_daily")}
         moved |= any(winner.get(k) and v.split("-p")[0] != winner[k].split("-p")[0] for k, v in now.items())
@@ -173,7 +176,7 @@ def test_one_transaction_and_unsuitable_values(world, pg):
 
     auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0))
     out = auto.after_round(con, Touched())
-    assert out.full and out.skipped == 1 and auto.status["skipped"] == 1 and _worth_showing({"publish": out.as_dict()})
+    assert out.slices and out.skipped == 1 and auto.status["skipped"] == 1 and _worth_showing({"publish": out.as_dict()})
     other = world["ids"]["d_2030-01-08"]
     assert not auto.after_round(con, Touched(documents={other})).full and auto.status["skipped"] == 1
     con.execute("UPDATE doc_field SET value_final = 'ab' WHERE value_final = 'a' || char(0) || 'b'")
@@ -222,6 +225,50 @@ def test_a_schema_only_account_can_publish(world, pg):
         u = urlsplit(PG)
         url = f"postgresql://{role}:pw-only-for-this-test@{u.hostname}:{u.port or 5432}{u.path}"
         r = core.run(world["pipe"].con, replace(pg, publish_url=url))
+        assert r.created and r.replaced["document"]
+        assert_same(world["pipe"].con, pg)
+    finally:
+        with psycopg.connect(PG, autocommit=True) as c:
+            c.execute(f'DROP SCHEMA IF EXISTS "{pg.publish_schema}" CASCADE')
+            c.execute(f'DROP ROLE IF EXISTS "{role}"')
+
+
+def test_the_password_comes_from_pgpass(world, pg, tmp_path, monkeypatch):
+    """비밀번호는 libpq 의 pgpass 에 (tasks/0009 4.5 다): URL 에는 계정·서버·DB 만, 비밀번호는 PGPASSFILE(윈도우의 기본 자리는
+    %APPDATA%\\postgresql\\pgpass.conf)의 줄에서 — 프로그램은 바꾸지 않는다. 서버가 비밀번호를 묻는 설정이면 틀린 줄로는 닿지 못한다."""
+    from urllib.parse import urlsplit
+
+    import psycopg
+
+    role, pw = f"r_{uuid.uuid4().hex[:8]}", f"pw-{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(PG, autocommit=True) as c:
+        c.execute(f"CREATE ROLE \"{role}\" LOGIN PASSWORD '{pw}'")
+        c.execute(f'CREATE SCHEMA "{pg.publish_schema}" AUTHORIZATION "{role}"')
+    u = urlsplit(PG)
+    host, port, db = u.hostname, u.port or 5432, u.path.lstrip("/")
+    url = f"postgresql://{role}@{host}:{port}/{db}"
+    passfile = tmp_path / "pgpass.conf"
+
+    def write(password: str) -> None:
+        passfile.write_text(f"{host}:{port}:{db}:{role}:{password}\n", encoding="utf-8")
+        os.chmod(passfile, 0o600)                                      # libpq 는 남이 읽을 수 있는 파일을 무시한다 (유닉스)
+
+    monkeypatch.setenv("PGPASSFILE", str(passfile))
+    monkeypatch.delenv("PGPASSWORD", raising=False)
+    st = replace(pg, publish_url=url)
+    try:
+        write("wrong")
+        try:
+            psycopg.connect(url, connect_timeout=5).close()
+            asks = False                                               # 신뢰(trust) 설정 — 비밀번호를 묻지 않는다
+        except psycopg.OperationalError:
+            asks = True
+        if asks:
+            with pytest.raises(core.PublishError) as e:
+                core.run(world["pipe"].con, st)
+            assert e.value.kind == "connect" and pw not in str(e.value) and "wrong" not in str(e.value)
+        write(pw)
+        r = core.run(world["pipe"].con, st)
         assert r.created and r.replaced["document"]
         assert_same(world["pipe"].con, pg)
     finally:
@@ -328,7 +375,9 @@ def test_a_lock_on_the_target_ends_the_round_and_the_work_goes_on(world, pg):
     clock = Clock()
     auto = AutoPublish(st, clock=clock)
     worker = Worker(pipe, after={"publish": auto})
-    assert worker.run_once()["publish"]["full"]                              # 시작할 때의 전체 훑기
+    assert worker.run_once()["publish"]["created"]                           # 시작할 때의 전체 훑기 (조각으로 — 끝까지)
+    while auto.sweep.running:
+        worker.run_once()
     fid, doc = con.execute("SELECT h.source_field_id, p.document_id FROM prod_haul h JOIN doc_page p ON h.page_id = p.page_id "
                            "WHERE h.source_role = 'log' AND h.review_status = 'pending' ORDER BY h.haul_id LIMIT 1").fetchone()
     holder = psycopg.connect(PG)                                              # autocommit 꺼짐 — 커밋하지 않는다
@@ -388,7 +437,7 @@ def test_a_slow_statement_is_cut_at_statement_timeout(world, pg):
     con = pipe.con
     st = replace(pg, publish_statement_timeout_s=1.0, publish_sweep_minutes=0.0)
     auto = AutoPublish(st)
-    assert auto.after_round(con, Touched()).full
+    finish_cycle(auto, con)
     t = core.open_target(st)                                                  # 실제 드라이버에 간 것
     try:
         params = {i.keyword.decode(): (i.val or b"").decode() for i in t.conn.pgconn.info}
@@ -427,3 +476,369 @@ def test_a_slow_statement_is_cut_at_statement_timeout(world, pg):
     r = auto.after_round(con, Touched())                                      # 들고 있던 것을 싣는다 (retry_seconds = 0)
     assert r.replaced["document"] == 1 and auto.status["last_error"] is None
     assert_same(con, st)
+
+
+# ── 사본의 주인 (tasks/0009 4.1 다) ─────────────────────────────────────────────────
+def other_site_pack(world, tmp_path, name: str | None):
+    """같은 사이트 팩을 복사하고 [site] name 만 바꾼 것 (name=None 이면 줄을 지운다)."""
+    import re
+    import shutil
+
+    dst = tmp_path / "other-site"
+    shutil.copytree(world["site"].root, dst)
+    toml = dst / "site.toml"
+    text = re.sub(r'(?m)^name\s*=.*$', f'name = "{name}"' if name else "", toml.read_text(encoding="utf-8"), count=1)
+    toml.write_text(text, encoding="utf-8")
+    return dst
+
+
+def test_a_target_of_another_site_is_left_alone(world, pg, tmp_path, capsys, monkeypatch):
+    """다른 사이트 팩의 작업 폴더로 같은 스키마에 싣기 → 종료 코드 2, 대상은 그대로 (행 수·지문). --check 도 2. 자동 싣기는 그 바퀴의
+    실패 other_site. 글에 두 이름이 없다. --rebuild 로는 바꿔 실을 수 있다. 판이 1 인 대상(사이트 표식 이전)은 --rebuild 를 알린다."""
+    import psycopg
+
+    from minedocscan.cli import main
+
+    con, st = world["pipe"].con, world["st"]
+    publish(world, pg)
+    sch = pg.publish_schema
+    assert remote(pg, f'SELECT value FROM "{sch}".pub_meta WHERE key = %s', ("site",)) == [("synthetic",)]
+    assert remote(pg, f'SELECT value FROM "{sch}".pub_meta WHERE key = %s', ("publish_version",)) == [("2",)]
+    rows = {t: remote(pg, f'SELECT COUNT(*) FROM "{sch}"."{t}"')[0][0] for t in PUBLISH_TABLES}
+    state = remote(pg, f'SELECT kind, key, fingerprint, published_at FROM "{sch}".pub_state ORDER BY 1, 2')
+    other = other_site_pack(world, tmp_path, "site-two")
+    with pytest.raises(core.PublishError) as e:
+        core.run(con, replace(pg, site=other))
+    assert e.value.kind == "other_site" and e.value.code == 2
+    assert "site-two" not in str(e.value) and "synthetic" not in str(e.value) and "--rebuild" in str(e.value)
+    monkeypatch.setenv("MINEDOCSCAN_PUBLISH_URL", PG)
+    monkeypatch.setenv("MINEDOCSCAN_PUBLISH_SCHEMA", sch)
+    common = ["--site", str(other), "--work-root", str(st.work_root)]
+    assert main(["publish", *common]) == 2
+    assert main(["publish", "--check", *common]) == 2
+    err = capsys.readouterr().err
+    assert "다른 사이트 팩의 사본" in err and "site-two" not in err and "synthetic" not in err
+    auto = AutoPublish(replace(pg, site=other, publish_sweep_minutes=0.0))
+    failed = auto.after_round(con, Touched())
+    assert failed.kind == "other_site" and auto.status["last_error"] == "other_site"
+    assert {t: remote(pg, f'SELECT COUNT(*) FROM "{sch}"."{t}"')[0][0] for t in PUBLISH_TABLES} == rows       # 대상은 그대로
+    assert remote(pg, f'SELECT kind, key, fingerprint, published_at FROM "{sch}".pub_state ORDER BY 1, 2') == state
+    assert main(["publish", "--rebuild", *common]) == 0                     # 이 사이트로 바꿔 싣는다
+    assert remote(pg, f'SELECT value FROM "{sch}".pub_meta WHERE key = %s', ("site",)) == [("site-two",)]
+    assert_same(con, pg)
+    with psycopg.connect(PG, autocommit=True) as c:                         # 사이트 표식 이전의 대상 (판 1, site 없음)
+        c.execute(f'UPDATE "{sch}".pub_meta SET value = %s WHERE key = %s', ("1", "publish_version"))
+        c.execute(f'DELETE FROM "{sch}".pub_meta WHERE key = %s', ("site",))
+    with pytest.raises(core.NeedRebuild) as e:
+        core.run(con, replace(pg, site=other))
+    assert e.value.kind == "version" and "--rebuild" in str(e.value)
+
+
+def test_rebuild_drops_only_what_this_program_made(world, pg):
+    """pub_meta 가 없는데 이름이 같은 표가 있는 스키마: 싣기도 --rebuild 도 지우지 않고 알린다 (not_ours). 둘 다 없으면 그냥 만든다."""
+    import psycopg
+
+    sch = pg.publish_schema
+    with psycopg.connect(PG, autocommit=True) as c:
+        c.execute(f'CREATE SCHEMA "{sch}"')
+        c.execute(f'CREATE TABLE "{sch}".doc_page (page_id TEXT PRIMARY KEY, note TEXT)')
+        c.execute(f"INSERT INTO \"{sch}\".doc_page VALUES ('x', 'theirs')")
+    for kw in ({}, {"rebuild": True}, {"check": True}):
+        with pytest.raises(core.PublishError) as e:
+            publish(world, pg, **kw)
+        assert e.value.kind == "not_ours" and e.value.code == 2, kw
+    assert remote(pg, f'SELECT page_id, note FROM "{sch}".doc_page') == [("x", "theirs")]
+    with psycopg.connect(PG, autocommit=True) as c:
+        c.execute(f'DROP TABLE "{sch}".doc_page')
+    r = publish(world, pg, rebuild=True)                                     # pub_meta 도 표도 없다 — 그냥 만든다
+    assert r.full
+    assert_same(world["pipe"].con, pg)
+
+
+def test_a_dirty_round_after_the_tables_vanished_publishes_everything(world, pg):
+    """더러운 범위만 싣는 바퀴에서 대상의 표가 없어 새로 만들었으면 새 조각 바퀴를 시작한다 (sweep_minutes = 0 — 다음 전체 훑기가
+    없어도). 그 바퀴를 다 돌면 대상 = 작업 DB 이고 그때를 전체 훑기를 마친 것으로 센다."""
+    import psycopg
+
+    con = world["pipe"].con
+    clock = Clock()
+    auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0), clock=clock)
+    finish_cycle(auto, con)
+    assert auto.after_round(con, Touched()) is None                     # 시작할 때 한 바퀴만
+    with psycopg.connect(PG, autocommit=True) as c:
+        c.execute(f'DROP SCHEMA "{pg.publish_schema}" CASCADE')
+    clock.t += 10
+    r = auto.after_round(con, Touched(documents={world["ids"]["d_2030-01-08"]}))
+    assert r.created and not r.full and auto.sweep.due()                # 더러운 범위만 실었다 — 다음 바퀴에 새 조각 바퀴
+    clock.t += 10
+    assert finish_cycle(auto, con) >= 2 and auto.last_sweep == clock.t
+    assert_same(con, pg)
+
+
+# ── 멈춰 버린 서버 (tasks/0009 4.1 라) ───────────────────────────────────────────────
+class StallingRelay:
+    """멈추는 TCP 중계: 127.0.0.1 의 빈 포트에서 받아 PostgreSQL 로 넘긴다. stall() 하면 소켓을 연 채 아무것도 넘기지 않는다 — 새 연결도
+    받기만 한다 (서버의 커널은 살아 있는데 프로세스가 돌지 않는 것과 같다: 보낸 것은 받았다고 하고 keepalive 에도 답한다).
+    release() 하면 다시 넘기고, 한쪽이 닫혔으면 다른 쪽도 닫는다 (서버의 옛 트랜잭션이 끝나 잠금을 놓는다)."""
+
+    def __init__(self, url: str):
+        import socket
+        import threading
+        from urllib.parse import urlsplit, urlunsplit
+
+        u = urlsplit(url)
+        if not u.hostname:
+            pytest.skip("멈추는 중계는 postgresql://호스트[:포트]/DB 꼴의 URL 에서만")
+        self.up = (u.hostname, u.port or 5432)
+        self.ls = socket.socket()
+        self.ls.bind(("127.0.0.1", 0))
+        self.ls.listen(16)
+        self.port = self.ls.getsockname()[1]
+        userinfo = u.netloc.rpartition("@")[0]
+        self.url = urlunsplit(u._replace(netloc=(userinfo + "@" if userinfo else "") + f"127.0.0.1:{self.port}"))
+        self.go = threading.Event()
+        self.go.set()
+        self.closed = False
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def stall(self) -> None:
+        self.go.clear()
+
+    def release(self) -> None:
+        self.go.set()
+
+    def close(self) -> None:
+        self.closed = True
+        self.go.set()
+        self.ls.close()
+
+    def _accept(self) -> None:
+        import threading
+
+        while not self.closed:
+            try:
+                c, _ = self.ls.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._pair, args=(c,), daemon=True).start()
+
+    def _pair(self, c) -> None:
+        import socket
+        import threading
+
+        self.go.wait()                                   # 멈춘 동안 온 연결은 받기만 한다
+        if self.closed:
+            c.close()
+            return
+        u = socket.create_connection(self.up)
+        threading.Thread(target=self._pump, args=(c, u), daemon=True).start()
+        threading.Thread(target=self._pump, args=(u, c), daemon=True).start()
+
+    def _pump(self, a, b) -> None:
+        import socket
+
+        try:
+            while True:
+                self.go.wait()
+                data = a.recv(65536)
+                self.go.wait()                           # 멈춘 동안 받은 것은 넘기지 않는다 (끝도)
+                if not data:
+                    break
+                b.sendall(data)
+        except OSError:
+            pass
+        finally:
+            for s in (a, b):
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                s.close()
+
+
+def test_a_stalled_server_ends_the_round_within_a_bound(world, pg):
+    """멈추는 중계를 사이에 두고 **답을 기다리는 동안** 멈추면(느린 트리거로 COPY 하나를 붙잡아 둔 뒤 — 서버는 문장을 끝내고 답을 보내지만
+    중계가 넘기지 않는다: 서버의 시간 제한도, keepalive 도, tcp_user_timeout 도 작동하지 않는다) 감시 타이머가 statement_timeout_s + 30초에
+    취소(cancel_safe 5초)를 보내고 소켓을 끊어 그 바퀴가 connection_lost 로 끝난다. 같은 작업의 다음 바퀴는 처리를 하고, 중계를 풀면
+    따라잡아 대상 = 작업 DB (서버의 옛 트랜잭션이 남아 lock_timeout 에 걸리지 않는다). 감시 타이머가 없으면 바퀴가 끝나지 않아 실패한다."""
+    import threading
+    import time
+
+    psycopg = pytest.importorskip("psycopg")
+    from minedocscan.intake.worker import Worker
+
+    pipe, site, ids = world["pipe"], world["site"], world["ids"]
+    con = pipe.con
+    relay = StallingRelay(PG)
+    stmt_s = 2.0
+    st = replace(pg, publish_url=relay.url, publish_lock_timeout_s=1.0, publish_statement_timeout_s=stmt_s,
+                 publish_retry_seconds=60.0, publish_sweep_minutes=0.0, publish_connect_timeout_s=3.0)
+    clock = Clock()
+    auto = AutoPublish(st, clock=clock)
+    worker = Worker(pipe, after={"publish": auto})
+    try:
+        assert worker.run_once()["publish"]["created"]                      # 중계를 거쳐 처음 싣기 (조각으로 — 끝까지)
+        while auto.sweep.running:
+            worker.run_once()
+        sch = st.publish_schema
+        with psycopg.connect(PG, autocommit=True) as c:                     # 문장 하나를 1.5초 붙잡는다 (문장의 시간 제한 2초 안)
+            c.execute(f'CREATE FUNCTION "{sch}".hold() RETURNS trigger LANGUAGE plpgsql AS '
+                      "$$ BEGIN PERFORM pg_sleep(1.5); RETURN NULL; END $$")
+            c.execute(f'CREATE TRIGGER hold AFTER INSERT ON "{sch}".doc_document FOR EACH STATEMENT EXECUTE FUNCTION "{sch}".hold()')
+        fid = con.execute("SELECT source_field_id FROM prod_haul WHERE source_role = 'log' AND review_status = 'pending' "
+                          "ORDER BY haul_id LIMIT 1").fetchone()[0]
+        t = Touched()
+        save(con, site, world["st"], review_from_field(con, fid, "value", "8", "jp"), touched=t)
+        auto.mark(t)
+        out: dict = {}
+        th = threading.Thread(target=lambda: out.update(worker.run_once()), daemon=True)
+        t0 = time.monotonic()
+        th.start()
+        with psycopg.connect(PG, autocommit=True) as c:                     # 서버가 트리거에서 자는 동안 멈춘다
+            for _ in range(400):
+                if c.execute("SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep'").fetchone()[0]:
+                    break
+                time.sleep(0.02)
+            else:
+                pytest.fail("트리거가 돌지 않았다")
+        relay.stall()
+        th.join(stmt_s + 35 + 8)
+        took = time.monotonic() - t0
+        if th.is_alive():
+            relay.release()
+            th.join(60)
+            pytest.fail(f"멈춘 서버에서 바퀴가 {stmt_s + 35 + 8:g}초 안에 끝나지 않았다 — 감시 타이머가 없다")
+        assert out["publish"]["error"] == "connection_lost", out
+        assert stmt_s + 30 <= took < stmt_s + 35 + 5, took                  # 30초 넘게 기다린 뒤 (서버가 답할 틈) 취소 5초 안에
+        assert auto.status["last_error"] == "connection_lost" and auto.held
+        # 멈춘 채로 다음 바퀴: 처리는 된다 (retry_seconds 안이라 싣기는 연결하지 않는다)
+        decs.save(con, world["st"].decisions_path(site.root), [{"target": ids["u3_2030-01-09"], "kind": "discard"}], "jp")
+        t1 = time.monotonic()
+        out = worker.run_once()
+        assert out["processed"] == 1 and "publish" not in out and time.monotonic() - t1 < 20
+        relay.release()                                                     # 풀면 클라이언트 쪽이 닫힌 것을 서버 쪽으로 넘긴다
+        clock.t += 61
+        out = worker.run_once()
+        assert not out["publish"].get("error"), out                        # 옛 트랜잭션이 잠금을 쥐고 있지 않다 (트리거는 그대로 —
+                                                                            # 1.5초씩 붙잡아도 문장의 시간 제한 안)
+        assert auto.status["last_error"] is None and not auto.held
+        assert_same(con, st)
+    finally:
+        relay.release()
+        relay.close()
+
+
+# ── 조각으로 나눈 전체 훑기 (tasks/0009 4.2 가) ───────────────────────────────────────
+def two_months(world) -> None:
+    pipe, site, st = world["pipe"], world["site"], world["st"]
+    decs.save(pipe.con, st.decisions_path(site.root), [{"target": world["ids"]["d_2030-01-08"], "kind": "date",
+                                                       "value": "2030-02-08"}], "jp")
+    pipe.process_pending()
+    pipe.touched = Touched()
+
+
+def finish_cycle(auto, con, first=None, limit: int = 20) -> int:
+    """바퀴 하나를 끝까지 (조각마다 작업 바퀴 하나). 돌려주는 값: 조각 수."""
+    r = auto.after_round(con, first or Touched())
+    assert not getattr(r, "kind", None), r
+    n = 1
+    while auto.sweep.running:
+        r = auto.after_round(con, Touched())
+        assert not getattr(r, "kind", None), r
+        n += 1
+        assert n < limit
+    return n
+
+
+def test_the_publish_sweep_goes_one_month_per_round(world, pg):
+    """자동 싣기의 전체 훑기도 바퀴마다 달 하나, 마지막에 날짜 없는 조각. 처음 싣기도 조각으로 — 다 돌 때까지 대상은 일부만 있다.
+    대상에만 있는 달의 것도 지워진다. 다 돌면 대상 = 작업 DB."""
+    import psycopg
+
+    con = world["pipe"].con
+    two_months(world)
+    clock = Clock()
+    auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0), clock=clock)
+    r = auto.after_round(con, Touched())                                # 첫 조각 2030-01 (표를 만들었다)
+    assert r.created and r.slices == ["2030-01", "2030-02", "-"]
+    assert auto.status["sweep"] == {"done": 1, "total": 3, "first": True}
+    sch = pg.publish_schema
+    days = {x[0] for x in remote(pg, f'SELECT DISTINCT work_date FROM "{sch}".doc_page')}
+    assert days and all(d.startswith("2030-01") for d in days)          # 아직 일부만
+    auto.after_round(con, Touched())
+    auto.after_round(con, Touched())
+    assert auto.status["sweep"] is None and auto.status["last_sweep_at"] and auto.last_sweep == clock.t
+    assert_same(con, pg)
+    assert auto.after_round(con, Touched()) is None                     # sweep_minutes = 0 — 시작할 때 한 바퀴만
+    with psycopg.connect(PG, autocommit=True) as c:                         # 대상에만 있는 달 (다른 프로그램이 남긴 것이 아니라 옛 싣기의 것)
+        c.execute(f'INSERT INTO "{sch}".pub_state (kind, key, fingerprint, published_at) VALUES (%s, %s, %s, %s)',
+                  ("date", "2029-12-31", "0" * 64, "x"))
+        c.execute(f'INSERT INTO "{sch}".eq_assignment_obs (work_date, slot, matched_by, header_mismatch) VALUES (%s, %s, %s, %s)',
+                  ("2029-12-31", "T09", "vehicle", 0))
+    again = AutoPublish(replace(pg, publish_sweep_minutes=0.0), clock=clock)
+    assert finish_cycle(again, con) == 4                                # 2029-12, 2030-01, 2030-02, 날짜 없음
+    assert_same(con, pg)
+    assert remote(pg, f'SELECT COUNT(*) FROM "{sch}".pub_state WHERE key = %s', ("2029-12-31",)) == [(0,)]
+
+
+def test_watch_once_publishes_everything_in_its_one_round(world, pg):
+    """watch --once 의 싣기는 할 때가 된 전체 훑기를 그 바퀴에 한 번에 (명령 publish 처럼 — 다음 바퀴가 없다)."""
+    con = world["pipe"].con
+    two_months(world)
+    auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0), once=True)
+    r = auto.after_round(con, Touched())
+    assert r.full and r.created and auto.status["sweep"] is None and auto.status["last_sweep_at"]
+    assert_same(con, pg)
+
+
+def test_the_sweep_finds_target_only_keys_under_any_collation(world, pg):
+    """대상의 정렬 규칙이 C 가 아니어도(ICU en-US — '-'·'~' 같은 문장 부호를 먼저 무시한다: '2030-01-31' < '2030-01-~' 가 거짓) 달의 조각이
+    대상에만 있는 날짜를 찾는다. 'YYYY-MM' 처럼 끝이 잘린 날짜 키는 날짜 없는 조각이 찾는다 — 한 바퀴 뒤 대상 = 작업 DB."""
+    import psycopg
+
+    con = world["pipe"].con
+    clock = Clock()
+    auto = AutoPublish(replace(pg, publish_sweep_minutes=0.0), clock=clock)
+    finish_cycle(auto, con)
+    sch = pg.publish_schema
+    with psycopg.connect(PG, autocommit=True) as c:
+        if not c.execute("SELECT 1 FROM pg_collation WHERE collname = 'en-US-x-icu'").fetchone():
+            pytest.skip("ICU 정렬 규칙이 없다")
+        c.execute(f'ALTER TABLE "{sch}".pub_state ALTER COLUMN key TYPE TEXT COLLATE "en-US-x-icu"')
+        c.execute(f'ALTER TABLE "{sch}".doc_page ALTER COLUMN work_date TYPE TEXT COLLATE "en-US-x-icu"')
+        c.execute(f'ALTER TABLE "{sch}".eq_assignment_obs ALTER COLUMN work_date TYPE TEXT COLLATE "en-US-x-icu"')
+        for key in ("2030-01-31", "2030-01"):
+            c.execute(f'INSERT INTO "{sch}".pub_state (kind, key, fingerprint, published_at) VALUES (%s, %s, %s, %s)',
+                      ("date", key, "0" * 64, "x"))
+            c.execute(f'INSERT INTO "{sch}".eq_assignment_obs (work_date, slot, matched_by, header_mismatch) VALUES (%s, %s, %s, %s)',
+                      (key, "T09", "vehicle", 0))
+    again = AutoPublish(replace(pg, publish_sweep_minutes=0.0), clock=clock)
+    assert finish_cycle(again, con) == 2                                # 2030-01, 날짜 없음
+    assert_same(con, pg)
+    assert remote(pg, f'SELECT COUNT(*) FROM "{sch}".pub_state WHERE kind = %s AND key IN (%s, %s)',
+                  ("date", "2030-01-31", "2030-01")) == [(0,)]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", [21, 22])
+def test_a_sliced_publish_sweep_equals_the_work_db(world, pg, seed):
+    """조각으로 돈 한 바퀴 = 전체 훑기 (싣기): 걸음마다 검수(건드린 것을 넘기지 않는다 — 다른 프로세스처럼)·결정(처리가 건드린 것은
+    넘긴다)을 넣고 바퀴 하나를 끝까지 돌린 뒤 대상 = 작업 DB."""
+    from test_review_store import reprocess_fuzz
+
+    pipe = world["pipe"]
+    con = pipe.con
+    two_months(world)
+    clock = Clock()
+    auto = AutoPublish(replace(pg, publish_sweep_minutes=1.0), clock=clock)
+    parts = [finish_cycle(auto, con)]
+    assert_same(con, pg)
+
+    def step(n):
+        t, pipe.touched = pipe.touched, Touched()
+        clock.t += 61.0
+        parts.append(finish_cycle(auto, con, t))
+        assert_same(con, pg)
+
+    reprocess_fuzz(world, steps=8, seed=seed, fresh=False, on_touched=lambda t: None, after_step=step)
+    assert max(parts) >= 3 and auto.fell_back == 0, parts

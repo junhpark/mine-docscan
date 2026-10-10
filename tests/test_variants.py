@@ -107,10 +107,14 @@ def test_concurrent_variants_load_as_one_group(pack):
     # 이름이 계열인 판이 이미 그 계열(날짜로 가린 개정판)이면 빠진 것은 concurrent 한 줄이다
     ("lone, namesake in family", lambda site: [_edit(site, T_USAGE, lambda s: [s.pop("concurrent"), s.update(valid_to="2030-01-07")]),
                                                _edit(site, T_USAGE_B, lambda s: s.update(valid_from="2030-01-08"))], "하나뿐"),
+    # 가릴 상자의 이름 목록 (tasks/0009 4.1 마): 판 B 에만 상자가 있다 — 판 A 의 쪽은 그 자리가 남은 채로 나간다
+    ("redact names", lambda site: _edit(site, T_USAGE_B, lambda s: s.update(redact=[{"name": "SECRET-BOX",
+                                                                                      "bbox": [10, 10, 300, 40]}])),
+     "redact 의 이름"),
 ])
 def test_site_pack_refuses_broken_concurrent_variants(pack, case, fn, needle):
     """concurrent 가 한쪽에만, 계열에 하나뿐, family 없이, true/false 가 아닌 값, 동시 판끼리 키(handler_options, 표 이름·role·
-    header_rows·열·행 — 메타까지, 필드)가 다르면 사이트 팩을 읽을 때 오류다. 키가 다를 때의 메시지는 두 판의 이름과 처음 다른 항목의
+    header_rows·열·행 — 메타까지, 필드, redact 의 이름)가 다르면 사이트 팩을 읽을 때 오류다. 키가 다를 때의 메시지는 두 판의 이름과 처음 다른 항목의
     종류만 — 행 키·값은 찍지 않는다. 계열에 하나뿐이면 그 판과 계열, 두 줄을 적을 판(계열과 이름이 같은 템플릿이 있으면 그것)을 말한다."""
     fn(pack)
     with pytest.raises(TemplateError) as e:
@@ -118,7 +122,8 @@ def test_site_pack_refuses_broken_concurrent_variants(pack, case, fn, needle):
     msg = str(e.value)
     assert needle in msg, (case, msg)
     assert "SECRET" not in msg and "\n" not in msg
-    if case in ("table name", "role", "column", "row", "field", "row meta", "column meta", "header_rows", "handler_options"):
+    if case in ("table name", "role", "column", "row", "field", "row meta", "column meta", "header_rows", "handler_options",
+                "redact names"):
         assert T_USAGE in msg and T_USAGE_B in msg and "키가 다릅니다" in msg
     if case == "one side":
         assert "겹칩니다" in msg
@@ -129,6 +134,39 @@ def test_site_pack_refuses_broken_concurrent_variants(pack, case, fn, needle):
         assert f"{T_USAGE_B} 하나뿐" in msg and "family: fam_x" in msg
     if case == "lone, namesake in family":
         assert f"{T_USAGE} 의 template.yaml 에 concurrent: true 를" in msg and "family:" not in msg
+
+
+def test_redact_boxes_move_with_the_variant_but_keep_their_names(pack):
+    """동시 판의 redact (tasks/0009 4.1 마): 상자의 좌표는 판마다 다르다(기하) — 이름의 목록은 같아야 한다 (순서는 상관없다).
+    상자가 하나 빠지거나, 판 B 에 상자가 없거나, 이름이 다르면 사이트 팩을 읽을 때 오류 — 두 판의 이름과 "redact 의 이름" 만 말하고
+    상자 이름은 찍지 않는다. 날짜로 가린 개정판(동시 판이 아니다)은 달라도 된다."""
+    _edit(pack, T_USAGE, lambda s: s.update(redact=[{"name": "SECRET-HEAD", "bbox": [10, 10, 300, 40]},
+                                                    {"name": "SECRET-SIGN", "bbox": [400, 10, 500, 60]}]))
+    _edit(pack, T_USAGE_B, lambda s: s.update(redact=[{"name": "SECRET-SIGN", "bbox": [400, 20, 500, 70]},
+                                                      {"name": "SECRET-HEAD", "bbox": [10, 20, 300, 50]}]))
+    site = SitePack(pack)
+    a, b = site.templates[T_USAGE], site.templates[T_USAGE_B]
+    assert site.concurrent_groups(None) == {T_USAGE: [T_USAGE, T_USAGE_B]}
+    assert {r["name"]: r["bbox"] for r in a.redact} != {r["name"]: r["bbox"] for r in b.redact}       # 좌표는 판마다
+    assert sorted(r["name"] for r in a.redact) == sorted(r["name"] for r in b.redact)
+    path = pack / "templates" / T_USAGE_B / "template.yaml"
+    good = path.read_text(encoding="utf-8")
+    for case, fn in (("one missing", lambda s: s.update(redact=s["redact"][:1])),
+                     ("none", lambda s: s.pop("redact")),
+                     ("renamed", lambda s: s["redact"][0].update(name="SECRET-OTHER")),
+                     ("extra", lambda s: s["redact"].append({"name": "SECRET-MORE", "bbox": [10, 100, 60, 140]}))):
+        path.write_text(good, encoding="utf-8")
+        _edit(pack, T_USAGE_B, fn)
+        with pytest.raises(TemplateError) as e:
+            SitePack(pack)
+        msg = str(e.value)
+        assert "redact 의 이름" in msg and T_USAGE in msg and T_USAGE_B in msg and "키가 다릅니다" in msg, (case, msg)
+        assert "SECRET" not in msg and "\n" not in msg, case
+    path.write_text(good, encoding="utf-8")                                    # 날짜로 가린 개정판 — 이름이 달라도 읽힌다
+    _edit(pack, T_USAGE_B, lambda s: [s.pop("redact"), s.update(valid_to="2030-01-06")])
+    _edit(pack, T_USAGE, lambda s: s.update(valid_from="2030-01-07"))
+    site = SitePack(pack)
+    assert site.templates[T_USAGE_B].redact == [] and len(site.templates[T_USAGE].redact) == 2
 
 
 def test_header_rows_left_out_is_zero_for_the_key_check(pack):

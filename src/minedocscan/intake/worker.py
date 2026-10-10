@@ -27,6 +27,7 @@ class Worker:
         self.after = dict(after or {})
         self.status: dict = {"state": "idle"}
         self.rounds = 0
+        self.too_long = 0                                          # 보관 경로가 너무 길어 접수하지 않은 파일의 수 (지난 바퀴)
         self.last: dict | None = None
         self.last_error: str | None = None
         self._hooks = (pipe.on_document, pipe.on_page)
@@ -54,7 +55,9 @@ class Worker:
             if self.inbox is not None:
                 r = self.inbox.round(self.pipe)
                 out.update({"received": r["received"], "already": r["already"], "moved_failed": r["moved_failed"],
-                            "waiting": r["waiting"], "retry": r["retry"]})
+                            "waiting": r["waiting"], "retry": r["retry"], "too_long": r["too_long"],
+                            "too_long_changed": r["too_long"] != self.too_long})
+                self.too_long = r["too_long"]                          # 홈이 읽는다 (경로가 너무 긴 파일 — 접수 폴더에 그대로)
                 failed_at_register = r["failed"]
             else:
                 failed_at_register = []
@@ -109,6 +112,11 @@ class Worker:
                 stop.wait(poll_seconds)
 
 
+def failing(x: dict) -> int:
+    """엑셀의 쓰지 못한 파일의 수: 바퀴 끝의 내보내기는 기다리는 것까지 (failing), 아니면 이번에 쓰지 못한 것."""
+    return x["failing"] if x.get("failing") is not None else x["failed"]
+
+
 def format_round(r: dict) -> str:
     """한 바퀴의 요약 — 수와 문서 ID 만 (파일명·이름 없이)."""
     parts = [f"처리한 문서 {r.get('processed', 0)}건"]
@@ -116,6 +124,7 @@ def format_round(r: dict) -> str:
         parts.append(f"받은 문서 {len(r['received'])}건 ({', '.join(r['received'])})")
     for k, label in (("already", "이미 있는 파일(_already)"), ("moved_failed", "읽을 수 없는 파일(_failed)"),
                      ("waiting", "아직 쓰이는 중인 파일"), ("retry", "옮기지 못해 다음에 다시 할 파일"),
+                     ("too_long", "보관 경로가 너무 길어 접수하지 않은 파일 (이름을 줄이거나 보관 폴더를 짧은 경로로 — 접수 폴더에 그대로)"),
                      ("duplicates", "다시 스캔 의심 쪽")):
         if r.get(k):
             parts.append(f"{label} {r[k]}")
@@ -126,11 +135,14 @@ def format_round(r: dict) -> str:
     if x:
         if x["missing_dir"]:
             parts.append("엑셀: 폴더가 없습니다 (만들지 않습니다 — 다음 바퀴에 다시)")
-        elif x["written"] or x["deleted"] or x["failed"] or x.get("kept") or x.get("skipped_dates"):
+        elif x.get("other_site"):
+            parts.append("엑셀: 다른 사이트의 폴더입니다 — 쓰지도 지우지도 않습니다 (맞는 폴더인지 확인하십시오)")
+        elif x["written"] or x["deleted"] or failing(x) or x.get("kept") or x.get("skipped_dates"):
             parts.append(f"엑셀: 쓴 파일 {x['written']}, 지운 파일 {x['deleted']}"
-                         + (f", 쓰지 못함 {x['failed']} (다음 바퀴에 다시)" if x["failed"] else "")
-                         + (" — 기록 파일을 잃어 전부 다시 훑었다" if x.get("record_lost") else "")
-                         + (f", 기록에 없어 남겨 둔 파일 {x['kept']}" if x.get("kept") else "")
+                         + (f", 쓰지 못함 {failing(x)} (잠시 뒤에 다시)" if failing(x) else "")
+                         + (" — 기록 파일이 없어 다시 쓴다" if x.get("record_lost") else "")
+                         + (f", {'작업 DB 에 쪽이 없어' if x.get('empty_db') else '기록에 없어'} 남겨 둔 파일 {x['kept']}"
+                            if x.get("kept") else "")
                          + (f", 날짜가 ISO 가 아니어서 파일로 만들지 않은 날짜 {x['skipped_dates']}" if x.get("skipped_dates") else ""))
     if r.get("excel_error"):
         parts.append(f"엑셀: 내보내지 못함 ({r['excel_error']})")

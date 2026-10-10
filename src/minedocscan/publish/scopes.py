@@ -21,12 +21,16 @@ from dataclasses import dataclass, field
 
 from ..store.db import PRIMARY_KEYS, PUBLISH_TABLES, publish_columns
 
-PUBLISH_VERSION = 1      # 범위·표현·표와 열의 목록의 판 — 바꾸면 올린다 (대상의 판이 다르면 --rebuild)
+PUBLISH_VERSION = 2      # 범위·표현·표와 열의 목록·pub_meta 의 판 — 바꾸면 올린다 (대상의 판이 다르면 --rebuild).
+                         # 2: pub_meta 에 사이트 이름 (tasks/0009 4.1 다)
 DOC_TABLES = ("doc_document", "doc_page", "doc_field", "doc_page_meta", "insp_daily", "prod_haul", "eq_usage_daily",
               "prod_tally", "xcheck_usage")
 DATE_TABLES = {"eq_assignment_obs": "work_date", "xcheck_haul": "work_date"}
 WHOLE_TABLES = ("eq_equipment",)
-CHUNK = 500
+CHUNK = 500             # IN (…) 하나의 키 수 (키를 찾을 때)
+DATE_CHUNK = 31         # 날짜 범위는 한 달 치씩 (날짜 하나에 운반 교차검증·배차 관측 100행쯤 — 4.2 나: 한 번에 메모리에 있는 행)
+DOC_CHUNK = 1           # 문서 범위는 하나씩 (tasks/0009 4.2 나: 500 문서를 한 묶음으로 올리면 한 해(252 문서)가 한 번에 메모리에 —
+                        # 처음 싣기 1.6 GB. 실제 문서 하나는 하루치 묶음(필드 약 3,700개 …)이다)
 assert set(DOC_TABLES) | set(DATE_TABLES) | set(WHOLE_TABLES) == set(PUBLISH_TABLES)
 
 
@@ -106,6 +110,23 @@ def orphans(con: sqlite3.Connection) -> dict[str, int]:
     return out
 
 
+def local_keys(con: sqlite3.Connection, kind: str, keys: Iterable[str]) -> set[str]:
+    """그 키들 가운데 작업 DB 에 있는 것 (작업 DB 의 키 전부를 읽지 않는다 — 조각 하나가 읽는 행이 날짜 수에 비례하지 않게, 4.2 가)."""
+    keys = sorted(set(keys))
+    if kind == "whole":
+        return {k for k in keys if k == "eq_equipment"}
+    out: set[str] = set()
+    for i in range(0, len(keys), CHUNK):
+        chunk = keys[i:i + CHUNK]
+        marks = ",".join("?" * len(chunk))
+        if kind == "document":
+            out |= {r[0] for r in con.execute(f"SELECT document_id FROM doc_document WHERE document_id IN ({marks})", chunk)}
+        else:
+            for t, c in DATE_TABLES.items():
+                out |= {r[0] for r in con.execute(f"SELECT DISTINCT {c} FROM {t} WHERE {c} IN ({marks})", chunk)}
+    return out
+
+
 def all_keys(con: sqlite3.Connection) -> dict[str, set[str]]:
     """작업 DB 에 있는 범위의 키: {"document": {…}, "date": {…}, "whole": {"eq_equipment"}}."""
     dates: set[str] = set()
@@ -122,8 +143,9 @@ def build(con: sqlite3.Connection, kind: str, keys: Iterable[str]) -> Iterator[S
         for k in keys:
             yield Scope("whole", k, {t: _select(con, t, "1 = 1", ()) for t in WHOLE_TABLES})
         return
-    for i in range(0, len(keys), CHUNK):
-        chunk = keys[i:i + CHUNK]
+    step = DOC_CHUNK if kind == "document" else DATE_CHUNK
+    for i in range(0, len(keys), step):
+        chunk = keys[i:i + step]
         marks = ",".join("?" * len(chunk))
         if kind == "date":
             got: dict[str, dict[str, list]] = {k: {} for k in chunk}

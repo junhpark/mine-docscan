@@ -18,28 +18,34 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 from . import __version__
 from .config import Settings, load_settings
+from .logfile import DailyLog, early_log_dir, redirect
 
 
-def _common() -> argparse.ArgumentParser:
+def _common(nested: bool = False) -> argparse.ArgumentParser:
+    """공통 옵션. nested: 하위 명령의 하위 명령(export excel, review serve …) 쪽 — 기본값을 두지 않는다(SUPPRESS). 두면 하위 파서가
+    앞에 준 값(export --work-root W excel)을 기본값으로 덮는다 (tasks/0009 4.1 사). 앞에 줘도 뒤에 줘도 같다 — 둘 다 주면 뒤의 것."""
+    d = {"default": argparse.SUPPRESS} if nested else {}
     p = argparse.ArgumentParser(add_help=False)
-    p.add_argument("--config", help="설정 파일 (기본: ./minedocscan.toml 또는 MINEDOCSCAN_CONFIG)")
-    p.add_argument("--site", help="사이트 팩 폴더")
-    p.add_argument("--archive-root", help="스캔 원본 폴더 (읽기 전용으로 취급 — 접수(watch·serve)만 그 아래 intake/ 에 쓴다)")
-    p.add_argument("--work-root", help="작업 폴더 (DB·정합 이미지·리포트)")
-    p.add_argument("--db-url", help="DB 주소 (기본: sqlite:///<work-root>/minedocscan.db)")
-    p.add_argument("--json", action="store_true", help="결과를 JSON 으로 출력")
+    p.add_argument("--config", help="설정 파일 (기본: ./minedocscan.toml 또는 MINEDOCSCAN_CONFIG)", **d)
+    p.add_argument("--site", help="사이트 팩 폴더", **d)
+    p.add_argument("--archive-root", help="스캔 원본 폴더 (읽기 전용으로 취급 — 접수(watch·serve)만 그 아래 intake/ 에 쓴다)", **d)
+    p.add_argument("--work-root", help="작업 폴더 (DB·정합 이미지·리포트)", **d)
+    p.add_argument("--db-url", help="DB 주소 (기본: sqlite:///<work-root>/minedocscan.db)", **d)
+    p.add_argument("--json", action="store_true", help="결과를 JSON 으로 출력", **d)
     return p
 
 
 def build_parser() -> argparse.ArgumentParser:
-    common = _common()
+    common, nested = _common(), _common(nested=True)
     ap = argparse.ArgumentParser(prog="minedocscan", description="광산 현장 수기 문서 스캔 → 데이터베이스 파이프라인")
     ap.add_argument("--version", action="version", version=f"minedocscan {__version__}")
     sub = ap.add_subparsers(dest="command", required=True)
@@ -49,11 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("doc", parents=[common],
                        help="문서·쪽: 목록과 결정(날짜·버리기·되살리기·다른 종이) — 결정을 남기기만 한다. 처리는 watch·serve·run")
     dsub = p.add_subparsers(dest="doc_command", required=True)
-    d = dsub.add_parser("list", parents=[common], help="문서 목록: 받은 시각, 쪽 수, 날짜, 상태, 다시 처리 대기")
+    d = dsub.add_parser("list", parents=[nested], help="문서 목록: 받은 시각, 쪽 수, 날짜, 상태, 다시 처리 대기")
     d.add_argument("--status", help="received | needs_date | processed | needs_review | failed | discarded")
     for name, what in (("date", "날짜를 정한다"), ("discard", "버린다 (걸린 스캔, 다시 스캔한 쪽)"), ("restore", "버린 것을 되살린다"),
                        ("keep", "다시 스캔한 것이 아니다 — 다른 종이다 (쪽만)")):
-        d = dsub.add_parser(name, parents=[common], help=what)
+        d = dsub.add_parser(name, parents=[nested], help=what)
         d.add_argument("target", help="문서 ID 또는 쪽 ID (<문서 ID>-p<쪽>)" if name != "keep" else "쪽 ID (<문서 ID>-p<쪽>)")
         if name == "date":
             d.add_argument("date", help="2025-03-26 · 25.03.26 · 250326 · 0326 (해는 받은 날을 넘지 않는 가장 가까운 해)")
@@ -67,16 +73,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--give-up-seconds", type=float,
                    help="이만큼 지나도 열리지 않는 파일은 손상 방침대로 등록한다 (기본 [intake] give_up_seconds = 120)")
 
+    p = sub.add_parser("selftest", help="자가 시험 — 설치한 프로그램이 제대로인지 합성 데이터로 (임시 폴더에서, 약 1–3분). "
+                                        "결과는 OUT/selftest.json·selftest.md (tasks/0009 4.6)")
+    p.add_argument("--out", default=".", help="결과 파일을 쓸 폴더 (기본: 지금 폴더)")
+    p.add_argument("--keep", action="store_true", help="임시 폴더(와 --publish-schema 의 스키마)를 지우지 않고 남긴다")
+    p.add_argument("--publish-schema", metavar="NAME",
+                   help="통합 DB(환경변수 MINEDOCSCAN_PUBLISH_URL)의 이 스키마에 싣고 --check 한 뒤 지운다 — minedocscan_selftest_ "
+                        "로 시작하는 이름만. DB 의 CREATE 권한이 없으면 이 검사만 건너뛴다")
+
     p = sub.add_parser("serve", parents=[common],
                        help="운영 화면 (127.0.0.1) + 접수 폴더 감시: 홈, 문서 화면, 날짜·버리기·다시 스캔 결정, 대기열로 가는 길")
     p.add_argument("--reviewer", help="검수·결정을 남기는 사람 (짧은 영문). 없으면 띄우지 않는다")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--no-watch", action="store_true",
                    help="감시·처리를 하지 않는다 (화면만 — 결정은 남고 처리는 watch 가 한다)")
+    p.add_argument("--log-dir", help="표준 출력·오류를 이 폴더의 serve-YYYYMMDD.log (UTF-8, 날마다 새 파일, 30일 지난 것은 지운다)에 — "
+                                     "작업 스케줄러의 pythonw 처럼 창이 없을 때 (tasks/0009 4.5)")
 
     p = sub.add_parser("export", parents=[common], help="내보내기 — 엑셀(일별·월별). DB 의 사본이다 (tasks/0008)")
     esub = p.add_subparsers(dest="export_command", required=True)
-    e = esub.add_parser("excel", parents=[common],
+    e = esub.add_parser("excel", parents=[nested],
                         help="엑셀 폴더에 일별·월별 파일을 쓴다 — 바뀐 파일만 (내용의 해시). 파이프라인 잠금을 잡는다 (serve·watch 가 돌면 그쪽이 쓴다)")
     e.add_argument("out", nargs="?", help="엑셀 폴더 (없으면 [export] excel_dir 또는 MINEDOCSCAN_EXCEL_DIR). 있어야 한다 — 만들지 않는다")
     g = e.add_mutually_exclusive_group()
@@ -85,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--from", dest="date_from", help="이 날짜부터 (--to 와 같이)")
     e.add_argument("--to", dest="date_to", help="이 날짜까지 (양 끝 포함)")
     e.add_argument("--allow-in-repo", action="store_true", help="저장소 안에 쓰기 (합성 데이터만 — 엑셀에는 현장의 값이 들어 있다)")
-    m = esub.add_parser("masked-pages", parents=[common],
+    m = esub.add_parser("masked-pages", parents=[nested],
                         help="가린 쪽 그림 (PNG, 파일 이름은 쪽 ID) — 서명·작성자·차량번호 필드, 템플릿의 redact 상자, 글자 칸을 한 색으로. "
                              "템플릿이 아는 자리만 가린다 — 사람이 보고 나서 쓴다 (tasks/0008 4.9). 잠금을 잡지 않는다")
     m.add_argument("out", help="내보낼 폴더 (저장소 밖 — 가린 그림도 현장 데이터다)")
@@ -154,7 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("template", parents=[common], help="템플릿 도구")
     tsub = p.add_subparsers(dest="template_command", required=True)
-    t = tsub.add_parser("init", parents=[common], help="기준 이미지에서 괘선을 검출해 템플릿 뼈대를 만든다")
+    t = tsub.add_parser("init", parents=[nested], help="기준 이미지에서 괘선을 검출해 템플릿 뼈대를 만든다")
     t.add_argument("image", help="빈 양식 또는 깨끗한 스캔 (이미지·PDF)")
     t.add_argument("--name", required=True, help="템플릿 이름 (영문 소문자·밑줄)")
     t.add_argument("--roi", help="표 영역 x0,y0,x1,y1 (200 dpi 픽셀). 없으면 페이지 전체")
@@ -165,7 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=0,
                    help="돌아간 스캔이면 시계 방향으로 이만큼 돌려 세운 그림을 기준 이미지로 (tasks/0007 4.4). 없으면 들어온 방향 그대로 "
                         "— '바로 선 것'은 기준 이미지의 방향이다")
-    t = tsub.add_parser("preview", parents=[common],
+    t = tsub.add_parser("preview", parents=[nested],
                         help="칸·필드의 테두리와 이름·종류·형식·역할·행 번호를 기준 이미지(또는 정합한 스캔) 위에 그린 PNG")
     t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
     t.add_argument("--scan", help="이 스캔의 쪽을 정합해서 그 위에 그린다 (칸이 실제 글씨에 맞는지)")
@@ -173,7 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--out", help="출력 폴더 (기본 WORK_ROOT/template-preview). 저장소 안은 거절한다")
     t.add_argument("--print", dest="print_layer", action="store_true",
                    help="인쇄 층(print_image) 위에 그린다 — 인쇄 화소에 색. 값 자리가 인쇄에 덮이지 않았나 (tasks/0006)")
-    t = tsub.add_parser("print-layer", parents=[common],
+    t = tsub.add_parser("print-layer", parents=[nested],
                         help="그 양식으로 분류된 쪽들에서 인쇄 층(손글씨가 빠진 빈 양식)을 만든다 → <템플릿 폴더>/print.png + 요약")
     t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
     t.add_argument("--max-pages", type=int, default=40, help="쓸 쪽의 최대 수 — 날짜별로 고르게 (기본 40, 3장 미만이면 거절)")
@@ -182,14 +198,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "값 유무에 쓰는 층은 판을 나눈 뒤 75 로 다시 만든다 (75 미만이면 요약이 경고한다)")
     t.add_argument("--out", help="출력 PNG 파일 (기본 <템플릿 폴더>/print.png). git 작업 트리 안은 거절한다")
     t.add_argument("--allow-in-repo", action="store_true", help="저장소 안에도 쓴다 (합성 사이트 팩만)")
-    t = tsub.add_parser("variant", parents=[common],
+    t = tsub.add_parser("variant", parents=[nested],
                         help="같은 날 섞여 쓰이는 다른 인쇄 판의 템플릿: 열·행·필드는 그대로, 표마다 괘선만 새 스캔에서 다시 잡는다")
     t.add_argument("template_dir", help="기존 판의 템플릿 폴더 (<site>/templates/<양식>) — 고치지 않는다")
     t.add_argument("--scan", required=True, help="새 판의 깨끗한 쪽이 든 스캔 (이미지·PDF)")
     t.add_argument("--page", type=int, default=1, help="--scan 의 쪽 번호 (1부터)")
     t.add_argument("--name", required=True, help="새 판의 템플릿 이름 (예: <양식>_b)")
     t.add_argument("--out-dir", help="새 판의 폴더 (기본: 기존 판 옆의 <NAME>). git 작업 트리 안이거나 이미 있으면 거절한다")
-    t = tsub.add_parser("add-region", parents=[common],
+    t = tsub.add_parser("add-region", parents=[nested],
                         help="그 영역의 괘선을 잡아 표 하나의 뼈대를 template.yaml 의 regions 끝에 더한다 (인쇄 층이 있으면 그것에서)")
     t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
     t.add_argument("--roi", required=True, help="표 영역 x0,y0,x1,y1 (템플릿 좌표 — 기준 이미지 픽셀). 표 둘레를 조금 넉넉히, "
@@ -198,7 +214,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--role", help="usage 핸들러의 표의 역할 meter | shifts | tally | activities — 그 역할이 요구하는 열의 자리표시로")
     t.add_argument("--header-rows", type=int, default=1, help="머리 행의 수 (기본 1)")
     t.add_argument("--allow-in-repo", action="store_true", help="저장소 안의 템플릿도 고친다 (합성 사이트 팩만)")
-    t = tsub.add_parser("check", parents=[common],
+    t = tsub.add_parser("check", parents=[nested],
                         help="템플릿의 오류를 전부: 읽기 오류, 겹치는 칸, 쪽 밖의 칸, 역할에 필요한 칸, 형식과 종류의 불일치 …")
     t.add_argument("template_dir", help="템플릿 폴더 (<site>/templates/<양식>)")
 
@@ -231,10 +247,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="첫날의 쪽 몇 장을 다른 흔들기로 다시 찍은 파일을 더한다 (JPEG 재압축·90° 돌린 것 포함 — 다시 스캔한 쪽, tasks/0007)")
     p.add_argument("--display-names", action="store_true",
                    help="합성 템플릿에 표시 이름(display — 엑셀에 보이는 이름)을 넣는다 (tasks/0008). template.yaml 만 바뀐다")
+    p.add_argument("--v2-forms", action="store_true",
+                   help="가상 양식 두 종(유류일지·환경일지, 핸들러 generic)을 날마다 한 장씩 더한다 — 템플릿만으로 "
+                        "새 양식이 들어가는지 보는 확장성 시험 (tasks/0009 4.7)")
+    p.add_argument("--rough", action="store_true",
+                   help="거친 손글씨와 스캔: 획의 굵기·기울기·떨림·연한 잉크·번짐, 쪽의 기울어짐(±1.5°)·잡음·JPEG 압축 — 모든 양식에 "
+                        "(tasks/0009 4.7)")
 
     p = sub.add_parser("review", parents=[common], help="검수 도구")
     rsub = p.add_subparsers(dest="review_command", required=True)
-    r = rsub.add_parser("serve", parents=[common], help="로컬 검수 화면 (127.0.0.1)")
+    r = rsub.add_parser("serve", parents=[nested], help="로컬 검수 화면 (127.0.0.1)")
     r.add_argument("--queue", default="haul-numbers",
                    choices=["haul-numbers", "mismatch", "pending", "page-fields", "meta-check", "checks", "readings",
                             "usage-check"])
@@ -248,11 +270,11 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--kind", choices=["handwritten_number", "handwritten_text"], help="pending: 이 종류만")
     r.add_argument("--reviewer", help="검수자 식별자 (짧은 영문). 없으면 서버를 띄우지 않는다")
     r.add_argument("--port", type=int, default=8765)
-    rsub.add_parser("stats", parents=[common], help="검수 진행 현황")
-    r = rsub.add_parser("export-answers", parents=[common], help="유효한 검수(value, empty) → answers.json")
+    rsub.add_parser("stats", parents=[nested], help="검수 진행 현황")
+    r = rsub.add_parser("export-answers", parents=[nested], help="유효한 검수(value, empty) → answers.json")
     r.add_argument("out", help="출력 파일 (eval --answers 로 읽는 형식)")
     r.add_argument("--split", choices=["all", "test", "train"], default="all", help="날짜 분할")
-    r = rsub.add_parser("export-crops", parents=[common], help="검수한 셀의 이미지 + 라벨 (인식기 학습·평가용)")
+    r = rsub.add_parser("export-crops", parents=[nested], help="검수한 셀의 이미지 + 라벨 (인식기 학습·평가용)")
     r.add_argument("out", help="출력 폴더. git 작업 트리 안이면 거절한다")
     r.add_argument("--split", choices=["all", "test", "train"], default="all")
     r.add_argument("--kind", choices=["handwritten_number", "handwritten_text"], help="이 종류의 셀만")
@@ -271,7 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("recognizer", parents=[common], help="숫자 인식기: 학습·목록")
     nsub = p.add_subparsers(dest="recognizer_command", required=True)
-    n = nsub.add_parser("train", parents=[common], help="크롭 + 합성 셀로 학습 → <site>/models/<이름>/ (torch 필요: .[train])")
+    n = nsub.add_parser("train", parents=[nested], help="크롭 + 합성 셀로 학습 → <site>/models/<이름>/ (torch 필요: .[train])")
     n.add_argument("--crops", help="review export-crops 로 내보낸 폴더 (test 줄이 있으면 거절). 없으면 합성 셀만으로")
     n.add_argument("--name", required=True, help="모델 이름 (영문·숫자·.-_). 같은 이름이 있으면 멈춘다")
     n.add_argument("--synthetic", type=int, help="합성 셀 수 (기본: 실제 셀이 있으면 4000, 없으면 8000)")
@@ -299,8 +321,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "(후보·기준에는 쓰지 않는다. test 줄이 있거나 규격이 다르면 거절)")
     n.add_argument("--synthetic-meta", type=int, metavar="DAYS",
                    help="--meta-key, --crops 없이: 합성 메타 필드 DAYS 일치로 학습 (시험용 모델, tools/synth_meta)")
-    nsub.add_parser("list", parents=[common], help="사이트 팩의 모델과 카드 요약")
-    n = nsub.add_parser("eval", parents=[common], help="크롭 폴더에서 바로 평가 (파이프라인을 돌리지 않는다)")
+    nsub.add_parser("list", parents=[nested], help="사이트 팩의 모델과 카드 요약")
+    n = nsub.add_parser("eval", parents=[nested], help="크롭 폴더에서 바로 평가 (파이프라인을 돌리지 않는다)")
     n.add_argument("--crops", required=True, help="review export-crops 로 내보낸 폴더")
     n.add_argument("--model", required=True, help="모델 이름(<site>/models/<이름>) 또는 폴더 경로")
     n.add_argument("--split", choices=["val", "test", "train"], default="val",
@@ -319,6 +341,13 @@ def _number(text: str) -> int | float:
 def _settings(a: argparse.Namespace, **extra) -> Settings:
     return load_settings(a.config, site=a.site, archive_root=a.archive_root, work_root=a.work_root,
                          db_url=a.db_url, **extra)
+
+
+def _db_label(s: Settings) -> str:
+    """작업 DB 의 주소를 찍을 꼴 (sqlite 는 경로, 그 밖의 URL 은 호스트·DB 만 — 비밀번호를 찍지 않는다)."""
+    from .store.db import describe_db_url
+
+    return describe_db_url(s.resolved_db_url)
 
 
 def _emit(a: argparse.Namespace, data: dict, text: str) -> None:
@@ -347,7 +376,7 @@ def cmd_info(a) -> int:
         "version": __version__,
         "settings": {"site": str(s.site) if s.site else None,
                      "archive_root": str(s.archive_root) if s.archive_root else None,
-                     "work_root": str(s.work_root), "db_url": s.resolved_db_url, "dpi": s.dpi,
+                     "work_root": str(s.work_root), "db_url": _db_label(s), "dpi": s.dpi,
                      "recognizer": s.recognizer, "corrector": s.corrector, "auto_accept_conf": s.auto_accept_conf},
         "backends": {"recognizers": recognizers_available(), "correctors": sorted(CORRECTORS), "handlers": sorted(HANDLERS)},
         "site": None,
@@ -355,8 +384,9 @@ def cmd_info(a) -> int:
     lines = [f"minedocscan {__version__}"] + [f"  {k}: {v}" for k, v in data["settings"].items()]
     lines.append("백엔드: " + ", ".join(f"{k}={v}" for k, v in data["backends"].items()))
     data["export"] = {"excel_dir": str(s.excel_dir) if s.excel_dir else None, "sweep_minutes": s.export_sweep_minutes,
-                      "machine_values": s.machine_values}                       # 엑셀 (tasks/0008 4.7)
-    lines.append(f"엑셀 폴더: {s.excel_dir} (전체 훑기 {s.export_sweep_minutes:g}분마다"
+                      "retry_seconds": s.export_retry_seconds, "machine_values": s.machine_values}   # 엑셀 (tasks/0008 4.7)
+    lines.append(f"엑셀 폴더: {s.excel_dir} (전체 훑기 {s.export_sweep_minutes:g}분마다 — 달마다 한 조각, "
+                 f"바꾸지 못한 파일은 {s.export_retry_seconds:g}초 뒤에 다시"
                  + (", 기계 값 열 있음" if s.machine_values else "") + ")" if s.excel_dir
                  else "엑셀 폴더: 없음 ([export] excel_dir 또는 MINEDOCSCAN_EXCEL_DIR) — 자동 내보내기 꺼짐")
     from .publish.core import describe_url
@@ -402,11 +432,21 @@ def cmd_info(a) -> int:
         from .forms.equipment import master_keys
 
         n_master = len(master_keys(site.templates.values()))
-        data["site"] = {"name": site.name, "templates": tpls, "labels": len(site.labels),
+        data["site"] = {"name": site.name, "declared_name": site.declared_name, "templates": tpls, "labels": len(site.labels),
                         "equipment_aliases": len(site.equipment_aliases),
-                        "equipment_aliases_sha": site.equipment_aliases_sha, "equipment_master": n_master}
+                        "equipment_aliases_sha": site.equipment_aliases_sha, "equipment_master": n_master,
+                        "split_salt_follows_name": site.split_salt_follows_name,
+                        "split_salt": site.split_salt if site.split_salt_follows_name else None}   # 따를 때만 (옮겨 적을 값)
         lines.append(f"사이트 팩: {site.name} — 템플릿 {len(tpls)}종, 페이지 라벨 {len(site.labels)}개, "
                      f"장비명 대응표 {len(site.equipment_aliases)}개 (해시 {site.equipment_aliases_sha}, 마스터 {n_master}대)")
+        # 사본의 주인 (tasks/0009 4.1 다): 엑셀 폴더·통합 DB 는 [site] name 으로 이 사이트의 사본인지 본다
+        lines.append(f"사이트 이름 [site] name: {site.declared_name} (엑셀 폴더·통합 DB 의 주인)" if site.declared_name
+                     else "사이트 이름 [site] name: 없음 — 적어야 엑셀 자동 내보내기·통합 DB 싣기가 켜지고 export excel·publish 가 돕니다")
+        if site.split_salt_follows_name:
+            # 적힌 이름이 없으면 소금값은 폴더 이름이다 — 이름을 처음 적을 때도 바뀐다 (그 값을 보여 줘야 옮겨 적는다)
+            lines.append(f"  평가셋의 분할 소금값([eval] split_salt)이 없어 {'사이트 이름' if site.declared_name else '폴더 이름'} "
+                         f"\"{site.split_salt}\" 을 씁니다 — [site] name 을 적거나 바꾸기 전에 [eval] split_salt = \"{site.split_salt}\" 를 "
+                         "먼저 적으십시오 (그러지 않으면 test 날짜가 바뀝니다)")
         from .intake.decisions import count_lines
 
         dpath = s.decisions_path(site.root)
@@ -419,8 +459,8 @@ def cmd_info(a) -> int:
         pad = red["pad_px"] if red["pad_px"] is not None else DEFAULT_PAD_PX
         data["redact"] = {"meta_keys": keys, "pad_px": pad, "default": red == {"meta_keys": None, "pad_px": None}}
         data["haul_table"] = {k: len(v) for k, v in site.haul_table.items()}       # 순서를 적은 수만 (자리 이름은 찍지 않는다)
-        lines.append(f"가린 쪽 그림 [redact]: 메타 키 {', '.join(keys)}, 넓히는 폭 {pad} px"
-                     + (" (기본값)" if data["redact"]["default"] else ""))
+        lines.append(f"가린 쪽 그림 [redact]: {'메타 키 ' + ', '.join(keys) if keys else '메타 필드를 가리지 않는다 (meta_keys = [])'}"
+                     f", 넓히는 폭 {pad} px" + (" (기본값)" if data["redact"]["default"] else ""))
         lines.append(f"운반 표 [haul_table]: 열 순서 {data['haul_table']['columns']}개, 자리 순서 {data['haul_table']['slots']}개 지정"
                      + (" (없음 — 템플릿의 행 순서·자리 이름 순)" if not any(data["haul_table"].values()) else ""))
         data["inbox"] = {"path": str(s.inbox) if s.inbox else None, "settle_seconds": s.settle_seconds,
@@ -537,7 +577,7 @@ def cmd_run(a) -> int:
             + (f"다시 스캔 의심 쪽 {len(summary['duplicates'])}장 — 적재하지 않고 붙잡았습니다 (pages --status duplicate → doc discard/keep)\n"
                if summary["duplicates"] else "")
             + f"분류 여유가 낮은 페이지: {len(summary['low_margin'])}장, 오류 난 쪽: {len(summary['page_errors'])}장\n"
-            f"── DB 현황 ({s.resolved_db_url}) ──\n" + format_report(rep, xcheck_by_date(pipe.con)))
+            f"── DB 현황 ({_db_label(s)}) ──\n" + format_report(rep, xcheck_by_date(pipe.con)))
     if summary["failed"]:
         text += "\n실패한 문서:\n" + "\n".join(f"  {d['source_name']}: {d['error']}" for d in summary["failed"])
     if summary["page_errors"]:
@@ -608,7 +648,7 @@ def cmd_watch(a) -> int:
     try:
         pipe = Pipeline(s, site=site, recognizer=recognizer, meta_readers=meta_readers)
         worker = Worker(pipe, _open_inbox(s, pipe.con, continuous=not a.once, settle=a.settle_seconds,
-                                          give_up=a.give_up_seconds), after=_round_jobs(s, site))
+                                          give_up=a.give_up_seconds), after=_round_jobs(s, site, once=a.once))
         if a.once:
             r = worker.run_once()
         else:
@@ -631,6 +671,23 @@ def cmd_watch(a) -> int:
     return 0
 
 
+def cmd_selftest(a) -> int:
+    """자가 시험 (tasks/0009 4.6). 종료 코드: 0 통과, 1 실패 (어느 검사가 왜 — 한 줄씩), 2 받지 않는 스키마 이름."""
+    from . import selftest
+
+    if a.publish_schema is not None and not selftest.valid_schema(a.publish_schema):
+        print(f"--publish-schema 는 {selftest.SCHEMA_PREFIX} 로 시작하는 영문 소문자·숫자·밑줄 이름만 받습니다 "
+              "(자가 시험이 만들고 지우는 스키마 — 다른 스키마를 건드리지 않게)", file=sys.stderr)
+        return 2
+    out = Path(a.out)
+    print("자가 시험을 시작합니다 — 합성 데이터만, 임시 폴더에서 (망에 닿지 않습니다)", flush=True)
+    r = selftest.run(out, keep=a.keep, publish_schema=a.publish_schema)
+    n = Counter(c["status"] for c in r["checks"])
+    print(f"자가 시험: {'통과' if r['passed'] else '실패'} — 통과 {n['passed']}, 실패 {n['failed']}, 건너뜀 {n['skipped']} "
+          f"({r['seconds']}초). 결과: {out / 'selftest.json'}, {out / 'selftest.md'}")
+    return 0 if r["passed"] else 1
+
+
 def cmd_serve(a) -> int:
     """운영 화면 (tasks/0007 4.9): 한 프로세스에 스레드 둘 — 작업 스레드가 접수·처리 바퀴를 돌고(자기 DB 연결), 화면 스레드는
     단일 스레드 HTTP 서버(자기 연결)다. 화면의 쓰기는 검수 저장과 결정 저장뿐. --no-watch 면 작업 스레드가 없다 (잠금도 잡지 않는다)."""
@@ -643,6 +700,8 @@ def cmd_serve(a) -> int:
     from .review.store import import_into
     from .store.db import open_db
 
+    if a.log_dir and not isinstance(sys.stdout, DailyLog):             # main 이 이미 열었다 (early_log_dir) — 직접 부를 때만 여기서
+        redirect(a.log_dir)
     if not a.reviewer:
         raise SystemExit("검수자를 지정하세요: --reviewer <짧은 영문 식별자>. 검수·결정 기록마다 남습니다.")
     s = _settings(a)
@@ -706,13 +765,14 @@ def _screen_apps(con, site, s: Settings, reviewer: str, worker, wake, watching: 
     return ops, app
 
 
-def _round_jobs(s: Settings, site) -> dict:
+def _round_jobs(s: Settings, site, once: bool = False) -> dict:
     """watch·serve 의 바퀴 끝의 일 (tasks/0008 4.7·4.8): 엑셀 내보내기 → 통합 DB 싣기 (꺼져 있으면 아무것도 하지 않는다 — 상태만
-    화면에). 켤 수 없으면(저장소·접수 폴더 안, psycopg 가 없다) 시작할 때 한 줄로 알린다."""
+    화면에). 켤 수 없으면(저장소·접수 폴더 안, psycopg 가 없다) 시작할 때 한 줄로 알린다. once: watch --once — 다음 바퀴가 없으므로
+    전체 훑기를 조각으로 나누지 않는다 (나누면 실행마다 첫 달만 훑는다)."""
     from .export.auto import AutoExport
     from .publish.auto import AutoPublish
 
-    jobs = {"excel": AutoExport(s, site), "publish": AutoPublish(s)}
+    jobs = {"excel": AutoExport(s, site, once=once), "publish": AutoPublish(s, once=once)}
     for job in jobs.values():
         if job.notice:
             print(job.notice, file=sys.stderr)
@@ -722,7 +782,10 @@ def _round_jobs(s: Settings, site) -> dict:
 def _worth_showing(out: dict) -> bool:
     x, p = out.get("excel") or {}, out.get("publish") or {}
     return bool(out.get("processed") or out.get("received") or out.get("already") or out.get("moved_failed")
-                or x.get("written") or x.get("deleted") or x.get("failed") or x.get("missing_dir") or out.get("excel_error")
+                or (out.get("too_long") and out.get("too_long_changed", True))
+                or x.get("written") or x.get("deleted") or ((x.get("failed") or x.get("failing")) and x.get("failed_changed", True))
+                or x.get("missing_dir") or out.get("excel_error")
+                or x.get("other_site")
                 or x.get("kept") or x.get("skipped_dates")
                 or p.get("error") or any((p.get("replaced") or {}).values()) or any((p.get("removed") or {}).values())
                 or p.get("skipped")
@@ -1059,7 +1122,7 @@ def cmd_synth(a) -> int:
     r = generate(a.out, days=days, seed=a.seed, low_cells=a.low_cells, meta_fields=a.meta_fields, mix_pages=a.mix_pages,
                  usage_logs=a.usage_logs, usage_only=a.usage_only, print_layers=a.print_layers,
                  usage_variants=a.usage_variants, rotate_pages=a.rotate_pages, blank_backs=a.blank_backs,
-                 rescans=a.rescans, intake=a.intake, display_names=a.display_names)
+                 rescans=a.rescans, intake=a.intake, display_names=a.display_names, v2_forms=a.v2_forms, rough=a.rough)
     text = (f"합성 데이터를 만들었습니다: {r.root}\n"
             f"  사이트 팩  {r.site}\n  스캔 문서  {r.scans}\n  정답       {r.truth_path}, {r.answers_path}\n"
             f"실행 예: minedocscan run --site {r.site} --archive-root {r.scans} --work-root {r.root / 'work'}")
@@ -1315,7 +1378,7 @@ def _recognizer_eval(a, s: Settings) -> int:
         return _recognizer_eval_meta(a, s, site, model_dir)
     opts = (s.recognizer_options or {}).get("digits", {})
     thr = opts.get("auto_accept_conf")                       # 설정이 카드의 기준보다 먼저 (4.6)
-    errors = None if a.errors is None else (Path(a.errors) if a.errors else Path(s.work_root) / "recognizer-errors")
+    errors = _errors_dir(a, s)
     trips_max = site.option("haul", "trips_max") if site else None
     try:
         r = evaluate(a.crops, model_dir, split=a.split, threshold=None if thr is None else float(thr), errors=errors,
@@ -1347,12 +1410,25 @@ def _recognizer_eval(a, s: Settings) -> int:
     return 0
 
 
+def _errors_dir(a, s: Settings) -> Path | None:
+    """recognizer eval --errors 의 폴더 (기본 WORK_ROOT/recognizer-errors). 접수 폴더·보관 폴더 안이면 한 줄로 거절한다 — 저장소 안은
+    평가가 거절한다 (모아 보기는 현장 글씨다, tasks/0009 4.1 마)."""
+    from .review.export import inside_intake_folders
+
+    if a.errors is None:
+        return None
+    errors = Path(a.errors) if a.errors else Path(s.work_root) / "recognizer-errors"
+    if why := inside_intake_folders(errors, s, "틀린 칸 모아 보기"):
+        raise SystemExit(why)
+    return errors
+
+
 def _recognizer_eval_meta(a, s: Settings, site, model_dir: Path) -> int:
     from .recognize.digits.evaluate import EvalError
     from .recognize.meta.evaluate import evaluate_meta
     from .recognize.meta.model import MetaModelError
 
-    errors = None if a.errors is None else (Path(a.errors) if a.errors else Path(s.work_root) / "recognizer-errors")
+    errors = _errors_dir(a, s)
     try:
         r = evaluate_meta(a.crops, model_dir, split=a.split, site=site, errors=errors)
     except (EvalError, MetaModelError, ValueError) as e:
@@ -1379,11 +1455,16 @@ def _recognizer_eval_meta(a, s: Settings, site, model_dir: Path) -> int:
 
 
 def _export_days(a) -> tuple[set[str] | None, set[str] | None]:
-    """--date · --month · --from/--to → (다시 볼 날짜들, 다시 볼 달들). 범위를 주지 않으면 (None, None) — 전부 훑는다."""
+    """--date · --month · --from/--to → (다시 볼 날짜들, 다시 볼 달들). 범위를 주지 않으면 (None, None) — 전부 훑는다.
+    날짜는 YYYY-MM-DD 만 (date.fromisoformat 은 3.11 부터 20300107 도 받는다 — 다른 명령과 같게), 달은 YYYY-MM 만."""
+    import calendar
+    import re
     from datetime import date, timedelta
 
     def iso(v: str, what: str) -> date:
         try:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v, re.ASCII):
+                raise ValueError
             return date.fromisoformat(v)
         except ValueError:
             raise SystemExit(f"{what} 는 YYYY-MM-DD: {v!r}") from None
@@ -1395,11 +1476,13 @@ def _export_days(a) -> tuple[set[str] | None, set[str] | None]:
         return {d.isoformat()}, {d.isoformat()[:7]}
     if a.month:
         try:
+            if not re.fullmatch(r"\d{4}-\d{2}", a.month, re.ASCII):
+                raise ValueError
             first = date.fromisoformat(a.month + "-01")
         except ValueError:
             raise SystemExit(f"--month 는 YYYY-MM: {a.month!r}") from None
-        nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
-        return {(first + timedelta(days=i)).isoformat() for i in range((nxt - first).days)}, {a.month}
+        n = calendar.monthrange(first.year, first.month)[1]           # 다음 달의 1일을 만들지 않는다 (9999-12 의 다음 달은 없다)
+        return {(first + timedelta(days=i)).isoformat() for i in range(n)}, {a.month}
     if a.date_from:
         lo, hi = iso(a.date_from, "--from"), iso(a.date_to or a.date_from, "--to")
         if hi < lo:
@@ -1414,7 +1497,7 @@ def _export_days(a) -> tuple[set[str] | None, set[str] | None]:
 def cmd_export(a) -> int:
     """export excel: 파이프라인 잠금을 잡고 (serve·watch 가 돌면 한 줄로 알리고 끝낸다 — 4.1), 작업 DB 를 읽기 전용으로 열어 쓴다.
     export masked-pages: 잠금 없이 읽기만 (4.9)."""
-    from .export.writer import ExportError, check_out_dir, export_excel, format_result
+    from .export.writer import ExportError, check_out_dir, export_excel, format_result, site_name
     from .store.db import open_db_readonly
 
     s = _settings(a)
@@ -1425,6 +1508,7 @@ def cmd_export(a) -> int:
     if out is None:
         raise SystemExit("엑셀 폴더가 없습니다: OUT 또는 [export] excel_dir (MINEDOCSCAN_EXCEL_DIR)")
     try:
+        site_name(site)                                    # 사본의 주인 (tasks/0009 4.1 다) — 없으면 한 줄로 거절
         check_out_dir(out, s, allow_in_repo=a.allow_in_repo)
     except ExportError as e:
         raise SystemExit(str(e)) from None
@@ -1442,7 +1526,7 @@ def cmd_export(a) -> int:
     finally:
         lock.release()
     _emit(a, {"excel": r.as_dict(), "written": r.written, "deleted": r.deleted, "failed": r.failed}, format_result(r))
-    return 1 if (r.failed or r.missing_dir) else 0
+    return 1 if (r.failed or r.missing_dir or r.other_site) else 0
 
 
 def _export_masked(a, s: Settings, site) -> int:
@@ -1455,12 +1539,10 @@ def _export_masked(a, s: Settings, site) -> int:
     if inside_git_tree(out):
         raise SystemExit(f"{out} 은 git 작업 트리 안입니다. 가린 그림도 현장 데이터이므로 저장소 밖에 내보내세요 "
                          "(템플릿이 아는 자리만 가렸다 — 가렸다고 저장소·이슈에 넣어도 되는 것이 아니다)")
-    from .export.writer import ExportError, check_out_dir
+    from .review.export import inside_intake_folders
 
-    try:                                                   # 접수 폴더·보관 폴더 안도 거절 (가린 그림을 스캔으로 접수하게 된다)
-        check_out_dir(out, s)
-    except ExportError as e:
-        raise SystemExit(str(e).replace("엑셀에는", "가린 그림에도")) from None
+    if why := inside_intake_folders(out, s, "가린 그림"):   # 접수 폴더·보관 폴더 안도 거절 (가린 그림을 스캔으로 접수하게 된다)
+        raise SystemExit(why)
     if a.date and iso_date(a.date) != a.date:
         raise SystemExit(f"--date 는 YYYY-MM-DD: {a.date!r}")
     try:
@@ -1477,28 +1559,49 @@ def _export_masked(a, s: Settings, site) -> int:
 
 def cmd_publish(a) -> int:
     """publish: 늘 전체를 훑는다 (파이프라인 잠금을 잡고 — serve·watch 가 돌면 한 줄로 알리고 끝낸다). --check 는 잠금 없이 읽기만.
-    출력에는 대상의 호스트·DB·스키마와 수만 — URL·비밀번호·값을 찍지 않는다. 닿지 못하면 종료 코드 2."""
+    출력에는 대상의 호스트·DB·스키마와 수만 — URL·비밀번호·값을 찍지 않는다.
+    종료 코드: 0 실었다(--check: 같다), 1 --check 에서 다르다, 2 닿지 못했다·설정이 틀렸다(URL·사이트 이름·작업 DB 가 없다, 설정 파일 …)·
+    대상이 다른 사이트의 것이다 (tasks/0009 4.1 사 — 그 전에는 설정이 틀려도 1 이었다)."""
+    import sqlite3
+
+    from .config import ConfigError
     from .publish import core
     from .publish.scopes import Orphans
-    from .store.db import open_db_readonly
+    from .store.db import SchemaVersionError, open_db_readonly
 
-    s = _settings(a)
+    def refuse(text: str) -> int:
+        print(text, file=sys.stderr)
+        return 2
+
+    try:
+        s = _settings(a)
+    except ConfigError as e:
+        return refuse(f"설정 오류: {e}")
     if not s.publish_url:
-        raise SystemExit("통합 DB 가 없습니다: 환경변수 MINEDOCSCAN_PUBLISH_URL (설정 파일에는 적지 않습니다)")
+        return refuse("통합 DB 가 없습니다: 환경변수 MINEDOCSCAN_PUBLISH_URL (설정 파일에는 적지 않습니다)")
+    if s.site is None:
+        return refuse("사이트 팩이 지정되지 않았습니다: --site 또는 MINEDOCSCAN_SITE (대상이 어느 사이트의 사본인지 [site] name 으로 봅니다)")
+    try:
+        name = core.site_name(s)
+    except core.PublishError as e:
+        return refuse(str(e))
     where = f"{core.describe_url(s.publish_url)} 스키마 {s.publish_schema}"
     lock = None if a.check else _pipeline_lock(s)
     try:
         try:
             con = open_db_readonly(s.resolved_db_url)
         except FileNotFoundError as e:
-            raise SystemExit(f"{e} — 먼저 run·watch 로 처리합니다") from None
+            return refuse(f"{e} — 먼저 run·watch 로 처리합니다")
+        except SchemaVersionError as e:
+            return refuse(f"DB 오류: {e}")
+        except (NotImplementedError, sqlite3.DatabaseError) as e:      # 작업 DB 주소가 SQLite 가 아니다·파일이 DB 가 아니다
+            return refuse(f"작업 DB 를 열 수 없습니다: {e}")              # (주소는 describe_db_url 을 거친 것만 글에 있다)
         try:
-            res = core.run(con, s, full=True, check=a.check, rebuild=a.rebuild)
+            res = core.run(con, s, full=True, check=a.check, rebuild=a.rebuild, site=name)
         except Orphans as e:
-            print(f"싣지 않았습니다: {e} — 작업 DB 를 run --fresh 로 다시 만드십시오", file=sys.stderr)
-            return 2
+            return refuse(f"싣지 않았습니다: {e} — 작업 DB 를 run --fresh 로 다시 만드십시오")
         except core.PublishError as e:
-            print(core.scrub(str(e), s.publish_url), file=sys.stderr)
+            print(core.scrub(e.for_command(), s.publish_url), file=sys.stderr)
             return e.code
         finally:
             con.close()
@@ -1522,7 +1625,25 @@ def cmd_publish(a) -> int:
 COMMANDS = {"info": cmd_info, "publish": cmd_publish, "run": cmd_run, "report": cmd_report, "pages": cmd_pages, "eval": cmd_eval,
             "regress": cmd_regress, "template": cmd_template, "synth": cmd_synth, "review": cmd_review,
             "doc": cmd_doc, "watch": cmd_watch, "serve": cmd_serve, "export": cmd_export,
-            "recognizer": cmd_recognizer}
+            "recognizer": cmd_recognizer, "selftest": cmd_selftest}
+
+
+def utf8_streams() -> None:
+    """표준 출력·오류를 UTF-8 로 (tasks/0009 4.4): 윈도우의 러너·작업 스케줄러·파일로 돌린 출력은 cp1252·cp949 라 한글을 찍다
+    UnicodeEncodeError 로 죽는다 — UTF-8 이 아니면 다시 연다 (errors="replace"; 콘솔은 파이썬이 이미 유니코드로 쓴다).
+    pythonw(작업 스케줄러)에서는 둘 다 None 이다 — 무엇이든 쓰는 곳이 죽지 않게 버리는 곳(os.devnull)으로 둔다
+    (serve --log-dir 은 그 전에 로그 파일을 연다)."""
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        if stream is None:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))  # 프로세스가 끝날 때까지
+            continue
+        enc = (getattr(stream, "encoding", None) or "").lower().replace("-", "").replace("_", "")
+        if enc != "utf8" and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):                               # 이미 닫혔다 · 다시 열 수 없는 흐름 — 그대로
+                pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1530,6 +1651,11 @@ def main(argv: list[str] | None = None) -> int:
     from .forms.template import TemplateError
     from .store.db import SchemaVersionError
 
+    utf8_streams()
+    argv = sys.argv[1:] if argv is None else list(argv)
+    log_dir = early_log_dir(argv)
+    if log_dir:                                                        # serve --log-dir: 인자를 읽기 전에 (argparse 의 오류도 그 파일에)
+        redirect(log_dir)
     args = build_parser().parse_args(argv)
     try:
         return COMMANDS[args.command](args)

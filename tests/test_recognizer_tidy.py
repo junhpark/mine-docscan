@@ -82,7 +82,8 @@ def test_meta_table_takes_only_model_names(tmp_path, meta_synth):
     with pytest.raises(ConfigError, match="operator"):
         build_meta_readers(Settings(recognizer_options={"meta": {"operator": 3}}), None)
     cfg = tmp_path / "c.toml"
-    cfg.write_text(f'[recognize.meta]\nvehicle_no = "{FIXTURES / "meta-digits"}"\nauto_accept_conf = 0.9\n', encoding="utf-8")
+    cfg.write_text(f'[recognize.meta]\nvehicle_no = {json.dumps(str(FIXTURES / "meta-digits"))}\nauto_accept_conf = 0.9\n',
+                   encoding="utf-8")                                    # json 의 글자열 = TOML 의 기본 글자열 (윈도우 경로의 역슬래시)
     for cmd in (["info"], ["run", str(meta_synth.scans), "--work-root", str(tmp_path / "w")]):
         with pytest.raises(SystemExit) as e:
             main([*cmd, "--config", str(cfg), "--site", str(meta_synth.site)])

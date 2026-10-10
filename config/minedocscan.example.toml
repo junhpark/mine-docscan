@@ -15,15 +15,19 @@ dpi = 200                    # 템플릿 좌표계의 해상도. 템플릿을 �
 auto_accept_conf = 0.90      # 이 신뢰도 이상이면 검수 없이 적재
 classify_min_margin = 1.5    # 양식 분류 1위/2위 비율이 이보다 낮으면 표시
 save_aligned = true          # 정합 이미지를 work_root/aligned 에 저장 (검수·디버깅용)
-damaged_pdf = "fail"         # 라이브러리가 복구해서 연 PDF(끝이 잘린 파일 등): fail = 문서 실패 | warn = 처리하고 경고를 남김
-                             # 멀쩡한 스캔이 늘 "복구가 필요했습니다"로 실패하는 스캐너라면 warn (MINEDOCSCAN_DAMAGED_PDF)
+damaged_pdf = "fail"         # 끝 표시(%%EOF)가 마지막 1 KB 에 없는 PDF(끝이 잘린 파일 등): fail = 문서 실패 | warn = 열리면 처리하고
+                             # 경고를 남김. 멀쩡한 스캔이 늘 "끝 표시가 없습니다"로 실패하는 스캐너라면 warn (MINEDOCSCAN_DAMAGED_PDF)
+                             # 열리지 않는 PDF 는 어느 쪽이든 실패
 blank_max_ink = 0.02         # 양식을 못 찾은 쪽 중 어두운 화소가 이 비율 미만이면 빈 쪽 (양면 스캔의 뒷면)
 dup_min_sim = 0.80           # 같은 날·같은 계열의 앞 쪽과 손글씨 자리가 이만큼 비슷하면 다시 스캔한 쪽으로 붙잡는다
 
 [intake]                     # 접수 폴더 감시 (minedocscan watch · serve)
 settle_seconds = 5           # 수정 시각이 이만큼 지나고 열리는 파일만 가져온다 (스캐너가 다 쓰기를 기다린다)
-give_up_seconds = 120        # 이만큼 지나도 열리지 않으면 손상 방침대로 등록한다 (읽을 수조차 없으면 <inbox>/_failed 로)
+give_up_seconds = 120        # 이만큼 지나도 다 쓰이지 않았으면(열리지 않는다, PDF 의 끝 표시가 없다) 손상 방침대로 등록한다
+                             # (읽을 수조차 없으면 <inbox>/_failed 로)
 poll_seconds = 3             # 접수 폴더를 훑는 간격
+# serve 의 출력은 명령의 선택으로: serve --log-dir DIR — DIR/serve-YYYYMMDD.log (UTF-8, 날마다 새 파일, 30일 지난 것은 지운다).
+# 윈도우 설치(install.ps1)는 작업 스케줄러가 창 없이(pythonw) 띄우는 serve 에 <설치 폴더>\logs 를 준다
 
 # 엑셀 내보내기 (docs/DATA.md, ADR 0022). excel_dir 가 없으면 자동 내보내기는 꺼져 있다 — export excel 은 OUT 을 받는다.
 # watch·serve 가 바퀴 끝(접수 → 처리 → 엑셀 → 싣기)에 바뀐 날짜의 일별·월별 파일만 다시 쓴다 (내용의 해시가 같으면 건드리지 않는다)
@@ -32,9 +36,11 @@ poll_seconds = 3             # 접수 폴더를 훑는 간격
 #                                             # 저장소·접수 폴더·보관 폴더 안이면 켜지 않는다 — 엑셀에는 현장의 값(이름·차량번호)이 있다
 # sweep_minutes = 30         # 전체 훑기의 간격 (분). 0 이면 시작할 때만 — 다른 프로세스(review serve)가 쓴 검수와 놓친 것을 잡는다
 # machine_values = false     # true 면 업무 시트·긴 표에 "기계 값(확정 아님)" 열을 따로 둔다 (기본은 확정된 값만 — ADR 0008)
+# retry_seconds = 60         # 바꾸지 못한 파일(엑셀에서 열어 둔 것)은 이만큼 지나서 다시 쓴다 — 그 사이의 바퀴는 그 파일을 건너뛴다
 
 # 통합 DB(PostgreSQL)로 싣기 (ADR 0021) — pip install -e ".[postgres]"
-# 대상의 URL(postgresql://사용자:비밀번호@호스트/DB)은 **환경변수 MINEDOCSCAN_PUBLISH_URL 로만** 준다. 이 파일에 적지 않는다
+# 대상의 URL(postgresql://계정@호스트/DB)은 **환경변수 MINEDOCSCAN_PUBLISH_URL 로만** 준다. 이 파일에 적지 않는다.
+# 비밀번호는 URL 에 넣지 않고 libpq 의 pgpass 에 둔다 (윈도우 %APPDATA%\postgresql\pgpass.conf — 설명서 2장)
 # ([publish] 에 url·dsn·password 가 있으면 설정 오류). URL 이 없으면 싣기는 꺼져 있다. 대상의 계정은 그 스키마에만 쓰는 전용 계정으로
 # [publish]
 # schema = "minedocscan"     # 대상의 스키마 (MINEDOCSCAN_PUBLISH_SCHEMA). 영문 소문자·숫자·밑줄
