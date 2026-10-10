@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from collections import Counter
@@ -842,3 +843,87 @@ def test_a_sliced_publish_sweep_equals_the_work_db(world, pg, seed):
 
     reprocess_fuzz(world, steps=8, seed=seed, fresh=False, on_touched=lambda t: None, after_step=step)
     assert max(parts) >= 3 and auto.fell_back == 0, parts
+
+
+# ── 빈 작업 DB (tasks/0010 4.1) ───────────────────────────────────────────────
+def test_an_empty_work_db_deletes_nothing_from_the_target(world, pg, tmp_path, capsys, monkeypatch):
+    """쪽이 없는 작업 DB(새로 만든 것)로 쪽이 있는 대상에: 명령은 종료 코드 2 와 이유, --check 도 2, 대상의 행·지문 그대로. 자동 싣기는
+    그 바퀴의 실패 empty_work_db — 10바퀴 동안 연결은 retry_seconds 마다만, 요약 줄은 처음 한 번. doc_page 에 행이 생기면
+    retry_seconds 뒤의 첫 바퀴부터 지금처럼 싣는다. --rebuild 는 지우고 지운 범위의 수(0 이 아니다)와 경고 한 줄. 대상이 빈(처음) 경우는
+    표를 만든다."""
+    from minedocscan.cli import _worth_showing, main
+    from minedocscan.pipeline import Pipeline
+    from minedocscan.store.db import open_db
+
+    con, st, sch = world["pipe"].con, world["st"], pg.publish_schema
+    empty_st = replace(pg, work_root=tmp_path / "새 PC")
+    empty = open_db(empty_st.resolved_db_url)
+    first = core.run(empty, empty_st)                                        # 처음(대상 없음) — 표를 만들고 통째(장비)를
+    assert first.created and first.empty and first.replaced == {"document": 0, "date": 0, "whole": 1}
+    publish(world, pg)
+    rows = {t: remote(pg, f'SELECT COUNT(*) FROM "{sch}"."{t}"')[0][0] for t in PUBLISH_TABLES}
+    state = remote(pg, f'SELECT kind, key, fingerprint, published_at FROM "{sch}".pub_state ORDER BY 1, 2')
+    n_docs = con.execute("SELECT COUNT(*) FROM doc_document").fetchone()[0]
+    n_dates = sum(1 for k, *_ in state if k == "date")
+    for kw in ({}, {"check": True}):
+        with pytest.raises(core.PublishError) as e:
+            core.run(empty, empty_st, **kw)
+        assert e.value.kind == "empty_work_db" and e.value.code == 2, kw
+        assert f"문서 {n_docs}·날짜 {n_dates}" in str(e.value) and "--rebuild" in str(e.value)
+    monkeypatch.setenv("MINEDOCSCAN_PUBLISH_URL", PG)
+    monkeypatch.setenv("MINEDOCSCAN_PUBLISH_SCHEMA", sch)
+    common = ["--site", str(st.site), "--work-root", str(empty_st.work_root)]
+    assert main(["publish", *common]) == 2
+    assert main(["publish", "--check", *common]) == 2
+    err = capsys.readouterr().err
+    assert err.count("작업 DB 에 쪽이 없습니다") == 2 and "지우지 않았습니다" in err
+
+    def unchanged():
+        assert {t: remote(pg, f'SELECT COUNT(*) FROM "{sch}"."{t}"')[0][0] for t in PUBLISH_TABLES} == rows
+        assert remote(pg, f'SELECT kind, key, fingerprint, published_at FROM "{sch}".pub_state ORDER BY 1, 2') == state
+
+    unchanged()
+    # 자동 싣기: 시계를 주입하고 10바퀴 (20초씩) — retry_seconds 60 이면 연결은 0·60·120·180초에만
+    calls: list[float] = []
+    clock = Clock()
+
+    def counting(url, timeout_s):
+        calls.append(clock.t)
+        return core.psycopg_connect(url, timeout_s)
+
+    auto = AutoPublish(replace(empty_st, publish_retry_seconds=60.0, publish_sweep_minutes=0.0), clock=clock, connect=counting)
+    shown, start = [], clock.t
+    for _ in range(10):
+        out = auto.after_round(empty, Touched())
+        if out is not None:
+            assert out.kind == "empty_work_db"
+            shown.append(_worth_showing({"publish": out.as_dict()}))
+        clock.t += 20
+    assert [t - start for t in calls] == [0, 60, 120, 180]
+    assert shown == [True, False, False, False]                              # 요약 줄은 처음 한 번
+    assert auto.status["last_error"] == "empty_work_db"
+    from minedocscan.intake.worker import format_round
+
+    assert "작업 DB 에 쪽이 없어 싣지 않음" in format_round({"publish": out.as_dict()})
+    unchanged()
+    # 쪽이 생기면 (되살렸다): retry_seconds 가 지난 첫 바퀴부터 싣는다
+    pipe = Pipeline(replace(st, work_root=empty_st.work_root), site=world["site"], con=empty)
+    pipe.run([world["scans"]])
+    auto.last_fail = clock.t - 30                                            # 마지막 실패에서 30초 — 아직 기다린다
+    assert auto.after_round(empty, Touched()) is None and calls[-1] - start == 180
+    clock.t += 31
+    r = auto.after_round(empty, Touched())
+    assert not getattr(r, "kind", None) and auto.status["last_error"] is None
+    while auto.sweep.running:
+        assert not getattr(auto.after_round(empty, Touched()), "kind", None)
+    assert_same(empty, pg)
+    # --rebuild 는 빈 작업 DB 여도 한다 — 지운 범위의 수와 경고 한 줄
+    blank = replace(pg, work_root=tmp_path / "빈 것")
+    open_db(blank.resolved_db_url).close()
+    capsys.readouterr()
+    assert main(["publish", "--rebuild", "--json", "--site", str(st.site), "--work-root", str(blank.work_root)]) == 0
+    printed = capsys.readouterr()
+    assert "경고: 작업 DB 에 쪽이 없습니다" in printed.err
+    removed = json.loads(printed.out)["publish"]["removed"]
+    assert removed["document"] == n_docs and removed["date"] == n_dates
+    assert remote(pg, f'SELECT COUNT(*) FROM "{sch}".doc_page') == [(0,)]

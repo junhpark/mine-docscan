@@ -143,6 +143,8 @@ class Pipeline:
         reg = self.register(path, document_id=document_id, strict=strict)
         if reg["status"] == "failed":
             return {"document_id": document_id, "status": "failed", "error": reg["error"], "pages": []}
+        if reg["status"] == "discarded":                 # 열리지 않는 버린 문서 (tasks/0010 4.2) — 처리할 것이 없다
+            return {"document_id": document_id, "status": "discarded", "pages": []}
         return self.process_document(document_id, template=template, strict=strict)
 
     def _can_skip(self, document_id: str) -> bool:
@@ -167,7 +169,8 @@ class Pipeline:
         """등록: 해시, 한 번 열어 쪽 수 (tasks/0007 4.1). 열리지 않는 파일(쓰레기 바이트, 쪽이 없는 PDF, 손상 방침에 걸린 PDF)은
         날짜와 상관없이 failed. 이미 있는 문서면 경로·이름만 고치고 상태·요청 번호·받은 시각은 그대로 둔다 (failed 였으면 received).
         source_name·received_at·source_rel: 접수(intake/inbox.py)가 원래 파일명과 받은 시각, 보관 경로를 준다.
-        돌려주는 값: {"document_id", "status": new | known | failed, "error"}."""
+        열리지 않는 파일이라도 그 문서를 버린 결정이 있으면 failed 가 아니라 discarded (tasks/0010 4.2 — _fail_document).
+        돌려주는 값: {"document_id", "status": new | known | failed | discarded, "error"}."""
         path = Path(path)
         source_name = source_name or path.stem
         if document_id is None:
@@ -179,7 +182,7 @@ class Pipeline:
             if strict:
                 raise
             out = self._fail_document(document_id, path, source_name, e, source_rel=source_rel, received_at=received_at)
-            return {"document_id": document_id, "status": "failed", "error": out["error"]}
+            return {"document_id": document_id, "status": out["status"], "error": out.get("error")}
         old = self._doc(document_id)
         row = self._document_row(document_id, path, source_name, "received", None, source_rel=source_rel)
         row.update(n_pages=n_pages, warning="; ".join(warnings) or None, received_at=received_at or _received_now(row["source_rel"]))
@@ -288,6 +291,15 @@ class Pipeline:
             self._finish_document(document_id, req, before, status="discarded", date=(doc_date, date_source))
             self.summary["discarded"].append(document_id)
             return {"document_id": document_id, "status": "discarded", "pages": []}
+        # 등록과 같은 열기 검사 (tasks/0010 4.2): 등록이 거절하는 파일(잘린 PDF, 여러 쪽 TIFF …)은 처리도 거절한다 — 날짜를 보기 전에.
+        # 버렸다 되살린 손상 문서가 날짜가 없어도 needs_date 가 아니라 failed 이고, 여러 쪽 TIFF 가 첫 쪽만 적재되지 않게 (처음부터 만든
+        # DB 에서는 등록이 failed 로 끝낸다)
+        try:
+            count_pages(src, self.settings.damaged_pdf, [])
+        except Exception as e:                            # noqa: BLE001 — 그 문서만 failed
+            if strict:
+                raise
+            return self._failed_processing(document_id, req, before, snapshot, source_name, e, (doc_date, date_source))
         if doc_date is None:
             self._finish_document(document_id, req, before, status="needs_date", date=(None, None))
             self.summary["needs_date"].append({"document_id": document_id, "source_name": source_name})
@@ -306,15 +318,7 @@ class Pipeline:
         except Exception as e:                            # noqa: BLE001 — 한 문서의 실패가 전체를 멈추지 않는다
             if strict:
                 raise
-            if self.con.in_transaction:
-                self.con.rollback()
-            self.summary = snapshot
-            with write_txn(self.con):
-                after = self._clear_document(document_id)
-            self._finish_document(document_id, req, before | after, status="failed", error=_error_text(e))
-            self.summary["failed"].append({"document_id": document_id, "source_name": source_name,
-                                           "error": _error_text(e)})
-            return {"document_id": document_id, "status": "failed", "error": _error_text(e), "pages": []}
+            return self._failed_processing(document_id, req, before, snapshot, source_name, e, (doc_date, date_source))
         warning = "; ".join(warnings) or None
         self._finish_document(document_id, req, before, status=None, date=(doc_date, date_source), n_pages=len(pages),
                               warning=warning)
@@ -328,6 +332,20 @@ class Pipeline:
         if warning:                                       # 경고만으로는 종료 코드가 1 이 되지 않는다
             self.summary["warnings"].append({"document_id": document_id, "source_name": source_name, "warning": warning})
         return {"document_id": document_id, "status": "ok", "pages": pages, "warning": warning}
+
+    def _failed_processing(self, document_id: str, req: int, before: Footprint, snapshot: dict, source_name: str,
+                           e: BaseException, date: tuple[str | None, str | None]) -> dict:
+        """처리하다 문서를 읽지 못했다: 그 문서의 집계를 되돌리고, 쓴 쪽을 지우고 failed. 날짜 열은 처리한 문서처럼 적는다 — 처음부터
+        만든 DB 의 등록(_fail_document)이 문서의 날짜를 적으므로 (tasks/0010 4.2 — 전에는 NULL 이었다)."""
+        if self.con.in_transaction:
+            self.con.rollback()
+        self.summary = snapshot
+        with write_txn(self.con):
+            after = self._clear_document(document_id)
+        err = _error_text(e)
+        self._finish_document(document_id, req, before | after, status="failed", error=err, date=date)
+        self.summary["failed"].append({"document_id": document_id, "source_name": source_name, "error": err})
+        return {"document_id": document_id, "status": "failed", "error": err, "pages": []}
 
     def _footprint(self, document_id: str) -> Footprint:
         """그 문서의 쪽이 지금 있는 날짜·장비·쪽, 다시 스캔을 견주는 묶음(날짜, 계열) (지우기 전과 처리한 뒤 — 다시 계산할 범위)."""
@@ -459,17 +477,26 @@ class Pipeline:
 
     def _fail_document(self, document_id: str, path: Path, source_name: str, e: BaseException,
                        source_rel: str | None = None, received_at: str | None = None) -> dict:
-        """읽지 못한 문서: 그 문서의 행을 지우고(있었다면 — 그 날짜·장비를 다시 계산) failed, work_done = work_requested."""
-        err = _error_text(e)
+        """읽지 못한 문서: 그 문서의 행을 지우고(있었다면 — 그 날짜·장비를 다시 계산) failed, work_done = work_requested.
+        그 문서를 버린 결정이 있으면 failed 가 아니라 discarded — 처리가 버린 문서에 남기는 것과 같은 행(오류 없음, 쪽 수 없음, 문서의
+        날짜). 버리기는 열 수 있는지와 상관없다: 실패 → 버리기 → 처리(라이브)와 run --fresh(등록이 결정을 본다)가 같은 DB 를 만든다
+        (tasks/0010 4.2 — 전에는 run --fresh 뒤에 다시 failed 였다)."""
+        discarded = decs.effective(self.con, document_id).doc.discarded
+        status, err = ("discarded", None) if discarded else ("failed", _error_text(e))
         self.touched.documents.add(document_id)
-        row = self._document_row(document_id, path, source_name, "failed", err, source_rel=source_rel)
+        row = self._document_row(document_id, path, source_name, status, err, source_rel=source_rel)
         row["received_at"] = received_at or _received_now(row["source_rel"])
         with write_txn(self.con):
             before = self._clear_document(document_id)
             self._request_later(document_id, before.groups)       # 지운 쪽 때문에 붙잡혀 있던 뒤 문서 (4.6 ①)
             upsert(self.con, "doc_document", row, insert_only=("received_at",))
-            self.con.execute("UPDATE doc_document SET status = 'failed', error = ?, work_done = work_requested "
-                             "WHERE document_id = ?", (err, document_id))
+            self.con.execute("UPDATE doc_document SET status = ?, error = ?, work_done = work_requested "
+                             "WHERE document_id = ?", (status, err, document_id))
+        if row["work_date"]:
+            self.touched.dates.add(row["work_date"])
+        if discarded:
+            self.summary["discarded"].append(document_id)
+            return {"document_id": document_id, "status": "discarded", "pages": []}
         self.summary["failed"].append({"document_id": document_id, "source_name": source_name, "error": err})
         return {"document_id": document_id, "status": "failed", "error": err, "pages": []}
 

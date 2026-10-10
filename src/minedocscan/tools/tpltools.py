@@ -269,9 +269,11 @@ def preview(tdir: str | Path, out_dir: str | Path, scan: str | Path | None = Non
     return {"out": str(out), "boxes": boxes, "aligned": aligned}
 
 
-def draw(tpl: Template, gray: np.ndarray, tint: np.ndarray | None = None) -> tuple[np.ndarray, int]:
+def draw(tpl: Template, gray: np.ndarray, tint: np.ndarray | None = None, legend: bool = True) -> tuple[np.ndarray, int]:
     """그림 (BGR)과 그린 테두리 수. 칸은 종류의 색, 나눔 선(split_ys·split_xs)은 노란 점선, 표의 테두리 위에 표 이름·역할.
-    tint: 이 화소(bool)를 PRINT_COLOR 로 칠한 뒤 테두리를 그린다 (preview --print 의 인쇄 화소)."""
+    tint: 이 화소(bool)를 PRINT_COLOR 로 칠한 뒤 테두리를 그린다 (preview --print 의 인쇄 화소).
+    legend: 범례를 그림 아래에 덧붙인 띠에 (tasks/0010 4.6 — 양식의 어떤 부분도 가리지 않고, 화소 좌표가 그대로 템플릿 좌표이게.
+    위나 왼쪽에 붙이면 좌표가 밀린다. 전에는 왼쪽 위에 그려 양식의 제목과 겹쳤다). 띠의 높이는 legend_height."""
     boxes = 0
     img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) if gray.ndim == 2 else gray.copy()
     img = cv2.addWeighted(img, 0.55, np.full_like(img, 255), 0.45, 0)        # 바탕을 흐리게 — 테두리가 보이게
@@ -314,8 +316,14 @@ def draw(tpl: Template, gray: np.ndarray, tint: np.ndarray | None = None) -> tup
         cv2.line(img, (x0, y1), (x1, y0), REDACT_COLOR, 1)
         boxes += 1
         _text(img, f"redact: {r['name']}", x0 + 3, y0 + 14, REDACT_COLOR, 0.45)
-    _legend(img, tint is not None)
+    if legend:
+        img = np.vstack([img, _legend_band(img.shape[1], tint is not None)])
     return img, boxes
+
+
+def legend_height(printed: bool = False) -> int:
+    """범례 띠의 높이 (px) — 칸의 종류마다 한 줄, 나눔 선, 가릴 상자, (--print) 인쇄 화소."""
+    return 20 * (len(CELL_KINDS) + 2 + (1 if printed else 0)) + 16
 
 
 def _text(img, s: str, x: int, y: int, color, scale: float) -> None:
@@ -331,6 +339,13 @@ def _dashed(img, p0, p1, color, dash: int = 10) -> None:
         a = (int(x0 + (x1 - x0) * i / n), int(y0 + (y1 - y0) * i / n))
         b = (int(x0 + (x1 - x0) * min(i + 1, n) / n), int(y0 + (y1 - y0) * min(i + 1, n) / n))
         cv2.line(img, a, b, color, 2)
+
+
+def _legend_band(width: int, printed: bool = False) -> np.ndarray:
+    band = np.full((legend_height(printed), width, 3), 255, np.uint8)
+    cv2.line(band, (0, 1), (width - 1, 1), (160, 160, 160), 1)                # 양식과 범례의 경계
+    _legend(band, printed)
+    return band
 
 
 def _legend(img, printed: bool = False) -> None:

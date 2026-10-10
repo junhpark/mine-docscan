@@ -13,7 +13,7 @@ from minedocscan.cli import main
 from minedocscan.forms.template import Template, TemplateError
 from minedocscan.tools import synth_cells, synth_meta, synth_usage
 from minedocscan.tools.synth import write_site_pack
-from minedocscan.tools.tpltools import COLORS, check_template, preview
+from minedocscan.tools.tpltools import COLORS, check_template, draw, legend_height, preview
 
 
 @pytest.fixture(scope="module")
@@ -36,7 +36,13 @@ def test_preview_draws_one_box_per_cell_and_field(pack, tmp_path):
         cells = tpl.cells() + tpl.field_cells()
         assert r["boxes"] == len(cells) and r["aligned"] is None
         img = cv2.imread(r["out"])
-        assert img.shape[:2] == tpl.reference.shape
+        h, w = tpl.reference.shape
+        # 범례는 양식 아래에 덧붙인 띠에 (tasks/0010 4.6): 위쪽은 범례 없이 그린 것과 화소까지 같다 — 템플릿 좌표 그대로
+        assert img.shape[:2] == (h + legend_height(), w)
+        assert np.array_equal(img[:h], draw(tpl, tpl.reference, legend=False)[0])
+        band = img[h:]
+        for kind, color in COLORS.items():                  # 범례의 색 견본은 띠 안에
+            assert np.all(band == np.array(color, np.uint8), axis=2).sum() >= 100, kind
         for c in cells:                                     # 칸마다 그 종류의 색 테두리가 있다 (오른쪽 아래 꼭짓점)
             x1, y1 = c.bbox[2], c.bbox[3]
             assert tuple(int(v) for v in img[y1, x1]) == COLORS[c.kind], (n, c.region, c.name, c.row)

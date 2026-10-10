@@ -114,8 +114,12 @@ def build_parser() -> argparse.ArgumentParser:
                        help="통합 DB(PostgreSQL)로 싣기 — 지문이 다른 문서·날짜만 한 트랜잭션으로 갈아 끼운다 (tasks/0008 4.8). "
                             "대상은 환경변수 MINEDOCSCAN_PUBLISH_URL 로만")
     g = p.add_mutually_exclusive_group()
-    g.add_argument("--check", action="store_true", help="쓰지 않고 다른 범위의 수만 (같으면 0, 다르면 1, 닿지 못하면 2). 잠금을 잡지 않는다")
-    g.add_argument("--rebuild", action="store_true", help="이 프로그램이 만든 표만 지우고 다시 만든 뒤 싣는다 (스키마 버전·싣기의 판이 다를 때)")
+    g.add_argument("--check", action="store_true",
+                   help="쓰지 않고 다른 범위의 수만 (같으면 0, 다르면 1, 닿지 못하면 2 — 작업 DB 에 쪽이 없는데 대상에 문서·날짜가 있어도 2: "
+                        "그때는 싣지도 않는다). 잠금을 잡지 않는다")
+    g.add_argument("--rebuild", action="store_true",
+                   help="이 프로그램이 만든 표만 지우고 다시 만든 뒤 싣는다 (스키마 버전·싣기의 판이 다를 때). 작업 DB 에 쪽이 없어도 한다 — "
+                        "대상을 비운다 (경고 한 줄)")
 
     p = sub.add_parser("run", parents=[common], help="스캔 파일/폴더를 처리해 DB 에 적재")
     p.add_argument("paths", nargs="*", help="파일 또는 폴더. 없으면 archive_root 전체. 상대경로는 archive_root 기준으로도 찾는다")
@@ -787,7 +791,8 @@ def _worth_showing(out: dict) -> bool:
                 or x.get("missing_dir") or out.get("excel_error")
                 or x.get("other_site")
                 or x.get("kept") or x.get("skipped_dates")
-                or p.get("error") or any((p.get("replaced") or {}).values()) or any((p.get("removed") or {}).values())
+                or (p.get("error") and p.get("changed", True))
+                or any((p.get("replaced") or {}).values()) or any((p.get("removed") or {}).values())
                 or p.get("skipped")
                 or out.get("publish_error"))
 
@@ -1561,7 +1566,8 @@ def cmd_publish(a) -> int:
     """publish: 늘 전체를 훑는다 (파이프라인 잠금을 잡고 — serve·watch 가 돌면 한 줄로 알리고 끝낸다). --check 는 잠금 없이 읽기만.
     출력에는 대상의 호스트·DB·스키마와 수만 — URL·비밀번호·값을 찍지 않는다.
     종료 코드: 0 실었다(--check: 같다), 1 --check 에서 다르다, 2 닿지 못했다·설정이 틀렸다(URL·사이트 이름·작업 DB 가 없다, 설정 파일 …)·
-    대상이 다른 사이트의 것이다 (tasks/0009 4.1 사 — 그 전에는 설정이 틀려도 1 이었다)."""
+    대상이 다른 사이트의 것이다 (tasks/0009 4.1 사 — 그 전에는 설정이 틀려도 1 이었다)·작업 DB 에 쪽이 없는데 대상에 문서·날짜가 있다
+    (tasks/0010 4.1 — --rebuild 만 비운다)."""
     import sqlite3
 
     from .config import ConfigError
@@ -1614,6 +1620,9 @@ def cmd_publish(a) -> int:
                 f"대상에만 있는 범위 — 문서 {rem['document']}, 날짜 {rem['date']} (견준 범위 {res.checked})")
         _emit(a, {"publish_check": res.as_dict()}, text)
         return 1 if res.changed else 0
+    if a.rebuild and res.empty:
+        print(f"경고: 작업 DB 에 쪽이 없습니다 — 통합 DB 를 비웠습니다 (지운 범위 — 문서 {rem['document']}, 날짜 {rem['date']})",
+              file=sys.stderr)
     text = (f"통합 DB {where} 에 실었습니다{' (표를 만들었습니다)' if res.created else ''}: 갈아 끼운 범위 — 문서 {rep['document']}, "
             f"날짜 {rep['date']}, 통째 {rep['whole']}; 지운 범위 — 문서 {rem['document']}, 날짜 {rem['date']}; 넣은 행 {res.rows}"
             + (f"; 실을 수 없는 값(NUL 문자 …)이 있어 건너뛴 범위 {res.skipped} — 그 범위의 옛 행은 대상에서 지웠습니다"

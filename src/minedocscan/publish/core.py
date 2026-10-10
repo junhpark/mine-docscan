@@ -52,7 +52,22 @@ class PublishError(RuntimeError):
 
 class NeedRebuild(PublishError):
     def __init__(self, what: str):
-        super().__init__(f"대상의 {what} 이(가) 이 프로그램과 다릅니다 — minedocscan publish --rebuild", 2, "version")
+        super().__init__(f"대상의 {what}: 이 프로그램과 다릅니다 — minedocscan publish --rebuild", 2, "version")
+
+
+# 빈 작업 DB (tasks/0010 4.1): 새로 만든(쪽 0) 작업 DB 로 같은 사이트·스키마에 실으면 "대상에만 있는 범위"를 다 지워 대상이 비었다
+# (합성: doc_field 2,221 → 0, 종료 코드 0). 새 PC 로 옮기며 통합 DB 의 주소를 먼저 옮기면 serve 의 첫 바퀴가 그렇게 한다. 엑셀은 같은
+# 경우 지우지 않는다 (0009 4.1 다) — 싣기도 쪽이 없는 작업 DB 로는 대상의 문서·날짜 범위를 지우지 않는다. --rebuild 만 (사람이 고른 것).
+# 빈 = doc_page 에 행이 없다 (엑셀과 같은 정의 — 문서만 등록된 received·needs_date 도 빈 것이다). 큰 지우기 일반은 막지 않는다 —
+# 작업 DB 가 진실이다 (ADR 0021)
+def empty_work_db(con) -> bool:
+    return con.execute("SELECT 1 FROM doc_page LIMIT 1").fetchone() is None
+
+
+class EmptyWorkDb(PublishError):
+    def __init__(self, documents: int, dates: int):
+        super().__init__(f"작업 DB 에 쪽이 없습니다 — 통합 DB(문서 {documents}·날짜 {dates})를 지우지 않았습니다. 되살리는 중이면 처리가 "
+                         "끝난 뒤에 다시, 정말 비우려면 minedocscan publish --rebuild", 2, "empty_work_db")
 
 
 # 사본의 주인 (tasks/0009 4.1 다): 실제 DB 를 실어 둔 스키마에 합성 묶음의 작업 폴더로 publish 하면 문서 3·날짜 3 범위를 지우고 합성 행으로
@@ -86,6 +101,7 @@ class Result:
     full: bool = False
     fell_back: bool = False              # 더러운 범위만 싣다가 실패해 전체 훑기로 다시 했다
     created: bool = False                # 대상의 표를 이번에 만들었다
+    empty: bool = False                  # 작업 DB 에 쪽이 없다 (그래도 실었다 — 대상이 비었거나 --rebuild)
     checked_ids: set = field(default_factory=set, repr=False)    # 견준 범위 (종류, 키) — AutoPublish 가 건너뛴 범위를 들고 있는 데
     skipped_ids: set = field(default_factory=set, repr=False)    # 건너뛴 범위 (종류, 키) — 찍지 않는다 (문서 ID·날짜)
     slices: list | None = field(default=None, repr=False)       # cycle=True 일 때 이 바퀴의 조각 (첫 조각은 이번에 했다)
@@ -96,7 +112,8 @@ class Result:
 
     def as_dict(self) -> dict:
         return {"replaced": dict(self.replaced), "removed": dict(self.removed), "skipped": self.skipped, "rows": self.rows,
-                "checked": self.checked, "full": self.full, "fell_back": self.fell_back, "created": self.created}
+                "checked": self.checked, "full": self.full, "fell_back": self.fell_back, "created": self.created,
+                "empty": self.empty}
 
 
 # ── 연결 ───────────────────────────────────────────────────────────────────
@@ -456,6 +473,13 @@ class Target:
             for t in ddl.owned_tables():
                 c.execute(f"DROP TABLE IF EXISTS {self.s}.{q(t)}")
 
+    def scope_counts(self) -> dict[str, int]:
+        """대상의 상태 표에 있는 범위의 수 — 종류마다 (빈 작업 DB 의 검사, --rebuild 가 지운 범위의 수)."""
+        with self.cur() as c:
+            c.execute(f"SELECT kind, COUNT(*) FROM {self.s}.{q(STATE_TABLE)} GROUP BY kind")
+            got = dict(c.fetchall())
+        return {k: int(got.get(k, 0)) for k in KINDS}
+
     def state(self, kind: str | None = None, keys: Iterable[str] | None = None) -> dict[tuple[str, str], str]:
         with self.cur() as c:
             if kind is None:
@@ -642,6 +666,11 @@ def publish(con, target: Target, full: bool = True, documents: Iterable[str] = (
                 raise NeedRebuild("싣기의 판")
             if v.get("site") != site:
                 raise PublishError(OTHER_SITE, 2, "other_site")
+        if empty_work_db(con):                           # 판·사이트 검사 뒤, 조각 앞 (tasks/0010 4.1) — check 도
+            res.empty = True
+            n = target.scope_counts() if not res.created else {}
+            if n.get("document") or n.get("date"):
+                raise EmptyWorkDb(n["document"], n["date"])
         documents, dates = set(documents), set(dates)
         if cycle:
             res.slices = slices(con, target)
@@ -770,11 +799,15 @@ def run(con, settings, full: bool = True, documents: Iterable[str] = (), dates: 
     t = target or open_target(settings, connect)
     try:
         t.limit(*_limits(settings))                          # 트랜잭션마다 (되돌리면 풀린다)
+        gone = None
         if rebuild:
+            gone = t.scope_counts() if t.exists() else None  # 표를 버리기 전에 센다 (버린 뒤의 publish 에는 지울 범위가 없다)
             _drop_and_create(t, settings, name)
         try:
             res = publish(con, t, full=full, documents=documents, dates=dates, check=check, fail_after=fail_after, site=name,
                           part=part, cycle=cycle)
+            if gone is not None:
+                res.removed = gone
         except Exception as e:
             _rollback(t)
             if full or check or rebuild or not _is_conflict(e):

@@ -400,6 +400,53 @@ def test_read_failure_leaves_no_rows_and_interruption_resumes(world, monkeypatch
     assert_same(dump(again.con), dump(fresh_of(world["st"], world["site"], world["scans"], root, "w_fresh").con), "끊긴 뒤")
 
 
+def test_discarded_damaged_document_equals_fresh_run(bundles, tmp_path, monkeypatch):
+    """끝이 잘린 PDF (tasks/0010 4.2): 실패 → 버리기 → 처리(라이브)와 처음부터(run --fresh — 등록이 결정을 본다)가 같은 DB, 결정 기록까지.
+    되살리기 뒤도 같다 — 날짜 열까지 (처리의 실패 갈래도 문서의 날짜를 적는다). 날짜 없는 이름의 손상 문서는 되살리면 needs_date 가
+    아니라 failed (처리도 등록처럼 먼저 열어 본다). 멀쩡한 문서(b)의 행은 그대로."""
+    fast_imaging(monkeypatch)
+    scans = copy_bundles(bundles, tmp_path / "scans", ["b_2030-01-07"])
+    data = (scans / "b_2030-01-07.pdf").read_bytes()
+    (scans / "f_2030-01-08.pdf").write_bytes(data[: len(data) // 2])          # 날짜 있는 이름
+    (scans / "손상 묶음.pdf").write_bytes(data[: len(data) // 3])               # 날짜 없는 이름
+    st = settings_for(tmp_path, bundles["site"], scans)
+    pipe = Pipeline(st, site=SitePack(bundles["site"]))
+    pipe.run([scans])
+    con = pipe.con
+    ids = doc_ids(con)
+    f, g = ids["f_2030-01-08"], ids["손상 묶음"]
+    good = dump(con, tables=["doc_page", "doc_field", "prod_haul"])
+
+    def row(doc):
+        return dict(con.execute("SELECT status, error, n_pages, work_date, date_source FROM doc_document WHERE document_id = ?",
+                                (doc,)).fetchone())
+
+    def same_as_fresh(n, what):
+        fresh = fresh_of(st, pipe.site, scans, tmp_path, f"fresh{n}")
+        assert_same(dump(con), dump(fresh.con), what)
+        assert dump(con, tables=["doc_page", "doc_field", "prod_haul"]) == good
+        fresh.con.close()
+
+    assert row(f)["status"] == row(g)["status"] == "failed"
+    assert row(f)["work_date"] == "2030-01-08" and row(g)["work_date"] is None
+    same_as_fresh(0, "실패")
+    decide(pipe, [{"target": f, "kind": "discard"}, {"target": g, "kind": "discard"}])
+    assert pipe.process_pending() == 2
+    assert row(f) == {"status": "discarded", "error": None, "n_pages": None, "work_date": "2030-01-08", "date_source": "filename"}
+    assert row(g) == {"status": "discarded", "error": None, "n_pages": None, "work_date": None, "date_source": None}
+    same_as_fresh(1, "버린 손상 문서 = 처음부터 (전에는 run --fresh 뒤 다시 failed)")
+    decide(pipe, [{"target": f, "kind": "restore"}, {"target": g, "kind": "restore"}])
+    pipe.process_pending()
+    assert row(f)["status"] == "failed" and row(f)["work_date"] == "2030-01-08" and row(f)["date_source"] == "filename"
+    assert row(g)["status"] == "failed" and row(g)["work_date"] is None                  # needs_date 가 아니다
+    same_as_fresh(2, "되살린 손상 문서 (날짜 열까지)")
+    decide(pipe, [{"target": g, "kind": "date", "value": "2030-01-09"}, {"target": f, "kind": "discard"}])
+    pipe.process_pending()
+    assert row(g)["status"] == "failed" and (row(g)["work_date"], row(g)["date_source"]) == ("2030-01-09", "decision")
+    assert row(f)["status"] == "discarded"
+    same_as_fresh(3, "날짜를 준 손상 문서")
+
+
 def test_unreachable_source_is_left_alone(world):
     """원본에 닿지 않으면 그 문서를 건드리지 않고 다음에 다시 본다 (요약에 알린다)."""
     pipe, ids = world["pipe"], world["ids"]
