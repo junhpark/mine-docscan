@@ -1,0 +1,9 @@
+# 글 파일은 어느 OS 에서 받아도 LF (tasks/0010 4.4 — 윈도우에서 받은 저장소의 글이 CRLF 로 바퀴·설명서에 들어가면 같은 커밋에서 묶음의
+# 바이트가 달라진다). 설치 스크립트(.ps1)는 scripts/bundle.py 가 묶음에 넣을 때 UTF-8 BOM·CRLF 로 바꾼다.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary
+*.onnx binary
+*.whl binary
+*.zip binary

@@ -35,7 +35,14 @@ from minedocscan.tools.printlayer import (
     pick_order,
     rewarp,
 )
-from minedocscan.tools.tpltools import PRINT_COLOR, check_template, draw, handwritten_boxes, preview
+from minedocscan.tools.tpltools import (
+    PRINT_COLOR,
+    check_template,
+    draw,
+    handwritten_boxes,
+    legend_height,
+    preview,
+)
 
 USAGE = (synth_usage.T_USAGE, synth_usage.T_LOADER)
 ROLE_TABLES = ("meter", "shifts", "tally")             # 인쇄 층을 쓰는 표 (4.3) — 수용 기준의 "인쇄로 잡힌 화소"를 재는 칸
@@ -507,12 +514,12 @@ def test_preview_print_draws_on_the_layer(layers, tmp_path, capsys):
     r = preview(tdir, tmp_path / "prev", print_layer=True)
     img = cv2.imread(r["out"])
     tpl = Template(tdir / "template.yaml")
-    assert img.shape[:2] == tpl.reference.shape and Path(r["out"]).name == f"{name}__print.png"
+    h = tpl.reference.shape[0]
+    assert img.shape[:2] == (h + legend_height(True), tpl.reference.shape[1]) and Path(r["out"]).name == f"{name}__print.png"
     tinted = np.all(img == np.array(PRINT_COLOR, np.uint8), axis=2)
     b = printlayer.binary(tpl.print_layer)
-    legend = np.zeros_like(b)
-    legend[:220, :320] = True                                                  # 범례의 색 견본
-    assert tinted.sum() > 0.5 * b.sum() and not tinted[~b & ~legend].any()     # 칠한 것은 인쇄 화소뿐
+    assert tinted[:h].sum() > 0.5 * b.sum() and not tinted[:h][~b].any()       # 칠한 것은 인쇄 화소뿐 (범례는 아래 띠에)
+    assert tinted[h:].sum() > 0
     assert np.array_equal(img, draw(tpl, tpl.print_layer, tint=b)[0])          # 바탕은 기준 이미지가 아니라 인쇄 층
     assert not np.array_equal(img, draw(tpl, tpl.reference, tint=b)[0])
     assert r["boxes"] == len(tpl.cells()) + len(tpl.field_cells())

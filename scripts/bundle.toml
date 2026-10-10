@@ -20,3 +20,28 @@ platform = "win_amd64"
 extras = ["postgres"]
 # 표식(sys_platform == "win32")은 pip download 가 묶음을 만드는 기계로 평가한다 — 윈도우에서만 드는 것을 적어 둔다
 windows_only = ["tzdata"]
+
+# ── 아래는 python scripts/bundle.py lock 이 쓴다 (손으로 고치지 않는다) ──
+
+[build]
+# 묶음을 만드는 도구 — minedocscan 의 바퀴(hatchling)와 manual.html(markdown). 따로 만든 가상 환경에 이 판·해시로만 깔린다
+requirements = [
+  "hatchling==1.32.4 --hash=sha256:08ecf7548fb48205e7f213d70c71e67b8271b7242093dc3f1da578b42c734a2c",
+  "Markdown==3.11 --hash=sha256:cd6c89e7eb308c8b332ed673215a52d208a43f8bacc030b1419376129408719e",
+  "packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+  "pathspec==1.1.1 --hash=sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189",
+  "pluggy==1.6.0 --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746",
+  "tomlkit==0.15.1 --hash=sha256:177a05aece5a8ca5266fd3c448abb47b8d352f09d477d3ca8332db4d89b24304",
+  "trove-classifiers==2026.9.21.13 --hash=sha256:8b1ff4f9c191b1040b71c37f1e445ab99732911e3cd91de52838453a854d7a17",
+]
+
+[sources]
+# 소스를 같이 줘야 하는 것 (LGPL — tasks/0010 4.5): 묶음의 sources/. 판은 잠금의 바퀴와 같아야 한다
+[sources.psycopg]
+version = "3.3.6"
+url = "https://files.pythonhosted.org/packages/76/26/3ea4ca5eaea1c0debcdf7ee7c1613fbe721dc27a03c461c0817ffd8a0601/psycopg-3.3.6.tar.gz"
+sha256 = "c081f2250df751a943036e42db6df4571c66cd0aabe8291a7a506512b12007d2"
+[sources.psycopg-c]
+version = "3.3.6"
+url = "https://files.pythonhosted.org/packages/58/53/bf15aa48cd6f0ad0039b9f48681d2e76e8564d413af47b13fab50dd03555/psycopg_c-3.3.6.tar.gz"
+sha256 = "29c568426ad61c1b702c7d73505c43ca2c9fc5d97a8431d8d9049e731e319ff8"

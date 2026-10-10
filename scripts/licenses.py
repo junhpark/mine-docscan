@@ -1,7 +1,8 @@
 """제3자 라이선스 목록 (tasks/0009 4.3 나) — 설치되는 패키지에 들어가지 않는다 (scripts/).
 
-  python scripts/licenses.py --wheels DIR [--out THIRD_PARTY_NOTICES.txt] [--check]
+  python scripts/licenses.py --wheels DIR [--sources DIR] [--out THIRD_PARTY_NOTICES.txt] [--check]
       설치 묶음의 wheels/ (win_amd64) 에 든 바퀴 그대로가 목록이다. 앱 전용 파이썬(embeddable)과 pip 을 더한다.
+      --sources: 묶음의 sources/ — 소스를 같이 줘야 하는 배포판의 sdist 가 있는지, 바퀴 안의 그런 구성요소가 빠졌는지 본다 (tasks/0010 4.5)
   python scripts/licenses.py --installed [EXTRA ...] [--out …] [--check]
       지금 환경에 설치된 minedocscan(과 EXTRA — 예: postgres)의 의존성 닫힘 (우분투 CI — 윈도우와 닫힘이 조금 다르다: tzdata …).
 
@@ -11,6 +12,11 @@
   알 수 없는 배포판이 있으면 --check 는 종료 코드 1.
 - 바퀴 안에 같이 든 것(numpy 의 OpenBLAS·GCC 런타임, OpenCV 의 LICENSE-3RD-PARTY, PDFium 의 의존성들)은 목록과 본문에 넣되 막지 않는다.
   바퀴에 본문이 없는 것(psycopg-binary 의 libpq·OpenSSL, 앱 전용 파이썬, pip)은 저장소에 둔 본문(scripts/licenses/)으로.
+- **소스 조건** (tasks/0010 4.5): 항목마다 "소스를 같이 줘야 하는가" (LGPL·GPL·AGPL·MPL 이면 예, GCC 런타임 예외는 아니오 — needs_source).
+  배포판의 표현과 바퀴 안에 같이 든 라이브러리(COMPONENTS — 파일 이름의 꼴로)를 같이 본다. --sources 를 주면(묶음): 그런 배포판의
+  sdist(SDISTS — psycopg-binary 는 psycopg_c)가 sources/ 에 그 판으로 있어야 하고, 그런 구성요소(OpenCV 의 FFmpeg)는 바퀴에서 빠져
+  있어야 한다 — 아니면 막는다. --installed(우분투 — 리눅스 바퀴에는 numpy 의 libquadmath, OpenCV 의 libav* 가 들고 sources/ 가 없다)는
+  세기만 한다.
 - [train]·[dev]·[docs] 는 넣지 않는다 (묶음에 들어가지 않는다). 이 프로그램 자신의 문구는 사람이 정한다 — 저장소의 NOTICE (첫 줄에 자리만).
 - 종료 코드: 0 (--check 면 막는 것이 없다), 1 (--check 에서 막는 것이 있다), 2 (바퀴가 없다 — 빈 목록이 통과하지 않게).
 """
@@ -45,6 +51,22 @@ EXTRA_TEXTS = {
                        ("OpenSSL 3", "Apache-2.0", "openssl.txt", r"libssl|libcrypto"),
                        ("MIT Kerberos", "MIT", "krb5.txt", r"krb5")],
 }
+# 바퀴 안에 같이 든 라이브러리의 라이선스 — 소스 조건을 본다 (tasks/0010 4.5): (이름, SPDX, 파일 이름의 꼴). 본문은 바퀴의 것(위)·EXTRA_TEXTS
+COMPONENTS = {
+    "opencv-python-headless": [("FFmpeg", "LGPL-2.1-or-later",
+                                r"opencv_videoio_ffmpeg|libav(codec|format|util|device|filter)|libsw(scale|resample)")],
+    "numpy": [("libquadmath", "LGPL-2.1-or-later", r"libquadmath"),
+              ("GCC runtime (libgfortran, libgcc)", "GPL-3.0-or-later WITH GCC-exception-3.1", r"libgfortran|libgcc"),
+              ("OpenBLAS", "BSD-3-Clause", r"openblas")],
+    "psycopg-binary": [("libpq", "PostgreSQL", r"libpq"), ("OpenSSL 3", "Apache-2.0", r"libssl|libcrypto"),
+                       ("MIT Kerberos", "MIT", r"krb5|gssapi")],
+}
+# 묶음에서 뺀 구성요소 — 바퀴에 없으면 목록에 그렇다고 적는다 (scripts/bundle.py 가 뺀다)
+STRIPPED = {"opencv-python-headless": ("FFmpeg", "FFmpeg 플러그인(opencv_videoio_ffmpeg*.dll)을 묶음에서 뺐다 — 이 프로그램은 동영상을 "
+                                                 "읽지 않는다")}
+# 소스를 같이 줘야 하는 배포판 → sources/ 의 sdist 이름 (psycopg-binary 는 psycopg_c 로 만든다)
+SDISTS = {"psycopg": "psycopg", "psycopg-binary": "psycopg_c"}
+
 APP_EXTRAS = [  # 묶음에 같이 들어가는 것 (바퀴가 아니다)
     ("python (embeddable)", "PSF-2.0", "https://www.python.org/", "python.txt"),
     ("pip", "MIT", "https://pip.pypa.io/", "pip.txt"),
@@ -114,6 +136,23 @@ def parse_spdx(expr: str):
     return tree
 
 
+def needs_source(expr: str) -> bool:
+    """소스를 같이 줘야 하는가: LGPL·GPL·AGPL·MPL 이면 예 (WITH GCC 런타임 예외는 아니오). AND 는 하나라도, OR 는 모두 (고를 수 있으면
+    소스 조건이 없는 쪽을 고른다). 읽을 수 없는 표현은 예 (모르면 조건이 있는 것으로)."""
+    def need(node) -> bool:
+        if isinstance(node, str):
+            return node.upper().startswith(("LGPL", "GPL", "AGPL", "MPL"))
+        if node[0] == "with":
+            return "GCC-EXCEPTION" not in node[2].upper() and need(node[1])
+        kids = node[1]
+        return any(need(k) for k in kids) if node[0] == "and" else all(need(k) for k in kids)
+
+    try:
+        return need(parse_spdx(expr))
+    except ValueError:
+        return True
+
+
 def allowed(expr: str) -> bool:
     """허용 목록으로 쓸 수 있나: AND 는 모두, OR 는 하나. WITH 예외는 바탕 라이선스로 본다."""
     def ok(node) -> bool:
@@ -143,6 +182,18 @@ class Dist:
     binaries: list[str] = field(default_factory=list)          # 바퀴 안에 같이 든 라이브러리 파일 (.dll·.so — 이름만, 해시 꼬리 없이)
     system: bool = False                                       # --installed: OS 의 꾸러미가 설치했다 (데비안은 본문을 /usr/share/doc 로 옮긴다)
     missing: list[str] = field(default_factory=list)           # 메타데이터의 License-File 가운데 찾지 못한 것 (막는다)
+    components: list[tuple[str, str]] = field(default_factory=list)   # 바퀴 안에 같이 든 라이브러리 (이름, SPDX) — COMPONENTS 에 맞는 것
+    stripped: str | None = None                                # 묶음에서 뺀 구성요소의 한 줄 (STRIPPED)
+
+    @property
+    def source(self) -> bool:
+        """이 배포판 자신의 소스를 같이 줘야 하는가 (표현을 모르면 아니오 — 그것은 ok 가 막는다)."""
+        return self.expression is not None and needs_source(self.expression)
+
+    @property
+    def source_components(self) -> list[str]:
+        """바퀴 안에 든, 소스를 같이 줘야 하는 구성요소."""
+        return [n for n, spdx in self.components if needs_source(spdx)]
 
     @property
     def ok(self) -> bool:
@@ -211,6 +262,15 @@ def _unique(texts: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
     return out
 
 
+def _components(name: str, binaries: list[str]) -> list[tuple[str, str]]:
+    return [(label, spdx) for label, spdx, pat in COMPONENTS.get(norm(name), []) if any(re.search(pat, b, re.I) for b in binaries)]
+
+
+def _stripped(name: str, components: list[tuple[str, str]]) -> str | None:
+    s = STRIPPED.get(norm(name))
+    return s[1] if s is not None and s[0] not in {n for n, _ in components} else None
+
+
 def _bundled(name: str, binaries: list[str]) -> list[tuple[str, str, bytes]]:
     return [(label, spdx, (TEXTS / fn).read_bytes()) for label, spdx, fn, pat in EXTRA_TEXTS.get(norm(name), [])
             if any(re.search(pat, b, re.I) for b in binaries)]
@@ -235,7 +295,9 @@ def from_wheel(path: Path) -> Dist:
         texts = _unique([(n, z.read(n)) for n in files])
     name = f["Name"][0]
     bins = _binaries(names)
-    return Dist(name, f["Version"][0], _expression(name, f), _homepage(f), texts, _bundled(name, bins), bins, missing=missing)
+    comps = _components(name, bins)
+    return Dist(name, f["Version"][0], _expression(name, f), _homepage(f), texts, _bundled(name, bins), bins, missing=missing,
+                components=comps, stripped=_stripped(name, comps))
 
 
 def from_installed(dist) -> Dist:
@@ -254,7 +316,7 @@ def from_installed(dist) -> Dist:
     bins = _binaries(dist.files or [])
     installer = (dist.read_text("INSTALLER") or "").strip().lower()
     return Dist(name, f["Version"][0], _expression(name, f), _homepage(f), _unique(sorted(texts)), _bundled(name, bins), bins,
-                system=installer not in ("", "pip", "uv"))
+                system=installer not in ("", "pip", "uv"), components=_components(name, bins))
 
 
 def wheels_closure(wheels: Path) -> list[Dist]:
@@ -336,12 +398,14 @@ def notices(dists: list[Dist]) -> str:
         out.append(f"- {d.name} {d.version}".rstrip() + f" — {d.expression or '(알 수 없음)'}")
         if d.binaries:
             out.append(f"    같이 든 라이브러리: {', '.join(d.binaries)}")
+        out += [f"    {line}" for line in _source_lines(d)]
     for d in dists:
         out += ["", rule, f"{d.name} {d.version}".rstrip(), f"License: {d.expression or '(알 수 없음)'}"]
         if d.homepage:
             out.append(f"Homepage: {d.homepage}")
         if d.binaries:
             out.append(f"Bundled: {', '.join(d.binaries)}")
+        out += _source_lines(d)
         out.append(rule)
         for fn, b in d.texts:
             out += ["", f"--- {fn} ---", decode(b).rstrip()]
@@ -350,6 +414,35 @@ def notices(dists: list[Dist]) -> str:
         if d.system and not (d.texts or d.bundled):
             out += ["", "(OS 의 꾸러미로 설치되어 본문이 메타데이터에 없다 — 묶음은 바퀴의 본문을 쓴다)"]
     return "\n".join(out) + "\n"
+
+
+def _source_lines(d: Dist) -> list[str]:
+    """목록에 적는 소스 조건 (tasks/0010 4.5)."""
+    out = []
+    if d.source:
+        sd = SDISTS.get(norm(d.name))
+        out.append("소스: 같이 준다 — " + (f"묶음의 sources/{sd}-{d.version}.tar.gz" if sd else "(받을 곳을 적어야 한다)"))
+    for n, spdx in d.components:
+        if needs_source(spdx):
+            out.append(f"소스 조건이 있는 구성요소: {n} ({spdx})")
+    if d.stripped:
+        out.append(d.stripped)
+    return out
+
+
+def source_problems(dists: list[Dist], sources: Path) -> list[str]:
+    """--sources (묶음): 소스를 같이 줘야 하는 배포판의 sdist 가 sources/ 에 그 판으로 없거나, 그런 구성요소가 바퀴에 남아 있으면."""
+    have = {p.name.lower() for p in sources.iterdir()} if sources.is_dir() else set()
+    out = []
+    for d in dists:
+        if d.source:
+            sd = SDISTS.get(norm(d.name), norm(d.name).replace("-", "_"))
+            want = f"{sd}-{d.version}.tar.gz".lower()
+            if want not in have:
+                out.append(f"{d.name} {d.version}: 소스를 같이 줘야 한다 — sources/{want} 가 없다")
+        for n in d.source_components:
+            out.append(f"{d.name} {d.version}: 바퀴 안에 소스 조건이 있는 구성요소가 남아 있다 — {n} (빼거나 소스를 같이 준다)")
+    return out
 
 
 def problems(dists: list[Dist]) -> list[str]:
@@ -373,8 +466,11 @@ def main(argv=None) -> int:
     src.add_argument("--installed", nargs="*", metavar="EXTRA", help="지금 환경의 minedocscan[EXTRA…] 닫힘")
     ap.add_argument("--out", type=Path, help="THIRD_PARTY_NOTICES.txt 를 쓸 곳")
     ap.add_argument("--python-embed", type=Path, help="앱 전용 파이썬의 zip (그 안의 LICENSE.txt 를 쓴다)")
+    ap.add_argument("--sources", type=Path, help="묶음의 sources/ (--wheels 일 때만) — 소스 조건을 막는 검사로 본다 (--check)")
     ap.add_argument("--check", action="store_true", help="허용 목록 밖·알 수 없는 배포판이 있으면 종료 코드 1")
     a = ap.parse_args(argv)
+    if a.sources is not None and not a.wheels:
+        ap.error("--sources 는 --wheels 와 같이 (묶음의 sources/)")
     for stream in (sys.stdout, sys.stderr):              # 윈도우 콘솔(cp1252·cp949)에서도 한글을 찍다 죽지 않게
         if stream is not None and (stream.encoding or "").lower().replace("-", "") != "utf8":
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -391,7 +487,15 @@ def main(argv=None) -> int:
         print(f"{'ok ' if d.ok else 'NO '} {d.name} {d.version} — {d.expression or '?'}")
     if bad:
         print(f"허용 목록 밖이거나 알 수 없는 라이선스 {len(bad)}개:", *bad, sep="\n  ", file=sys.stderr)
-    return 1 if (a.check and bad) else 0
+    # 소스 조건 (tasks/0010 4.5) — --sources 가 있으면 막고, 없으면 센다
+    comps = [(d, n) for d in dists for n in d.source_components]
+    print(f"소스 조건: 소스를 같이 줘야 하는 배포판 {sum(d.source for d in dists)}, 바퀴 안에 든 그런 구성요소 {len(comps)}"
+          + "".join(f"\n  - {d.name}: {n}" for d, n in comps)
+          + "".join(f"\n  - {d.name}: 뺐다" for d in dists if d.stripped))
+    src_bad = source_problems(dists, a.sources) if a.sources is not None else []
+    if src_bad:
+        print(f"소스 조건을 채우지 못한 것 {len(src_bad)}개:", *src_bad, sep="\n  ", file=sys.stderr)
+    return 1 if (a.check and (bad or src_bad)) else 0
 
 
 if __name__ == "__main__":

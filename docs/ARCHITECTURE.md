@@ -69,7 +69,11 @@ flowchart LR
 ### 등록과 처리 (tasks/0007, ADR 0019)
 
 - **등록** = 파일을 한 번 열어 해시와 쪽 수를 적는다. 열리지 않으면(쓰레기 바이트, 쪽이 없는 PDF, 손상 방침에 걸린 PDF, 여러 쪽 TIFF)
-  날짜와 상관없이 `failed`. **처리**(`Pipeline.process_document`) = 그 문서의 쪽을 분류·정합·적재. `process_file(path)` 는 "등록하고 바로 처리".
+  날짜와 상관없이 `failed` — 다만 그 문서를 버린 결정이 있으면 `discarded` (처리가 버린 문서에 남기는 행과 같다 — 오류 없음, 쪽 수 없음, 문서의 날짜.
+  tasks/0010 4.2: 버리기는 열 수 있는지와 상관없다. 전에는 실패 → 버리기 → `run --fresh` 뒤에 다시 `failed` 였다).
+  **처리**(`Pipeline.process_document`) = 그 문서의 쪽을 분류·정합·적재. 처리도 날짜를 보기 전에 등록과 같은 열기 검사를 한다 — 버렸다 되살린
+  날짜 없는 손상 문서는 `needs_date` 가 아니라 `failed` 이고, 처리하다 실패한 문서도 문서의 날짜 열을 적는다 (처음부터 만든 DB 의 등록이 적으므로).
+  `process_file(path)` 는 "등록하고 바로 처리".
 - **접수**(`intake/inbox.py`)는 다 쓰인 파일만 가져온다 — 수정 시각이 `settle_seconds` 앞이고 열린다 (PDF 는 마지막 1 KB 에 `%%EOF` 까지 — 손상
   방침과 같은 검사(§11), JPEG 는 끝 표시 `FF D9` 까지). `give_up_seconds` 가 지나도 다 쓰이지 않으면 손상 방침대로 등록한다.
   **긴 경로** (tasks/0009 4.4): 보관 경로(보관 폴더의 절대 경로 + `intake/<해-달>/<받은 시각>-<문서 ID>/<원래 이름>`, 쓰는 동안의 `.part`
@@ -112,8 +116,13 @@ flowchart LR
   지금과 같은 횟수만 한다. 동시 판은 세운 쪽으로 판을 다시 고른다. `template print-layer`·`preview --scan`·`variant` 도 같은 방법, `template init --rotate`.
 - **빈 쪽**: 양식을 못 찾은 쪽 중 어두운 화소(`binarize` → 2 × 2 열기)의 비율이 `blank_max_ink`(0.02) 미만이면 `blank`. 문서를
   `needs_review` 로 만들지 않는다. 양식을 찾은 쪽은 아무리 옅어도 빈 쪽이 아니다.
-- **다시 스캔한 쪽**: 서명 = 정합 그림 → `binarize` → 인쇄(인쇄 층, 없으면 기준 이미지의 마스크)와 표 밖 필드를 0 → 2 × 2 열기 →
-  16 px 칸마다 잉크 화소의 수 (`imaging/signature.py`, `Template.signature_mask`). 같은 날짜·같은 계열(`family`, 없으면 템플릿 이름)의
+- **다시 스캔한 쪽**: 서명 = 정합 그림 → `binarize` → 인쇄(인쇄 층, 없으면 기준 이미지의 마스크)와 표 밖 필드를 9 × 9 로 넓혀 0 → 2 × 2 열기 →
+  16 px 칸마다 잉크 화소의 수 (`imaging/signature.py`, `Template.signature_mask` — 템플릿마다 한 번). **넓히는 까닭** (tasks/0010 4.3): 정합이
+  1–2 px·0.2° 어긋나면 인쇄(괘선·글자)가 마스크 밖으로 밀려 나와 서명을 흔든다 — 실제 81쪽에서 같은 그림을 (2, 1) px 옮기면 최소 0.608, 윈도우의
+  OpenCV 가 조금 다르게 정합한 합성 다시 스캔 0.8626. 9 × 9 는 괘선 오차 4 px 를 덮는다 (합성: (2, 1) px + 0.2° 의 5 % 0.602 → 0.955, 같은 날 다른
+  종이 최대 0.594 그대로 — 표는 ADR 0020). 서명 글자열의 앞머리가 **판**이다 (`2|높이x너비:…`, 앞머리가 없는 옛 것은 판 1). 판이 다른 서명은
+  견주지 않는다 (`decode` → `None`) — 옛 판 서명의 쪽이 있으면 `report` 의 `old_signatures`, `info` 가 `run --fresh` 를 알린다. 민감도는
+  `scripts/sig_probe.py` 가 잰다 (합성 `--synthetic` — CI 의 slow·windows 작업, 실데이터 `--site … --work-root …` — 사람이). 같은 날짜·같은 계열(`family`, 없으면 템플릿 이름)의
   **자기보다 앞 순서인 적재된 쪽** 중 가장 비슷한 것과의 코사인이 `dup_min_sim`(0.80) 이상이면 `duplicate`(필드·업무 행 없음, `duplicate_of`·
   `duplicate_sim`, 문서는 `needs_review`). `keep` 이 있으면 견주지 않는다. 문서를 처리한 뒤 뒤 순서의 문서에 다시 처리를 요청한다
   (① 그 날짜·계열에 붙잡힌 쪽이 있는 문서, ② 서명이 기준 이상인 적재된 쪽이 있는 문서) — 결과가 처리한 순서와 상관없다.
@@ -716,7 +725,9 @@ minedocscan serve --reviewer jp          한 프로세스, 스레드 둘, 127.0.
 minedocscan-<판>-win64.zip    scripts/bundle.py 가 인터넷이 되는 곳(CI 의 windows-install 작업)에서 만든다. 안의 이름은 ASCII
   python-3.12.10-embed-amd64.zip · pip-*.whl  앱 전용 파이썬(3.12 의 마지막 바이너리 판)과 pip — 판·SHA-256 은 scripts/bundle.toml 에 고정
                                               (받은 것이 다르면 만들기가 멈춘다)
-  wheels/                                     minedocscan 과 런타임 의존성 전부 ([postgres] 포함, cp312-win_amd64)
+  wheels/                                     minedocscan(커밋에서 만든다)과 런타임 의존성 전부 ([postgres] 포함, cp312-win_amd64) —
+                                              판·해시는 scripts/bundle.lock. OpenCV 바퀴는 FFmpeg 플러그인을 뺀 것
+  sources/                                    소스를 같이 줘야 하는 것 — psycopg·psycopg_c 의 sdist (LGPL-3.0) + README.txt
   install.ps1 · uninstall.ps1 · INSTALL.txt   UTF-8 BOM·CRLF (Windows PowerShell 5.1 은 BOM 이 없으면 한글을 깨뜨린다)
   THIRD_PARTY_NOTICES.txt · NOTICE · manual.html · minedocscan.example.toml · VERSION · SHA256SUMS.txt
       ↓ install.ps1 — 관리자 권한 없이, 지금 사용자로, 망에 닿지 않고 (pip --no-index)
@@ -741,6 +752,41 @@ minedocscan-<판>-win64.zip    scripts/bundle.py 가 인터넷이 되는 곳(CI 
 - 윈도우에서 도는지는 CI 가 본다: `windows`(기본 `pytest`)와 `windows-install`(묶음 → 망을 막고 설치 → 새 창처럼 `--version`·자가 시험 →
   작업 스케줄러의 `serve` 의 `/api/home`·로그 → 같은 묶음으로 다시 설치 → 손상된 묶음은 멈춘다 → 지우기). tasks/0009 단계 5 의 CI(윈도우
   러너)에서 묶음 76.0 MB(바퀴 12개), 망을 막은 설치 15초, 자가 시험 49.4초. 현장의 윈도우 PC 에서 해 본 것은 아니다 (러너뿐).
+  tasks/0010 부터는 그 수치를 CI 의 알림(annotation)으로도 남긴다 — 아래 "CI 의 알림".
+
+**잠금과 같은 바이트** (tasks/0010 4.4, ADR 0024 의 11–13): 묶음에 드는 것의 판과 해시는 저장소에 고정되어 있다 — 같은 커밋 + 같은 잠금이면 zip 의
+바이트가 같다 (등록한 판의 묶음을 다시 만들어 같은 것임을 보일 수 있게. CI 산출물은 14일 뒤 지워진다).
+
+| 무엇 | 어디에 | 쓰는 것 |
+|---|---|---|
+| 런타임 바퀴 11개 | `scripts/bundle.lock` (pip requirements 꼴 — `이름==판 --hash=sha256:…`) | `pip download --no-deps --require-hashes` — 받은 것을 잠금과 하나하나 견주고, 바퀴들의 `Requires-Dist` 를 win32·cp312 의 표식으로 따라가 `minedocscan[postgres]` 의 닫힘을 다 담는지·판이 요구 범위 안인지·닫힘 밖의 바퀴가 없는지 본다 (어긋나면 멈춘다) |
+| 파이썬·pip | `scripts/bundle.toml` 의 `[python]`·`[pip]` | URL·SHA-256 |
+| 빌드 도구 | `[build]` — hatchling·Markdown 과 의존성 (판·해시) | 따로 만든 가상 환경에 그것만. minedocscan 의 바퀴는 격리 없이 `SOURCE_DATE_EPOCH` = 커밋 시각 |
+| 소스 | `[sources]` — sdist 의 URL·SHA-256 | 판이 잠금의 바퀴와 다르면 멈춘다 |
+
+- zip 은 이름 순서·시각(커밋 시각, UTC)·권한·만든 시스템·압축 수준을 고정해 쓴다 (`write_zip` — 다시 묶는 OpenCV 바퀴도). 저장소의 글은
+  `.gitattributes` 로 어느 OS 에서 받아도 LF 이고, 묶음에 넣는 글도 LF 로 옮긴다 (설치 스크립트만 UTF-8 BOM·CRLF).
+- **FFmpeg 를 뺀다** (tasks/0010 4.5): OpenCV 바퀴 안의 `cv2/opencv_videoio_ffmpeg*.dll`(LGPL-2.1, 30.9 MB) — 이 프로그램은 동영상을 읽지 않는다.
+  그 파일과 `RECORD` 의 그 줄을 지워 다시 묶는다 (이름·판 그대로). DLL 이 없으면(OpenCV 의 판이 바뀌었다) 멈춘다. 다시 묶은 바퀴의 `RECORD` 가
+  항목과 하나하나 맞는지 묶음 만들기와 시험이 본다 (`record_problems`).
+- **판을 올리는 순서**: `bundle.toml` 의 위쪽(파이썬·pip 의 판·해시, `windows_only`)을 고친다 → `python scripts/bundle.py lock`(풀어서 닫힘의 바퀴만
+  — 잠금·`[build]`·`[sources]` 를 새로 쓴다) → 차이를 읽는다 → 묶는다 → 윈도우 CI(`windows-install`)가 두 번 만들어 견주고 설치·자가 시험 →
+  커밋. 테스트 작업은 늘 최신 판으로 돈다 (잠금이 묵으면 거기서 먼저 보인다). 설명서 2장, `scripts/README.md`.
+- tasks/0010 의 CI(윈도우 러너): 묶음 77.4 → 65.8 MB(81,143,787 → 69,027,605 바이트 — 바퀴 12개, 뺀 것 1, 소스 2개), 같은 커밋으로 두 번 만든 sha256 이 같다.
+  `sources/` 는 약 0.9 MB.
+
+**CI 의 알림** (tasks/0010 4.6): 검증하는 쪽은 CI 의 산출물·기록을 받지 못하고 알림만 본다. 작업마다 `::notice title=…::key=value …` 한두 줄 —
+`scripts/ci_notice.py` 한 곳에서 만든다 (ASCII 만, 키는 영문 소문자·숫자·밑줄, 값은 글자·숫자·`._+-` 만이라 경로·이름이 들어갈 자리가 없다,
+여러 줄은 `%0A`). 실패한 작업에서도 남는다 (`if: always()`).
+
+| 작업 | 알림의 제목 | 수 |
+|---|---|---|
+| `test (3.11)`·`test (3.12)` | `test 3.11`·`test 3.12` | 시험의 통과·건너뜀·실패·오류·초, 자가 시험의 통과·초·검사 수, 라이선스 검사의 ok·NO·소스 조건의 수 |
+| `test (3.12)` | `bundle linux` | 리눅스에서 만든 묶음의 바이트·sha256 (보고만) |
+| `lowest`·`postgres` | `lowest`·`postgres` | 시험의 수와 초 |
+| `slow` | `slow`·`sig_probe linux` | 시험의 수와 초, V2 의 적재·oracle CER·값 유무 재현율(보통·거친 글씨); 서명의 민감도 |
+| `windows` | `windows tests`·`sig_probe win32` | 시험의 수와 초; 서명의 민감도 (윈도우의 OpenCV) |
+| `windows-install` | `bundle windows`·`install windows` | 묶음의 바이트·sha256·두 번 만든 해시가 같은지(`same`); 묶음 MB, 설치·올리기·자가 시험의 초, `serve` 를 띄운 길(`task`·`direct`), 지우기, 라이선스 검사의 수 |
 
 **자가 시험** (`selftest.py` — `minedocscan selftest [--out DIR] [--keep] [--publish-schema NAME]`): 설치한 프로그램만으로(pytest 없이),
 합성 데이터만으로(`synth` 와 `oracle` 은 패키지 안에 있다), 임시 폴더에서. 망에 닿지 않는다 (`--publish-schema` 의 대상과 127.0.0.1 만).
@@ -1038,6 +1084,10 @@ ISO 날짜가 아닌 `work_date`(쪽 라벨에서 올 수 있다)는 파일로 �
 2. 대상에 표가 없으면 만든다(스키마·표·`pub_meta`) — 바퀴 끝의 싣기는 그 바퀴에 더러운 범위를 싣고 **새 조각 바퀴**를 시작한다 (`Result.created`).
    `pub_meta` 가 없는데 이름이 같은 표가 있으면
    이 프로그램이 만든 표가 아니다 — 만들지도 지우지도 않고 멈춘다 (`not_ours`). 있으면 스키마 버전·싣기의 판·사이트를 본다.
+   **빈 작업 DB** (tasks/0010 4.1): 작업 DB 의 `doc_page` 에 행이 없는데(엑셀과 같은 정의 — 문서만 등록된 `received`·`needs_date` 도 빈 것이다)
+   대상의 상태 표에 문서·날짜 범위가 있으면 아무것도 하지 않고 멈춘다 (`empty_work_db`, 종료 코드 2 — `--check` 도. 글에 대상의 문서·날짜 범위의 수).
+   새로 만든 작업 DB 로 실으면 "대상에만 있는 범위"를 다 지워 대상이 비었다 (합성: `doc_field` 2,221 → 0, 종료 코드 0) — 새 PC 로 옮기며 통합 DB 의
+   주소를 먼저 옮기면 `serve` 의 첫 바퀴가 그렇게 했다. 대상이 비었으면(처음) 지금처럼 표를 만든다. 큰 지우기 일반은 막지 않는다 — 작업 DB 가 진실이다.
 3. 견줄 범위의 키를 정한다 (아래 "언제"). 범위마다 지문을 내어 `pub_state` 와 견준다 — 다른 범위가 갈아 끼울 것, 작업 DB 에 없는 범위(대상에만 남은
    문서·날짜)가 지울 것이다. **메모리** (tasks/0009 4.2 나): 지문은 범위 하나씩(문서는 하나씩 — `scopes.DOC_CHUNK`, 날짜 범위는 한 달 치씩 —
    `DATE_CHUNK` 31) 내고 바뀐 범위의 목록에는 (종류, 키, 지문)만 둔다. 넣을 때 그 범위의 행을 다시 읽는다 — 한 번에 메모리에 있는 행은 문서
@@ -1060,7 +1110,7 @@ ISO 날짜가 아닌 `work_date`(쪽 라벨에서 올 수 있다)는 파일로 �
 |---|---|---|
 | `publish` | 전부 훑기 (작업 DB 와 `pub_state` 의 키 전부) | 파이프라인 잠금 — 못 잡으면 한 줄로 끝 |
 | `publish --check` | 전부. **쓰지 않는다**(상태 표도 — 되돌린다). 대상에 표가 없으면 작업 DB 의 범위 전부가 "다르다". 종료 코드: 같음 0, 다름 1, 닿지 못함·설정이 틀림(URL·사이트 이름·작업 DB 가 없다, 설정 파일)·다른 사이트의 대상 2 | 잡지 않는다 (읽기만) |
-| `publish --rebuild` | 이 프로그램이 만든 표(`pub_meta`, `pub_state`, 싣는 표)만 지우고(`CASCADE` 하지 않는다) 다시 만든 뒤 전부 싣는다 — 한 트랜잭션(실패하면 그 전 그대로). **`pub_meta` 가 있을 때만** 지운다 (사이트가 달라도 — 바꿔 싣는 길이다). 2단계의 뷰가 걸려 있어 지우지 못하면 그렇다고 알리고 멈춘다 | 파이프라인 잠금 |
+| `publish --rebuild` | 이 프로그램이 만든 표(`pub_meta`, `pub_state`, 싣는 표)만 지우고(`CASCADE` 하지 않는다) 다시 만든 뒤 전부 싣는다 — 한 트랜잭션(실패하면 그 전 그대로). **`pub_meta` 가 있을 때만** 지운다 (사이트가 달라도 — 바꿔 싣는 길이다). 2단계의 뷰가 걸려 있어 지우지 못하면 그렇다고 알리고 멈춘다. 지운 범위의 수를 알리고(표를 버리기 전에 센다), 빈 작업 DB 여도 한다 — 사람이 고른 것이라 경고 한 줄만 | 파이프라인 잠금 |
 | `watch`·`serve` 의 바퀴 끝 (엑셀 다음) | **더러운 범위**: 건드린 문서 + 지운 문서, 더러운 날짜(12.4 — 연속성 행이 바뀐 쪽의 날짜까지)와 그 날짜에 쪽이 있는 문서 전부(작업 DB 와 대상 양쪽 — 대상에도 `doc_page.work_date` 가 있다), `eq_equipment`(늘 — 작다). 시작할 때와 `sweep_minutes` 마다는 전체 훑기 — **바퀴마다 한 조각** (아래) | 작업 스레드 |
 
 - 같은 날짜의 다른 문서의 행도 바뀌므로(일보의 자리, 점검의 이기는 쪽, 뒤 문서의 다시 처리) 더러운 날짜의 문서를 전부 본다. 그래도 더러운 범위만 실은
@@ -1073,8 +1123,10 @@ ISO 날짜가 아닌 `work_date`(쪽 라벨에서 올 수 있다)는 파일로 �
   첫 조각에서 정한다 (`core.slices` — 작업 DB 의 달과 대상에만 있는 달, `publish(cycle=True)` → `Result.slices`). 조각을 한 바퀴 다 돌면
   전체 훑기와 같다 (흔들기 시험). **자동 싣기의 처음 싣기도 조각으로 간다** — 다 돌
   때까지 대상은 일부만 있다 (홈: "처음 훑는 중 n/N"). 한 번에 다 싣으려면 명령 `publish` (늘 전부 — 한 트랜잭션).
-- 실패하면(서버가 꺼졌다, 권한이 없다, 판이 다르다) 그 바퀴의 싣기만 건너뛰고 건드린 것을 들고 있다가 다음에 같이 싣는다. 실패한 뒤 `retry_seconds` 안의
-  바퀴는 연결하지 않는다 (꺼진 서버에 바퀴마다 매달리지 않게). 접수·처리·엑셀은 계속된다. 시계는 주입한다.
+- 실패하면(서버가 꺼졌다, 권한이 없다, 판이 다르다, 작업 DB 에 쪽이 없다) 그 바퀴의 싣기만 건너뛰고 건드린 것을 들고 있다가 다음에 같이 싣는다.
+  실패한 뒤 `retry_seconds` 안의 바퀴는 연결하지 않는다 (꺼진 서버에 바퀴마다 매달리지 않게). 접수·처리·엑셀은 계속된다. 시계는 주입한다.
+  요약 줄은 실패의 (종류, 밀린 수)가 바뀔 때만 (`Failed.changed` — 엑셀의 `failed_changed` 처럼). 빈 작업 DB 는 홈에 "작업 DB 에 쪽이 없어 싣지 않음"
+  — 되살리는 중이면 처리가 쪽을 만든 뒤 `retry_seconds` 가 지난 첫 바퀴에 지금처럼 싣는다.
 - **연결한 뒤의 시간 제한** (PR #15 검토): 싣기는 작업 스레드에서 돈다 — 대상이 기다리게 하면 접수·처리·엑셀이 같이 선다 (시간 제한이 연결에만
   있던 때, 다른 연결의 커밋하지 않은 `UPDATE` 한 행이 60초 넘게 접수를 멈췄고 홈은 "쉬는 중"이었다). 그래서
   - 트랜잭션마다 `lock_timeout`·`statement_timeout` 을 건다 (`Target.limit` — `set_config(…, true)` = `SET LOCAL`: URL 의 `options` 를 덮지 않고,

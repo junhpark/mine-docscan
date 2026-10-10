@@ -269,15 +269,18 @@ def test_reprocess_invariant_with_decisions_and_reviews(world):
 @pytest.mark.slow
 @pytest.mark.parametrize("seed", [1, 2, 3])
 def test_reprocess_invariant_long(world, seed):
-    reprocess_fuzz(world, steps=40, seed=seed)
+    reprocess_fuzz(world, steps=40, seed=seed, damaged=True)
 
 
-def reprocess_fuzz(world, steps: int, seed: int, fresh: bool = True, on_touched=None, after_step=None) -> None:
+def reprocess_fuzz(world, steps: int, seed: int, fresh: bool = True, on_touched=None, after_step=None,
+                   damaged: bool = False) -> None:
     """결정(날짜 바꾸기 — 다른 문서가 있는 날짜로도, 버리기, 되살리기 — 문서·쪽)과 검수(칸·차량번호·작성자)를 섞어 steps 번 넣고
     그때마다 대기 중인 문서를 처리한(watch 한 바퀴) DB 가 같은 파일·검수·결정으로 처음부터 만든 DB 와 같다. 묶음(conftest.BUNDLES)은
     2030-01-07 에 일보 문서 셋·점검표 두 쪽·T01 일보 두 쪽, 가동 일보 사흘. 없는 칸(버린 쪽)의 검수도 넣는다 — 되살리면 붙는다.
     fresh=False 면 처음부터 만든 DB 와 견주지 않는다. on_touched: 검수가 건드린 것을 받는 곳 (주면 save(touched=…)),
-    after_step(step): 걸음마다 처리한 뒤에 부른다 — 통합 DB 싣기를 끼운 판 (test_publish_pg.py)."""
+    after_step(step): 걸음마다 처리한 뒤에 부른다 — 통합 DB 싣기를 끼운 판 (test_publish_pg.py).
+    damaged=True: 끝이 잘린 날짜 없는 이름의 PDF 하나를 더 넣고(failed) 문서 단위 결정의 절반쯤을 그 문서에 건다 — 버린 실패 문서
+    (tasks/0010 4.2). 쪽 수가 없는 문서라 쪽을 고르는 곳·쪽 결정에서는 뺀다. 주지 않으면 난수의 쓰임이 전과 같다."""
     from minedocscan.touched import Touched
 
     def save_(review):
@@ -308,6 +311,13 @@ def reprocess_fuzz(world, steps: int, seed: int, fresh: bool = True, on_touched=
     rng = random.Random(seed)
     discarded: set[str] = set()
     done = []
+    bad = None
+    if damaged:
+        data = (world["scans"] / "b_2030-01-07.pdf").read_bytes()
+        (world["scans"] / "손상 묶음.pdf").write_bytes(data[: len(data) // 2])
+        pipe.run([world["scans"] / "손상 묶음.pdf"])
+        bad = con.execute("SELECT document_id FROM doc_document WHERE source_name = '손상 묶음'").fetchone()[0]
+        assert con.execute("SELECT status FROM doc_document WHERE document_id = ?", (bad,)).fetchone()[0] == "failed"
     kinds = {"review": 4, "meta": 1, "doc_date": 2, "page_date": 2, "doc_discard": 2, "page_discard": 2}
     weighted = [k for k, n in kinds.items() for _ in range(n)]
     plan = (rng.sample(list(kinds), len(kinds)) + rng.choices(weighted, k=max(0, steps - len(kinds))))[:steps]
@@ -329,6 +339,8 @@ def reprocess_fuzz(world, steps: int, seed: int, fresh: bool = True, on_touched=
             save_(Review(field_id_of(pg, name), "value", value, "jp", reviewed_at=now))
             done.append((kind, pg, name, value))
         else:
+            if bad is not None and kind.startswith("doc") and rng.random() < 0.5:
+                doc = bad                                        # 손상 문서 — 문서 단위 결정만
             target = doc if kind.startswith("doc") else page
             if kind.endswith("date"):
                 item = {"target": target, "kind": "date", "value": rng.choice(days)}
@@ -349,5 +361,6 @@ def reprocess_fuzz(world, steps: int, seed: int, fresh: bool = True, on_touched=
         other.con.close()
         shutil.rmtree(world["root"] / f"fresh{step}")
     assert {k for k, *_ in done} == set(kinds) or steps < len(kinds)
+    assert bad is None or any(d[1] == bad for d in done)
     assert con.execute("SELECT COUNT(*) FROM xcheck_haul").fetchone()[0] > 0
     assert sum(con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in BUSINESS) > 0

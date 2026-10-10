@@ -74,12 +74,12 @@ def test_sums_cover_every_file_but_themselves_and_zip_names_are_ascii(tmp_path):
     for line in lines:
         digest, rel = line.split("  ")
         assert hashlib.sha256((stage / rel).read_bytes()).hexdigest() == digest
-    z = bundle.make_zip(stage, tmp_path / "out.zip")
+    z = bundle.make_zip(stage, tmp_path / "out.zip", 1_700_000_000)
     assert sorted(zipfile.ZipFile(z).namelist()) == sorted(f"{stage.name}/{n}" for n in ("SHA256SUMS.txt", "VERSION",
                                                                                           "wheels/x-1-py3-none-any.whl"))
     (stage / "설명.txt").write_text("x", encoding="utf-8")
     with pytest.raises(bundle.BundleError, match="ASCII"):
-        bundle.make_zip(stage, tmp_path / "out2.zip")
+        bundle.make_zip(stage, tmp_path / "out2.zip", 1_700_000_000)
 
 
 def tiny_pe(imports: list[str], delay: list[str] = ()) -> bytes:

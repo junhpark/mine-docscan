@@ -1,7 +1,7 @@
 # 0024. 설치는 오프라인 묶음(zip + PowerShell)과 작업 스케줄러 — 앱 전용 파이썬, 지금 사용자로, 관리자 권한 없이
 
 상태: 채택 (2026-10). 작업 지시서 [tasks/0009](../tasks/0009-release.md) 1절 가, 4.5, 9절(설치의 모양·파이썬·`serve` 를 띄우는 것·설치 위치와
-권한·통합 DB 의 비밀번호·리눅스 설치). 설치의 순서는 [사용 설명서 2장](../manual/2-설치.md), 설치가 남기고 지우는 것은 [DATA.md](../DATA.md)
+권한·통합 DB 의 비밀번호·리눅스 설치), 잠금·같은 바이트·LGPL 은 [tasks/0010](../tasks/0010-release-followups.md) 4.4·4.5 (결정 11–13). 설치의 순서는 [사용 설명서 2장](../manual/2-설치.md), 설치가 남기고 지우는 것은 [DATA.md](../DATA.md)
 "현장 PC: 설치 폴더와 데이터 폴더", 묶음과 자가 시험의 구조는 [ARCHITECTURE.md](../ARCHITECTURE.md) §11.1.
 
 ## 상황
@@ -52,6 +52,21 @@
    파이썬 안의 minedocscan)가 아니면 아무것도 지우지 않는다.
 9. **리눅스는 `pip`** (설명서 2장의 한 절). 맥·리눅스 묶음은 만들지 않는다.
 10. 설치한 뒤의 확인은 `minedocscan selftest` — 설치한 프로그램만으로, 합성 데이터만으로, 망 없이, 3분 안 (ARCHITECTURE §11.1).
+11. **잠금** (tasks/0010 4.4): 묶음에 드는 바퀴는 `scripts/bundle.lock`(pip 의 requirements 꼴 — 바퀴마다 `이름==판 --hash=sha256:…`, cp312-win_amd64)
+    의 것만 받는다 (`pip download --no-deps --require-hashes`). 받은 것을 잠금과 하나하나 견주고, 바퀴들의 `Requires-Dist` 를 win32·cp312 의 표식으로
+    따라가 `minedocscan[postgres]` 의 닫힘을 다 담는지·판이 요구 범위 안인지·닫힘 밖의 바퀴가 없는지 본다 — 어긋나면 멈춘다. minedocscan 자신은
+    커밋에서 만든다 (잠금 밖). 묶음을 만드는 도구(hatchling·markdown과 그 의존성)는 `bundle.toml` 의 `[build]`(판·해시)로 따로 만든 가상 환경에,
+    sdist 는 `[sources]`(URL·SHA-256 — 같은 이름의 바퀴와 sdist 는 한 requirements 로 받을 수 없다: pip 이 바퀴를 골라 sdist 의 해시가 어긋난다).
+    판을 올릴 때는 사람이 `python scripts/bundle.py lock`(인터넷) → CI 의 `windows-install` → 커밋 (scripts/README.md, 설명서 2장).
+12. **같은 커밋 + 같은 잠금이면 같은 zip**: minedocscan 의 바퀴는 `[build]` 의 hatchling 으로 격리 없이 `SOURCE_DATE_EPOCH` = 커밋 시각, zip 은
+    이름 순서·시각(커밋 시각, UTC, 1980 이후)·권한·만든 시스템·압축 수준을 고정해 쓴다 (다시 묶는 OpenCV 바퀴도). 저장소의 글은 `.gitattributes` 로 LF
+    (윈도우에서 받은 저장소의 글이 CRLF 로 바퀴·설명서에 들어가지 않게 — `.ps1` 은 묶음에 넣을 때 BOM·CRLF 로). CI 의 `windows-install` 이 두 번
+    만들어 해시를 견준다. 다른 OS 에서 만든 것은 보고만 한다 (zlib 이 다르면 압축한 바이트가 다를 수 있다).
+13. **LGPL 구성요소** (tasks/0010 4.5): OpenCV 바퀴의 FFmpeg 플러그인(`cv2/opencv_videoio_ffmpeg*.dll`, LGPL-2.1, 30.9 MB)을 빼고 그 바퀴의 `RECORD`
+    줄을 지워 다시 묶는다 (이름·판 그대로 — 이 프로그램은 동영상을 읽지 않는다, `cv2.pyd` 는 동영상을 열 때만 그 이름으로 찾는다). 그 DLL 이 없으면
+    (OpenCV 의 판이 바뀌었다) 멈춘다. psycopg·psycopg-binary(LGPL-3.0)는 같은 판의 sdist(`psycopg`·`psycopg_c` — psycopg-binary 는 psycopg_c 로 만든다)를
+    묶음의 `sources/` 에 (`sources/README.txt` — 어느 바퀴의 소스인가, 바이너리를 만드는 방법이 있는 곳). `scripts/licenses.py --sources` 가 소스를 같이
+    줘야 하는 것(LGPL·GPL·AGPL·MPL — GCC 런타임 예외는 아니다)의 sdist 가 있는지, 바퀴 안의 그런 구성요소가 빠졌는지 본다. 법률 판단은 사람의 일이다.
 
 ## 이유
 
@@ -84,6 +99,10 @@
 - **설치가 통합 DB 의 URL·비밀번호를 받기** — 스크립트의 인자·화면·로그에 남는다.
 - **`python.exe` 로 띄우기** — 로그온할 때마다 창이 뜨고, 그 창을 닫으면 `serve` 가 끝난다.
 - **자동 업데이트** — 망이 없다. 올리기는 새 묶음으로 `install.ps1` 을 다시 돌리는 것이다.
+- **잠금 없이 그때의 최신 판으로 묶기** (tasks/0009) — 같은 커밋에서 다시 만들 수 없었다 (검증한 날 다시 받으니 numpy 2.5.3). 등록한 판의 묶음을
+  같은 것으로 보일 수 없고 CI 산출물은 14일 뒤 지워진다.
+- **FFmpeg 를 두고 그 소스를 같이 주기** — FFmpeg 의 소스·빌드 설정이 크고(묶음의 몇 배) 이 프로그램은 쓰지 않는다. 사람이 정할 수 있게 남겨 둔 대안이다
+  (tasks/0010 9절).
 
 ## CI 에서 확인한 것 (tasks/0009 단계 5, 윈도우 러너)
 

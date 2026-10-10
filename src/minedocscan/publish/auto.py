@@ -8,7 +8,8 @@
   (core.publish cycle=True). 자동 싣기의 처음 싣기도 조각으로 간다 — 다 돌 때까지 대상은 일부만 있다. 대상의 표를 새로 만든 더러운
   바퀴(Result.created)는 새 조각 바퀴를 시작한다.
 - **실패하면** 그 바퀴의 싣기만 건너뛰고 건드린 것을 들고 있다가 다음에 같이 싣는다. 연결에 실패한 뒤 retry_seconds 안의 바퀴는 연결하지
-  않는다 (꺼진 서버에 바퀴마다 매달리지 않게). 접수·처리·엑셀은 계속된다. 시계는 주입한다.
+  않는다 (꺼진 서버에 바퀴마다 매달리지 않게). 접수·처리·엑셀은 계속된다. 시계는 주입한다. 요약 줄은 실패의 종류·밀린 수가 바뀔 때만
+  (Failed.changed). 쪽이 없는 작업 DB 로는 대상의 문서·날짜 범위를 지우지 않는다 — 그 바퀴의 실패 empty_work_db (tasks/0010 4.1).
 - psycopg 가 없으면 시작할 때 한 번 알리고 끈다. 사이트 팩에 [site] name 이 없어도 그렇다 (사본의 주인 — tasks/0009 4.1 다: 대상이 다른
   사이트의 사본이면 그 바퀴의 실패 other_site). 상태(status)에는 대상의 호스트·DB·스키마와 수, 실패의 종류만 — URL·비밀번호는 없다.
 """
@@ -27,13 +28,15 @@ from .scopes import Orphans
 
 @dataclass
 class Failed:
-    """그 바퀴의 싣기가 실패했다 (as_dict 는 워커의 요약으로 간다)."""
+    """그 바퀴의 싣기가 실패했다 (as_dict 는 워커의 요약으로 간다). changed: 앞의 실패와 종류·밀린 수가 다르다 — 요약 줄은 그때만
+    (tasks/0010 4.1 — 엑셀의 failed_changed 처럼. 전에는 retry_seconds 마다 같은 줄을 찍었다)."""
     kind: str
     message: str
     behind: int
+    changed: bool = True
 
     def as_dict(self) -> dict:
-        return {"error": self.kind, "message": self.message, "behind": self.behind}
+        return {"error": self.kind, "message": self.message, "behind": self.behind, "changed": self.changed}
 
 
 class AutoPublish:
@@ -51,6 +54,7 @@ class AutoPublish:
         self.reason: str | None = None
         self.fell_back = 0                            # 더러운 범위만 싣다가 전체 훑기로 넘어간 횟수
         self.skipped: set = set()                     # 지금 대상에 없는 건너뛴 범위 — 다시 견준 바퀴에서만 고친다 (더러운 바퀴가 0 으로 덮지 않게)
+        self.failure: tuple | None = None             # 마지막 실패의 (종류, 밀린 수) — 성공하면 지운다
         self.site = declared_site_name(settings.site)
         if not settings.publish_url:
             self.reason = "off"
@@ -114,10 +118,12 @@ class AutoPublish:
             # 다시 하는 간격은 실패한 때부터 (시작한 때부터 재면 잠금·문장을 기다린 만큼 간격이 준다). 조각은 그대로 — 다음에 같은 조각
             self.held, self.last_fail = t, self.clock()
             kind = e.kind if isinstance(e, core.PublishError) else ("orphans" if isinstance(e, Orphans) else type(e).__name__)
-            self.status = dict(self.status, behind=_count(t, pending) or 1, last_error=kind, **self.sweep.status())
+            behind = _count(t, pending) or 1
+            self.status = dict(self.status, behind=behind, last_error=kind, **self.sweep.status())
             msg = str(e) if isinstance(e, core.PublishError | Orphans) else f"싣지 못했습니다 ({type(e).__name__})"
-            return Failed(kind, msg, _count(t, pending) or 1)
-        self.held, self.last_fail = Touched(), None
+            changed, self.failure = self.failure != (kind, behind), (kind, behind)
+            return Failed(kind, msg, behind, changed)
+        self.held, self.last_fail, self.failure = Touched(), None, None
         if res.fell_back or whole:                     # 키 충돌로 넘어간 전체 싣기(한 트랜잭션)·한 번에 한 전체 훑기 — 이 바퀴를 마친 것
             self.sweep.complete()
         elif start:

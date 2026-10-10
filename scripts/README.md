@@ -5,7 +5,7 @@
 
 | 파일 | 하는 일 | 쓰는 곳 |
 |---|---|---|
-| `bundle.py` + `bundle.toml` | 윈도우 오프라인 설치 묶음 `minedocscan-<판>-win64.zip` — embeddable 파이썬·pip 바퀴(해시 고정), `wheels/`, 설치 스크립트, 라이선스 목록, `manual.html`, `SHA256SUMS.txt`. 옆에 `bundle-report.json` (크기·바퀴·VC 런타임) | CI `windows-install` (tasks/0009 4.5) |
+| `bundle.py` + `bundle.toml` + `bundle.lock` | 윈도우 오프라인 설치 묶음 `minedocscan-<판>-win64.zip` — embeddable 파이썬·pip 바퀴(해시 고정), `wheels/`(잠금의 바퀴만 — OpenCV 는 FFmpeg 플러그인을 빼고 다시 묶는다), `sources/`(LGPL 의 sdist), 설치 스크립트, 라이선스 목록, `manual.html`, `SHA256SUMS.txt`. 같은 커밋 + 같은 잠금이면 같은 바이트. 옆에 `bundle-report.json` (크기·sha256·바퀴·뺀 것·소스·VC 런타임). `bundle.py lock` 이 잠금과 `[build]`·`[sources]` 를 새로 쓴다 | CI `windows-install`(두 번 만들어 견준다)·`slow`(리눅스의 해시 — 보고만) (tasks/0009 4.5, 0010 4.4·4.5) |
 | `windows/install.ps1`, `uninstall.ps1`, `INSTALL.txt` | 묶음에 들어가는 설치·지우기 (Windows PowerShell 5.1, 관리자 권한 없이, 망에 닿지 않고). 묶음을 만들 때 UTF-8 BOM·CRLF 로 | 묶음 |
 | `licenses.py` + `licenses/` | 제3자 라이선스 목록 `THIRD_PARTY_NOTICES.txt` 와 허용 목록 검사(`--check`). `licenses/` 는 바퀴 밖에서 같이 드는 것(파이썬·pip·바퀴에 든 C 라이브러리)의 본문 | CI `test`, `bundle.py` (tasks/0009 4.3) |
 | `cli_reference.py` | 설명서의 부록 `docs/manual/명령.md` 를 argparse 의 동작에서 만든다 (`--check` — 시험이 본다) | 명령을 바꾼 뒤 |
@@ -14,6 +14,14 @@
 | `test_report.py` | 시험 성적서 `시험성적서-<판>.md` — CI 산출물(JUnit·자가 시험·설치 단계·확장성·라이선스)과 `docs/test-report/scale-*.json`. `env` 는 작업마다의 환경 | CI `report` (tasks/0009 4.9) |
 | `v2_metrics.py` | 확장성 표 — 가상 양식(V2)의 쪽·분류·정합·칸·oracle CER·값 유무, 보통·거친 글씨 | CI `slow` (tasks/0009 4.7) |
 | `bigdb.py` | 규모 — 합성 묶음을 한 해 규모로 복제한 작업 DB 와 엑셀·싣기의 시간·메모리 → `docs/test-report/scale-*.json` | 손으로 (tasks/0009 4.2 마) |
+| `sig_probe.py` | 다시 스캔 서명의 민감도 — 정합 그림을 옮기고 돌린 것·합성 다시 스캔·같은 날 다른 종이의 유사도, 지금의 서명과 후보를 한 번에 (`--synthetic`, 실데이터는 `--site … --work-root …` — 수만). 요약을 CI 의 알림으로 | CI `slow`·`windows`, 사람 (tasks/0010 4.3) |
+| `ci_notice.py` | CI 의 알림(`::notice`) 한 줄 — ASCII·`key=value`·수만 (경로·이름이 들어갈 자리가 없다). 산출물을 받지 못하는 검증 쪽이 읽는다 | CI (tasks/0010 4.6) |
+
+**꾸러미의 판을 올리는 순서** (tasks/0010 4.4): 인터넷이 되는 곳에서 `python scripts/bundle.py lock` — 지금처럼 풀어서(`pip download`, cp312-win_amd64)
+`bundle.lock`(닫힘의 바퀴만, 판·해시)과 `bundle.toml` 의 `[build]`(hatchling·markdown 과 그 의존성)·`[sources]`(잠금의 psycopg·psycopg-binary 와 같은 판의
+sdist)를 새로 쓴다 → 가지에서 CI(`workflow_dispatch`)의 `windows-install` 이 묶음을 두 번 만들어 같은 해시인지 보고, 망을 막고 설치하고, 설치한
+`minedocscan selftest` 를 돈다 → 통과하면 잠금을 커밋한다. 테스트 작업(우분투·윈도우의 pytest)은 잠금이 아니라 그때의 최신 판으로 돈다 — 위쪽의
+깨짐을 먼저 본다.
 
 만드는 법은 각 파일의 첫 독스트링에. 무엇을 어디에 커밋하는지: 성적서의 틀·생성기·규모의 JSON 은 저장소에, 성적서·묶음·`manual.html` 은 CI 산출물
 (`docs/test-report/README.md`).

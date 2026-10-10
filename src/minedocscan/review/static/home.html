@@ -119,7 +119,8 @@
     const WHY = {lock_timeout: '대상의 잠금을 기다리다 그만둠', statement_timeout: '대상의 시간 제한을 넘김', connect: '닿지 못함',
                  connection_lost: '싣는 가운데 연결이 끊김', other_site: '다른 사이트의 대상', not_ours: '이 프로그램이 만들지 않은 표',
                  version: '판이 다름 — publish --rebuild'};
-    if (p.last_error) t += ' · <span class="status-failed">싣지 못함 (' + esc(WHY[p.last_error] || p.last_error) + ', 밀린 범위 ' + p.behind + ')</span>';
+    if (p.last_error === 'empty_work_db') t += ' · <span class="status-failed">작업 DB 에 쪽이 없어 싣지 않음 (통합 DB 는 그대로)</span>';
+    else if (p.last_error) t += ' · <span class="status-failed">싣지 못함 (' + esc(WHY[p.last_error] || p.last_error) + ', 밀린 범위 ' + p.behind + ')</span>';
     if (p.skipped) t += ' · <span class="status-failed">실을 수 없는 값이 있어 건너뛴 범위 ' + p.skipped + '</span>';
     return t + sweepText(p);
   }

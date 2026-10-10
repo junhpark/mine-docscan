@@ -72,7 +72,7 @@ def inside_intake_folders(out: str | Path, settings, what: str = "내보낸 파�
     (tasks/0009 4.1 마 — 그 전에는 크롭·모아 보기가 저장소 안만 보았다)."""
     from ..intake.inbox import within
 
-    for key, why in (("inbox", f"접수 폴더 안입니다 — {what}을(를) 스캔으로 접수하게 됩니다"),
+    for key, why in (("inbox", f"접수 폴더 안입니다 — 여기에 쓰면 스캔으로 접수하게 됩니다 ({what})"),
                      ("archive_root", "보관 폴더(스캔 원본) 안입니다 — 보관 폴더에는 intake/ 아래에만 씁니다")):
         other = getattr(settings, key, None) if settings is not None else None
         if other is not None and within(out, other):                     # 대소문자·UNC·연결한 드라이브도 (tasks/0009 4.4)

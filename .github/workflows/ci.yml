@@ -32,6 +32,13 @@ jobs:
         shell: bash                     # -eo pipefail — tee 가 --check 의 종료 코드를 삼키지 않게
       # 자가 시험 (tasks/0009 4.6): 설치한 명령 그대로, 저장해 둔 결과 없이 — 3분 안이어야 한다
       - run: /usr/bin/time -f "selftest %e s" minedocscan selftest --out junit/selftest && cat junit/selftest/selftest.md
+      # CI 의 알림 (tasks/0010 4.6 — 산출물을 받지 못하는 검증 쪽이 읽는다. ASCII·수만): 시험 수·시간, 자가 시험의 초, 라이선스 검사의 수
+      - run: python scripts/ci_notice.py "test ${{ matrix.python-version }}" --junit junit/junit.xml --selftest junit/selftest/selftest.json --licenses junit/licenses.txt
+        if: always()
+      # 같은 커밋을 리눅스에서 묶은 해시 — 보고만 (tasks/0010 4.4: 윈도우의 두 번과 같으면 좋다. zlib 이 다르면 압축한 바이트가 다를 수 있다)
+      - run: python scripts/bundle.py --out "$RUNNER_TEMP/dist" --notice "bundle linux"
+        if: always() && matrix.python-version == '3.12'
+        continue-on-error: true
       # 행렬의 두 갈래는 needs 에서 결과가 하나로 합쳐진다 — 갈래마다의 결과를 성적서로
       - run: mkdir -p junit && echo "${{ job.status }}" > junit/job-result.txt
         if: always()
@@ -57,6 +64,12 @@ jobs:
       - run: python -c "import sys, locale; print(sys.version, locale.getpreferredencoding(False), sys.stdout.encoding)"
       - run: pytest --durations=30 --junitxml=junit/junit.xml
       - run: python scripts/test_report.py env --out junit/env.json
+        if: always()
+      - run: python scripts/ci_notice.py "windows tests" --junit junit/junit.xml
+        if: always()
+      # 다시 스캔 서명의 민감도 (tasks/0010 4.3 가): 지금의 서명과 후보를 한 번에 — 요약은 스스로 ::notice 로 (산출물을 받지 못하는
+      # 검증 쪽이 읽게). 윈도우의 OpenCV 는 같은 그림을 조금 다르게 정합한다 (tasks/0009 단계 4)
+      - run: python scripts/sig_probe.py --synthetic --out junit/sig-probe.json
         if: always()
       - uses: actions/upload-artifact@v4
         if: always()
@@ -86,7 +99,6 @@ jobs:
         run: |
           "APP=$env:RUNNER_TEMP\app" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "DATA=$env:RUNNER_TEMP\data" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          python -m pip install --quiet "markdown>=3.5"
           $t0 = Get-Date
           python scripts/bundle.py --out "$env:RUNNER_TEMP\dist"
           if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -95,6 +107,15 @@ jobs:
           "bundle bytes: $($zip.Length)"
           "bundle_mb=$([math]::Round($zip.Length / 1MB, 1))" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "seconds=$([int]((Get-Date) - $t0).TotalSeconds)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          # same commit + same lock -> same zip bytes (tasks/0010 4.4): build again into another folder and compare
+          python scripts/bundle.py --out "$env:RUNNER_TEMP\dist2" --cache "$env:RUNNER_TEMP\dist\cache"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $zip2 = Get-ChildItem "$env:RUNNER_TEMP\dist2\minedocscan-*-win64.zip"
+          $h1 = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          $h2 = (Get-FileHash $zip2.FullName -Algorithm SHA256).Hash.ToLower()
+          "sha256=$h1" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          python scripts/ci_notice.py "bundle windows" bytes=$($zip.Length) sha256=$h1 same=$([int]($h1 -eq $h2))
+          if ($h1 -ne $h2) { throw "two builds of the same commit differ: $h1 $h2" }
           Expand-Archive $zip.FullName -DestinationPath "$env:RUNNER_TEMP\b"
           $m = Get-Content -Raw -Encoding UTF8 (Get-ChildItem "$env:RUNNER_TEMP\b\*\manual.html").FullName
           if ($m -notmatch 'data:image/png;base64,' -or $m -match 'src="(?!data:)') { throw "manual.html is not one file with its pictures" }
@@ -212,6 +233,7 @@ jobs:
           STEPS: ${{ toJSON(steps) }}
         run: |
           [IO.File]::WriteAllText("$env:RUNNER_TEMP\install-steps.json", $env:STEPS, (New-Object System.Text.UTF8Encoding $false))
+          python scripts/ci_notice.py "install windows" bundle_mb=${{ steps.bundle.outputs.bundle_mb }} install_s=${{ steps.install.outputs.seconds }} upgrade_s=${{ steps.upgrade.outputs.seconds }} selftest_s=${{ steps.fresh.outputs.selftest_seconds }} serve=${{ steps.serve.outputs.started_by }} uninstall=${{ steps.uninstall.outcome }} --licenses "$env:RUNNER_TEMP\dist\licenses.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -242,6 +264,8 @@ jobs:
       - run: pip install -e ".[dev]" "opencv-python-headless==4.9.0.80" "numpy==1.26.4" "openpyxl==3.1.0" "pypdfium2==4.30.0"
       - run: python -c "import cv2, numpy, openpyxl, pypdfium2; print(cv2.__version__, numpy.__version__, openpyxl.__version__, pypdfium2.version.PYPDFIUM_INFO)"
       - run: pytest --junitxml=junit/junit.xml
+      - run: python scripts/ci_notice.py "lowest" --junit junit/junit.xml
+        if: always()
       - run: python scripts/test_report.py env --out junit/env.json
         if: always()
       - uses: actions/upload-artifact@v4
@@ -269,6 +293,11 @@ jobs:
         if: always()
       # 확장성 표 (tasks/0009 4.7 다 — 시험 성적서 6절): 가상 양식(V2)·보통과 거친 글씨, 3일
       - run: python scripts/v2_metrics.py --out v2-metrics/v2-metrics.json --days 3
+      # 다시 스캔 서명의 민감도 (tasks/0010 4.3 가) — 리눅스. 요약은 스스로 ::notice 로
+      - run: python scripts/sig_probe.py --synthetic --out junit/sig-probe.json
+        if: always()
+      - run: python scripts/ci_notice.py "slow" --junit junit/junit.xml --v2 v2-metrics/v2-metrics.json
+        if: always()
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -307,6 +336,8 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev,postgres]"
       - run: pytest -m postgres -s --junitxml=junit/junit.xml
+      - run: python scripts/ci_notice.py "postgres" --junit junit/junit.xml
+        if: always()
       - run: python scripts/test_report.py env --out junit/env.json
         if: always()
       - uses: actions/upload-artifact@v4

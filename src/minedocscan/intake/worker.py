@@ -147,7 +147,9 @@ def format_round(r: dict) -> str:
     if r.get("excel_error"):
         parts.append(f"엑셀: 내보내지 못함 ({r['excel_error']})")
     p = r.get("publish")
-    if p and p.get("error"):
+    if p and p.get("error") == "empty_work_db":
+        parts.append("통합 DB: 작업 DB 에 쪽이 없어 싣지 않음 — 대상은 그대로 (처리가 끝난 뒤에 다시)")
+    elif p and p.get("error"):
         parts.append(f"통합 DB: 싣지 못함 ({p['error']}, 밀린 범위 {p['behind']}) — 다음에 다시")
     elif p and (any(p["replaced"].values()) or any(p["removed"].values()) or p.get("skipped")):
         parts.append(f"통합 DB: 갈아 끼운 범위 {sum(p['replaced'].values())}, 지운 범위 {sum(p['removed'].values())}"
