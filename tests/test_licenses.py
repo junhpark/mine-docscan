@@ -102,3 +102,47 @@ def test_the_runtime_dependencies_have_no_pymupdf_and_pass_the_check():
     dists = lic.installed_closure([])
     assert {lic.norm(d.name) for d in dists} >= {"numpy", "opencv-python-headless", "pypdfium2", "openpyxl", "pyyaml", "rapidfuzz"}
     assert lic.problems(dists + lic.app_extras()) == []
+
+
+# ── 소스 조건 (tasks/0010 4.5) ────────────────────────────────────────────────
+def test_which_licenses_need_their_source_given():
+    lic = licenses()
+    for yes in ("LGPL-3.0-only", "LGPL-2.1-or-later AND MIT", "GPL-2.0-only", "MPL-2.0", "AGPL-3.0-or-later", "Apache 2.0"):
+        assert lic.needs_source(yes), yes
+    for no in ("MIT", "Apache-2.0 OR BSD-3-Clause", "MPL-2.0 OR MIT", "GPL-3.0-or-later WITH GCC-exception-3.1", "PostgreSQL"):
+        assert not lic.needs_source(no), no
+
+
+def test_the_bundle_check_wants_the_lgpl_sources_and_no_ffmpeg(tmp_path, capsys):
+    """--wheels … --sources … --check: 소스가 없는 LGPL 가짜 배포판 → 1, sources/ 에 넣으면 0. 바퀴 안에 FFmpeg 가 남아 있으면 1.
+    --sources 가 없으면 세기만 한다. psycopg-binary 의 소스는 psycopg_c 의 sdist."""
+    lic = licenses()
+    wheels, sources = tmp_path / "wheels", tmp_path / "sources"
+    wheels.mkdir()
+    sources.mkdir()
+    fake_wheel(wheels, "psycopg-binary", "3.2.10", ["License-Expression: LGPL-3.0-only"],
+               {"{info}/licenses/LICENSE.txt": b"LGPL", "psycopg_binary.libs/libpq-0123456789.dll": b"MZ"})
+    opencv = fake_wheel(wheels, "opencv-python-headless", "5.0.0", ["License: Apache 2.0"],
+                        {"{info}/LICENSE.txt": b"Apache", "cv2/opencv_videoio_ffmpeg500_64.dll": b"MZ"})
+    args = ["--wheels", str(wheels), "--sources", str(sources), "--check"]
+    assert lic.main(args) == 1
+    err = capsys.readouterr().err
+    assert "sources/psycopg_c-3.2.10.tar.gz 가 없다" in err and "FFmpeg" in err
+    assert lic.main(["--wheels", str(wheels), "--check"]) == 0             # --sources 가 없으면 세기만
+    out = capsys.readouterr().out
+    assert "소스를 같이 줘야 하는 배포판 1, 바퀴 안에 든 그런 구성요소 1" in out
+    (sources / "psycopg_c-3.2.10.tar.gz").write_bytes(b"sdist")
+    assert lic.main(args) == 1                                             # FFmpeg 가 남아 있다
+    capsys.readouterr()
+    opencv.unlink()
+    fake_wheel(wheels, "opencv-python-headless", "5.0.0", ["License: Apache 2.0"], {"{info}/LICENSE.txt": b"Apache"})
+    notices = tmp_path / "THIRD_PARTY_NOTICES.txt"
+    assert lic.main([*args, "--out", str(notices)]) == 0
+    text = notices.read_text(encoding="utf-8")
+    assert "소스: 같이 준다 — 묶음의 sources/psycopg_c-3.2.10.tar.gz" in text and "FFmpeg 플러그인" in text and "뺐다" in text
+    out = capsys.readouterr().out
+    assert [line for line in out.splitlines() if line.startswith(("ok ", "NO "))] == [   # 시험 성적서가 읽는 줄은 그대로
+        "ok  opencv-python-headless 5.0.0 — Apache-2.0", "ok  psycopg-binary 3.2.10 — LGPL-3.0-only",
+        "ok  python (embeddable)  — PSF-2.0", "ok  pip  — MIT"]
+    with pytest.raises(SystemExit):
+        lic.main(["--installed", "--sources", str(sources)])            # --sources 는 묶음에만

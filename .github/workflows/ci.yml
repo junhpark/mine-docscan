@@ -90,7 +90,6 @@ jobs:
         run: |
           "APP=$env:RUNNER_TEMP\app" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "DATA=$env:RUNNER_TEMP\data" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-          python -m pip install --quiet "markdown>=3.5"
           $t0 = Get-Date
           python scripts/bundle.py --out "$env:RUNNER_TEMP\dist"
           if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -99,6 +98,15 @@ jobs:
           "bundle bytes: $($zip.Length)"
           "bundle_mb=$([math]::Round($zip.Length / 1MB, 1))" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "seconds=$([int]((Get-Date) - $t0).TotalSeconds)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          # same commit + same lock -> same zip bytes (tasks/0010 4.4): build again into another folder and compare
+          python scripts/bundle.py --out "$env:RUNNER_TEMP\dist2" --cache "$env:RUNNER_TEMP\dist\cache"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $zip2 = Get-ChildItem "$env:RUNNER_TEMP\dist2\minedocscan-*-win64.zip"
+          $h1 = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          $h2 = (Get-FileHash $zip2.FullName -Algorithm SHA256).Hash.ToLower()
+          "sha256=$h1" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          python scripts/ci_notice.py "bundle windows" bytes=$($zip.Length) sha256=$h1 same=$([int]($h1 -eq $h2))
+          if ($h1 -ne $h2) { throw "two builds of the same commit differ: $h1 $h2" }
           Expand-Archive $zip.FullName -DestinationPath "$env:RUNNER_TEMP\b"
           $m = Get-Content -Raw -Encoding UTF8 (Get-ChildItem "$env:RUNNER_TEMP\b\*\manual.html").FullName
           if ($m -notmatch 'data:image/png;base64,' -or $m -match 'src="(?!data:)') { throw "manual.html is not one file with its pictures" }
@@ -276,6 +284,10 @@ jobs:
       # 다시 스캔 서명의 민감도 (tasks/0010 4.3 가) — 리눅스. 요약은 스스로 ::notice 로
       - run: python scripts/sig_probe.py --synthetic --out junit/sig-probe.json
         if: always()
+      # 같은 커밋을 리눅스에서 묶은 해시 — 보고만 (tasks/0010 4.4: 윈도우의 두 번과 같으면 좋다. zlib 이 다르면 압축한 바이트가 다를 수 있다)
+      - run: python scripts/bundle.py --out "$RUNNER_TEMP/dist" --notice "bundle linux"
+        if: always()
+        continue-on-error: true
       - uses: actions/upload-artifact@v4
         if: always()
         with:

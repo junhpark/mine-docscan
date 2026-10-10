@@ -3,3 +3,4 @@ minedocscan 설치 — 외부망 없이, 관리자 권한 없이 (자세한 것�
 2. 푼 폴더에서: powershell -ExecutionPolicy Bypass -File install.ps1 -Site <사이트 팩> -Archive <보관 폴더> -Work <작업 폴더> -Inbox <스캐너 저장 폴더> -Reviewer <검수자 ID>
 3. 새 PowerShell 창에서: minedocscan selftest   (합성 데이터로 3분 안 — 결과는 selftest.md)
 4. 바탕 화면의 "광산 문서 스캔" (http://127.0.0.1:8765/) — 로그온하면 저절로 켜집니다. 지우기: powershell -ExecutionPolicy Bypass -File uninstall.ps1 (데이터·설정은 남깁니다)
+sources\ 폴더: 묶음에 든 LGPL 구성요소(psycopg)의 소스입니다 (sources\README.txt). 설치에는 쓰지 않습니다.
