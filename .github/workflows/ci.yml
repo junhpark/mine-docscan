@@ -32,6 +32,13 @@ jobs:
         shell: bash                     # -eo pipefail — tee 가 --check 의 종료 코드를 삼키지 않게
       # 자가 시험 (tasks/0009 4.6): 설치한 명령 그대로, 저장해 둔 결과 없이 — 3분 안이어야 한다
       - run: /usr/bin/time -f "selftest %e s" minedocscan selftest --out junit/selftest && cat junit/selftest/selftest.md
+      # CI 의 알림 (tasks/0010 4.6 — 산출물을 받지 못하는 검증 쪽이 읽는다. ASCII·수만): 시험 수·시간, 자가 시험의 초, 라이선스 검사의 수
+      - run: python scripts/ci_notice.py "test ${{ matrix.python-version }}" --junit junit/junit.xml --selftest junit/selftest/selftest.json --licenses junit/licenses.txt
+        if: always()
+      # 같은 커밋을 리눅스에서 묶은 해시 — 보고만 (tasks/0010 4.4: 윈도우의 두 번과 같으면 좋다. zlib 이 다르면 압축한 바이트가 다를 수 있다)
+      - run: python scripts/bundle.py --out "$RUNNER_TEMP/dist" --notice "bundle linux"
+        if: always() && matrix.python-version == '3.12'
+        continue-on-error: true
       # 행렬의 두 갈래는 needs 에서 결과가 하나로 합쳐진다 — 갈래마다의 결과를 성적서로
       - run: mkdir -p junit && echo "${{ job.status }}" > junit/job-result.txt
         if: always()
@@ -57,6 +64,8 @@ jobs:
       - run: python -c "import sys, locale; print(sys.version, locale.getpreferredencoding(False), sys.stdout.encoding)"
       - run: pytest --durations=30 --junitxml=junit/junit.xml
       - run: python scripts/test_report.py env --out junit/env.json
+        if: always()
+      - run: python scripts/ci_notice.py "windows tests" --junit junit/junit.xml
         if: always()
       # 다시 스캔 서명의 민감도 (tasks/0010 4.3 가): 지금의 서명과 후보를 한 번에 — 요약은 스스로 ::notice 로 (산출물을 받지 못하는
       # 검증 쪽이 읽게). 윈도우의 OpenCV 는 같은 그림을 조금 다르게 정합한다 (tasks/0009 단계 4)
@@ -224,6 +233,7 @@ jobs:
           STEPS: ${{ toJSON(steps) }}
         run: |
           [IO.File]::WriteAllText("$env:RUNNER_TEMP\install-steps.json", $env:STEPS, (New-Object System.Text.UTF8Encoding $false))
+          python scripts/ci_notice.py "install windows" bundle_mb=${{ steps.bundle.outputs.bundle_mb }} install_s=${{ steps.install.outputs.seconds }} upgrade_s=${{ steps.upgrade.outputs.seconds }} selftest_s=${{ steps.fresh.outputs.selftest_seconds }} serve=${{ steps.serve.outputs.started_by }} uninstall=${{ steps.uninstall.outcome }} --licenses "$env:RUNNER_TEMP\dist\licenses.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -254,6 +264,8 @@ jobs:
       - run: pip install -e ".[dev]" "opencv-python-headless==4.9.0.80" "numpy==1.26.4" "openpyxl==3.1.0" "pypdfium2==4.30.0"
       - run: python -c "import cv2, numpy, openpyxl, pypdfium2; print(cv2.__version__, numpy.__version__, openpyxl.__version__, pypdfium2.version.PYPDFIUM_INFO)"
       - run: pytest --junitxml=junit/junit.xml
+      - run: python scripts/ci_notice.py "lowest" --junit junit/junit.xml
+        if: always()
       - run: python scripts/test_report.py env --out junit/env.json
         if: always()
       - uses: actions/upload-artifact@v4
@@ -284,10 +296,8 @@ jobs:
       # 다시 스캔 서명의 민감도 (tasks/0010 4.3 가) — 리눅스. 요약은 스스로 ::notice 로
       - run: python scripts/sig_probe.py --synthetic --out junit/sig-probe.json
         if: always()
-      # 같은 커밋을 리눅스에서 묶은 해시 — 보고만 (tasks/0010 4.4: 윈도우의 두 번과 같으면 좋다. zlib 이 다르면 압축한 바이트가 다를 수 있다)
-      - run: python scripts/bundle.py --out "$RUNNER_TEMP/dist" --notice "bundle linux"
+      - run: python scripts/ci_notice.py "slow" --junit junit/junit.xml --v2 v2-metrics/v2-metrics.json
         if: always()
-        continue-on-error: true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -326,6 +336,8 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev,postgres]"
       - run: pytest -m postgres -s --junitxml=junit/junit.xml
+      - run: python scripts/ci_notice.py "postgres" --junit junit/junit.xml
+        if: always()
       - run: python scripts/test_report.py env --out junit/env.json
         if: always()
       - uses: actions/upload-artifact@v4

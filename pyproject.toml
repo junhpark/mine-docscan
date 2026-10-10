@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "minedocscan"
-version = "1.0.0"
+version = "1.0.1"
 description = "광산 현장 수기 문서 스캔 → 인식 → 데이터베이스 파이프라인"
 readme = "README.md"
 requires-python = ">=3.11"

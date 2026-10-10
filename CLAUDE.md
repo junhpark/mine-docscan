@@ -16,7 +16,7 @@
 ## 범위
 
 이 저장소는 **1단계 소프트웨어**다: 스캐너 → 인식 → 데이터베이스. 독립 소프트웨어로 등록할 예정이므로
-혼자서 설치·실행·시험이 되어야 한다 — 현장 PC 는 윈도우이고 외부망이 없어 오프라인 설치 묶음과 자가 시험으로 한다 (판 1.0.0, ADR 0024).
+혼자서 설치·실행·시험이 되어야 한다 — 현장 PC 는 윈도우이고 외부망이 없어 오프라인 설치 묶음과 자가 시험으로 한다 (판 1.0.1, ADR 0024).
 2단계(통합 DB, 입력 체계, 시각화)는 이 저장소가 통합 DB(PostgreSQL)에 실은 업무 테이블
 (`insp_*`, `prod_*`, `xcheck_*`, `eq_*`)의 사본을 읽어 가는 별도 작업이다 (ADR 0021). 2단계 기능을 여기에 넣지 않는다.
 작업 DB 는 로컬 SQLite 그대로다. 엑셀·통합 DB·가린 쪽 그림은 DB 에서 만든 **사본**이다 — 한 방향 (ADR 0022).
@@ -130,8 +130,14 @@ minedocscan selftest [--out DIR] [--keep] [--publish-schema minedocscan_selftest
                                             # --publish-schema 는 MINEDOCSCAN_PUBLISH_URL 의 그 스키마에 싣고 --check 뒤 지운다
 minedocscan serve --reviewer jp --log-dir DIR   # 표준 출력·오류를 DIR/serve-YYYYMMDD.log 에 (UTF-8, 날마다 새 파일, 30일) — 작업 스케줄러의 pythonw
 python scripts/bundle.py --out dist         # 오프라인 묶음 minedocscan-<판>-win64.zip + bundle-report.json — 인터넷이 되는 곳에서 (CI 의 windows-install).
-                                            # manual.html 을 만드니 .[docs] 의 markdown 이 있어야 한다. dist/ 는 무시된다
-python scripts/licenses.py --installed postgres --check --out THIRD_PARTY_NOTICES.txt   # 제3자 라이선스 (묶음은 --wheels DIR) — 허용 목록 밖이면 1
+                                            # 잠금(scripts/bundle.lock)의 바퀴만 해시로 받는다, 빌드 도구는 [build] 의 판으로 따로 만든 가상 환경에서.
+                                            # 같은 커밋 + 같은 잠금 → 같은 zip 의 바이트 (tasks/0010 4.4). FFmpeg 를 뺀 OpenCV, sources/ 에 psycopg 의 sdist. dist/ 는 무시된다
+python scripts/bundle.py lock               # 판을 올릴 때: 풀어서 닫힘의 바퀴만 — bundle.lock·bundle.toml 의 [build]·[sources] 를 새로 쓴다 (차이를 읽고 커밋)
+python scripts/licenses.py --installed postgres --check --out THIRD_PARTY_NOTICES.txt   # 제3자 라이선스 (묶음은 --wheels DIR --sources DIR) — 허용 목록 밖이면 1,
+                                            # 묶음에서 소스 조건(LGPL·GPL·MPL)이 있는 것의 sdist 가 sources/ 에 없거나 바퀴 안에 그런 구성요소(FFmpeg)가 남으면 1
+python scripts/sig_probe.py --synthetic [--out probe.json]   # 다시 스캔 서명의 민감도 — 옮기고 돌린 그림·다시 스캔·같은 날 다른 종이, 판과 후보마다 (CI 의
+                                            # slow·windows 가 ::notice 로). 실데이터는 --site … --work-root … (사람이 — dup_min_sim 을 정할 때)
+python scripts/ci_notice.py "제목" key=value … [--junit F --selftest F --licenses F --v2 F]   # CI 의 알림 한 줄 (ASCII·수만 — 경로·이름이 들어갈 자리가 없다)
 
 # 가상 양식 V2 (tasks/0009 4.7) — 새 양식이 템플릿만으로 엑셀·통합 DB 까지 간다는 확장성의 증거 (인식률이 아니다)
 minedocscan synth out/v2 --v2-forms [--rough]   # 유류일지 fuel_log·환경일지 env_log 를 날마다 한 장 / 거친 손글씨·스캔 (모든 양식). 난수는 따로
@@ -169,7 +175,7 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 | `imaging/io.py` | 이미지·PDF 읽기/쓰기. **한글 경로 때문에 `cv2.imread/imwrite` 를 직접 쓰지 않는다**. PDF 는 PDFium(pypdfium2 — ADR 0023)으로, 파일을 바이트로 읽어 열고 크기는 PyMuPDF 와 같은 규칙 `page_px` — ceil(pt × dpi / 72 − 0.001). 손상 = 열리지 않거나 마지막 1 KB 에 `%%EOF` 가 없다 (`damaged_pdf`). PDFium 을 부르는 곳은 전부 `PDF_LOCK` 안 (serve 의 두 스레드 — `load_pages` 는 쪽을 내주는 동안 놓는다, 쪽·문서는 잠금 안에서 닫는다, 끝날 때도 PDFium 을 닫기 전에 잠금을 잡는다 — `atexit`) |
 | `imaging/grid.py` | 표 괘선 검출 |
 | `imaging/align.py` | ORB + RANSAC 으로 기준 이미지에 정합, 괘선 재검출 오차로 품질 판정. 펴기는 `warp_to_template` 하나 (인쇄 층의 다시 펴기도 같은 그림). `align_upright`: 호모그래피의 회전각이 90° 단위로 0 이 아니면 `np.rot90` 으로 세워 다시 정합(저장하는 호모그래피는 원래 쪽 → 템플릿) |
-| `imaging/signature.py` | 다시 스캔한 쪽의 서명(ADR 0020): 정합 그림 → binarize → 지울 자리(인쇄 + 표 밖 필드, `Template.signature_mask`) 0 → 2×2 열기 → 16 px 칸의 잉크 수, 코사인 유사도, base64 글자열. DB 를 모른다 |
+| `imaging/signature.py` | 다시 스캔한 쪽의 서명(ADR 0020): 정합 그림 → binarize → 지울 자리(인쇄 + 표 밖 필드를 9×9 로 넓혀 — `WIDEN`, `Template.signature_mask` 가 템플릿마다 한 번) 0 → 2×2 열기 → 16 px 칸의 잉크 수, 코사인 유사도, base64 글자열. 글자열의 앞머리가 판(`2|…`, 앞머리 없음 = 판 1) — 판이 다른 서명은 견주지 않는다(`decode` → `None`). DB 를 모른다 |
 | `imaging/cells.py` | 셀 크롭과 잉크 비율. 인쇄 마스크를 받으면 role 표 칸의 잉크는 이진화한 뒤 인쇄를 지운 그림으로 잰다 (크롭은 늘 원래 그림) |
 | `imaging/marks.py` | ✓ 판정 (나란한 두 칸 중 어디에 표시했나) |
 | `imaging/blobs.py` | 괘선 제거 + RLSA 로 글씨 덩어리를 셀에 배정, 여러 칸에 걸친 메모 구분 (`print_mask` 를 받으면 표 영역의 이진 그림에서 인쇄를 지운다) |
@@ -194,7 +200,7 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 | `review/` | 검수: `store.py`(추가 전용 `reviews.jsonl` ↔ `doc_review`, `save()`), `queue.py`(대기열 8종: `haul-numbers`·`mismatch`·`pending`·`page-fields`(`--audit`)·`meta-check`·`checks`·`readings`(계기 + 근무 시각 칸, `--audit`)·`usage-check`, 계기 시작·종료 칸의 `ask_dotted`), `checks.py`(✓ 행의 답 ↔ 두 칸의 판정), `crops.py`(원본/정합, 두 칸 띠), `export.py`(크롭 내보내기, `--meta`), `server.py` + `static/index.html`(표준 라이브러리, 127.0.0.1, 포트를 혼자 쓴다 — 윈도우는 `SO_EXCLUSIVEADDRUSE`), `ops.py` + `static/home.html`(운영 화면 — 홈·문서 화면·결정, `serve` 에서만: 남은 수는 DB 가 바뀔 때만 다시 센다, 표본 대기열은 만들지 않는다, `/page.png` 는 원본에서 세워서, 엑셀·싣기의 상태, 엑셀 내려받기 `/export/day.xlsx`·`/export/month.xlsx`). `store.save(touched=…)`·`ReviewApp.on_touched` — 검수가 건드린 날짜·문서(연속성 행이 바뀐 쪽의 것까지)를 작업 스레드에 (깨우지 않는다) |
 | `store/` | `schema.sql`, `upsert()`(`insert_only` — `received_at`), 스키마 버전, WAL·`write_txn`(`BEGIN IMMEDIATE`)·`read_txn`(한 시점을 읽는다 — 내보내기·싣기), 쪽을 가리키는 테이블 `PAGE_TABLES`(지우는 순서), 싣는 표·싣지 않는 열 `PUBLISH_TABLES`·`PUBLISH_SKIP_COLUMNS`(불변식 시험과 같이 쓴다). `order.py`: 문서·쪽의 순서(접수한 문서는 뒤, 보관 경로의 성분 — 파이썬에서 견준다), `document_id`(해시) |
 | `intake/` | 접수(ADR 0019): `inbox.py`(다 쓰인 파일만 — 수정 시각 + 열린다(PDF 는 `%%EOF` 까지, JPEG 는 끝 표시까지), 보관 폴더 `intake/<해-달>/<받은 시각>-<문서 ID>/` 로 복사·확인·등록·커밋 뒤에 치운다, `_already`·`_failed`, 시계 주입, 보관 경로가 259자(`PATH_MAX`)를 넘으면 접수하지 않고 둔다 — 이름을 줄이지 않는다, 폴더 안인가 `within` — 글자로 맞지 않으면 파일의 정체(장치·번호)로: 대소문자·UNC·연결한 드라이브 문자), `worker.py`(한 바퀴 = 접수 + 대기 문서 처리 + 바퀴 끝의 일(`after` — 엑셀 → 싣기, 처리가 건드린 것을 넘긴다), `run_forever`, 작업 상태, 요약은 수와 문서 ID 만), `decisions.py`(추가 전용 `decisions.jsonl` ↔ `doc_decision`, 저장은 전부 검사한 뒤, `dry_run`), `dates.py`(사람이 넣는 날짜) |
-| `pipeline/runner.py` | 단계 순서와 상태 기록만 안다. 등록과 처리(`process_document` — 지우고 다시 만든다, 쪽마다 커밋, 요청 번호 `work_requested > work_done`, `needs_date`·`discarded`), 대기 문서 처리(`process_pending`, 문서의 순서대로), 빈 쪽(`blank_max_ink`), 다시 스캔(`dup_min_sim` — 같은 날·계열의 앞 순서 적재된 쪽, 뒤 문서에 다시 요청). 오류 격리(`failed`/`error`), `--skip-existing`. 동시 판 묶음이면 판마다 정합해 괘선 오차로 고른다(`choose_variant` — 0.5 px 안이면 인라이어, 그다음 이름; `doc_page.variant_errs`). 인쇄 층을 쓰는 양식(`uses_print_layer`)이면 마스크를 칸·핸들러에 넘긴다(`doc_page.print_sha`). 건드린 것(`touched` — 마무리한 날짜, 연속성 행이 바뀐 쪽의 날짜·문서, 처리·실패한 문서, 지운 옛 failed 문서)을 남긴다 |
+| `pipeline/runner.py` | 단계 순서와 상태 기록만 안다. 등록과 처리(`process_document` — 지우고 다시 만든다, 쪽마다 커밋, 요청 번호 `work_requested > work_done`, `needs_date`·`discarded`; 열리지 않는 문서도 버린 결정이 있으면 `discarded` — 등록이 결정을 본다, 처리도 날짜 앞에 같은 열기 검사), 대기 문서 처리(`process_pending`, 문서의 순서대로), 빈 쪽(`blank_max_ink`), 다시 스캔(`dup_min_sim` — 같은 날·계열의 앞 순서 적재된 쪽, 뒤 문서에 다시 요청). 오류 격리(`failed`/`error`), `--skip-existing`. 동시 판 묶음이면 판마다 정합해 괘선 오차로 고른다(`choose_variant` — 0.5 px 안이면 인라이어, 그다음 이름; `doc_page.variant_errs`). 인쇄 층을 쓰는 양식(`uses_print_layer`)이면 마스크를 칸·핸들러에 넘긴다(`doc_page.print_sha`). 건드린 것(`touched` — 마무리한 날짜, 연속성 행이 바뀐 쪽의 날짜·문서, 처리·실패한 문서, 지운 옛 failed 문서)을 남긴다 |
 | `evaluate/` | CER·필드 정확도·자동 적재율·자동 적재 오류율(`status_raw`), 값 유무 정밀도·재현율, 날짜 분할(`split.py`), 비율의 구간(`stats.py`), 쪽 메타(`meta.py`), ✓ 판정(`checks.py`), 실데이터 회귀(검수 없이, 기준에 없던 묶음은 따로 알림) |
 | `pipeline/lock.py` | 파이프라인은 한 번에 하나 (DB 옆 `pipeline.lock` 에 배타 트랜잭션 — 죽은 프로세스의 잠금이 남지 않는다). 명령이 잡는다 |
 | `report.py` | DB 현황 요약 (회귀 테스트가 비교하는 수치), `by_month`, `list_pages`. 인쇄 층으로 잰 쪽(`print_layer`)과 계열별 판(`variants` — `variant_summary`)은 그런 쪽이 있을 때만, 점으로 쓴 시각일 수 있는 쪽(`usage_dotted_suspect`)은 가동 기록이 있으면(0 이어도) 키가 생긴다. 낡은 장비 ID(`stale_equipment_ids` — 리포트 밖, 회귀가 비교하지 않는다, 가동 기록·작업량 행이 있을 때만) |
@@ -211,15 +217,16 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 | `tools/thumbs.py` | 쪽 미리보기 (1/4, WORK_ROOT/thumbs — 방향을 알면 세워서, 파일 이름에 문서 ID) |
 | `tools/mktemplate.py` | 새 양식의 템플릿 뼈대(`template init`)와 표 더하기(`template add-region` → `add_region`: 인쇄 층이 있으면 그것에서 괘선, `regions` 블록 끝에 글자로 끼워 넣고 다시 읽어 확인, 아니면 되돌린다). 둘이 같은 뼈대 `region_skeleton`(`--role` 의 자리표시)을 쓴다 |
 | `export/` | 내보내기 (tasks/0008, ADR 0022 — DB 의 사본, 작업 DB 에 쓰지 않는다): `model.py`(DB → 책·시트·칸 — 순수 함수, 칸의 상태 `field_cell` 한 곳, 시트 이름, 내용의 해시), `labels.py`(한글 머리글·표시 한 곳), `business.py`(업무 시트 — 확정일 때만 값, `(잠정)`), `daily.py`·`monthly.py`(일별·월별, 운반 표 — 자리 미정·문서 없음·모름, 합계는 확정된 줄만), `xlsx.py`(모델 → xlsx, 수식이 되지 않게), `writer.py`(기록 파일 `.minedocscan-export.json` — 바이트로 읽어 UTF-8 이 아니면 잃은 것으로, 사이트 이름이 다르면 쓰지도 지우지도 않는다, 바뀐 것만, 원자적으로, 기록에 있는 것만 지운다 — 쪽이 없는 작업 DB 면 그것도 지우지 않는다, OUT 을 만들지 않는다), `auto.py`(바퀴 끝 — 더러운 날짜, 전체 훑기는 바퀴마다 달 하나(`export_excel(slices=…)`), 쓰지 못한 파일은 `retry_seconds` 뒤에, 시계 주입), `masked.py`(가린 쪽 그림 — 템플릿이 아는 자리만) |
-| `publish/` | 통합 DB 로 싣기 (ADR 0021 — 대상에 쓰는 곳은 여기 하나): `ddl.py`(schema.sql → 대상의 표 — 형을 넓혀, 외래 키 없이), `scopes.py`(범위 문서·날짜·통째와 지문 — 순수 함수, 문서는 하나씩 `DOC_CHUNK`, 전부가 아니면 `local_keys`), `core.py`(한 트랜잭션의 갈아 끼우기, `pub_state`·`pub_meta`, `--check`·`--rebuild`, 연결 함수 `connect` — 시험이 바꿔 끼운다, URL·비밀번호를 찍지 않는다, 트랜잭션마다 `lock_timeout`·`statement_timeout`·연결에 TCP keepalive, 문장마다 감시 타이머 `Watchdog` — 멈춘 서버에 `statement_timeout_s`+30초에 `cancel_safe(5)` 다음 소켓 `shutdown()`(윈도우는 그것이 `select` 를 깨우지 않아 `CancelIoEx` 를 5초 동안 되풀이 — `INTERRUPT_S`), `pub_meta` 의 `site` — 다른 사이트의 대상이면 `other_site`, `--rebuild` 는 `pub_meta` 가 있을 때만 지운다, 바뀐 범위는 (종류, 키, 지문)만 들고 넣을 때 다시 읽는다, 조각 `slices`·`slice_keys` — 달과 날짜 없는 조각 `REST`), `auto.py`(바퀴 끝 — 더러운 범위, 전체 훑기는 바퀴마다 한 조각(처음 싣기도), 충돌이면 전체 훑기, `retry_seconds`). psycopg 는 여기서만 |
+| `publish/` | 통합 DB 로 싣기 (ADR 0021 — 대상에 쓰는 곳은 여기 하나): `ddl.py`(schema.sql → 대상의 표 — 형을 넓혀, 외래 키 없이), `scopes.py`(범위 문서·날짜·통째와 지문 — 순수 함수, 문서는 하나씩 `DOC_CHUNK`, 전부가 아니면 `local_keys`), `core.py`(한 트랜잭션의 갈아 끼우기, `pub_state`·`pub_meta`, `--check`·`--rebuild`, 연결 함수 `connect` — 시험이 바꿔 끼운다, URL·비밀번호를 찍지 않는다, 트랜잭션마다 `lock_timeout`·`statement_timeout`·연결에 TCP keepalive, 문장마다 감시 타이머 `Watchdog` — 멈춘 서버에 `statement_timeout_s`+30초에 `cancel_safe(5)` 다음 소켓 `shutdown()`(윈도우는 그것이 `select` 를 깨우지 않아 `CancelIoEx` 를 5초 동안 되풀이 — `INTERRUPT_S`), `pub_meta` 의 `site` — 다른 사이트의 대상이면 `other_site`, 쪽이 없는 작업 DB 로는 대상의 문서·날짜 범위를 지우지 않는다(`empty_work_db` — 종료 코드 2, 대상이 처음이면 만든다), `--rebuild` 는 `pub_meta` 가 있을 때만 지운다(지운 범위의 수, 빈 작업 DB 면 경고 한 줄), 바뀐 범위는 (종류, 키, 지문)만 들고 넣을 때 다시 읽는다, 조각 `slices`·`slice_keys` — 달과 날짜 없는 조각 `REST`), `auto.py`(바퀴 끝 — 더러운 범위, 전체 훑기는 바퀴마다 한 조각(처음 싣기도), 충돌이면 전체 훑기, `retry_seconds`, 요약 줄은 실패의 종류·밀린 수가 바뀔 때만 `Failed.changed`). psycopg 는 여기서만 |
 | `touched.py` | 처리·검수가 건드린 것(날짜·문서·지운 문서) — 엑셀·싣기가 다시 볼 범위. 계기의 연속성은 다시 계산해 **바뀐 행의 쪽**(`recompute_continuity` 가 돌려준다 — `add_pages`)만 더한다, 장비의 모든 날짜로 넓히지 않는다 (tasks/0009 4.2 다) |
 | `sweep.py` | 조각으로 나눈 전체 훑기 `Sweep` (tasks/0009 4.2 가) — 자동 내보내기·자동 싣기가 같이 쓴다: `sweep_minutes` 마다 한 바퀴, 작업 바퀴마다 한 조각, 상태 `{done, total, first}`·마지막 전체 훑기의 시각, 시계 주입 |
 | `selftest.py` | 자가 시험 `minedocscan selftest` (tasks/0009 4.6): 설치한 프로그램만으로(pytest 없이), 합성 데이터만, 임시 폴더에서, 망 없이(`--publish-schema` 의 대상과 127.0.0.1 만). 검사 `synth`·`intake`·`recognition`(`oracle` — 기계가 읽는 표의 칸 CER 0, 읽지 않는 형식은 잉크 있음 + 검수 대기)·`reprocess`(= 처음부터 만든 DB)·`excel`·`masked`·`serve`(`--port 0 --log-dir` 하위 프로세스)·`publish`(`--publish-schema` — `minedocscan_selftest_*` 만, 있던 스키마는 쓰지도 지우지도 않는다, `CREATE` 권한이 없으면 그 검사만 건너뛴다). 앞의 검사가 실패하면 기대는 검사는 건너뛴다. `selftest.json`·`.md` — 경로·이름은 오류의 글에서도 지운다 |
 | `logfile.py` | `serve --log-dir` (tasks/0009 4.5): `DailyLog` — `<폴더>/serve-YYYYMMDD.log`, UTF-8, 날이 바뀌면 새 파일, 30일 지난 것은 이름의 날짜로 지운다, 두 스레드의 줄이 섞이지 않게 줄 단위로, 쓰지 못한 줄은 버리고 다음에 다시 연다, 시계 주입. `main` 이 인자를 읽기 전에 연다(`early_log_dir`·`redirect` — 인자 오류도 그 파일에) |
 | `cli.py` | `minedocscan` 명령. `main` 이 먼저 표준 출력·오류를 UTF-8 로 다시 연다(`utf8_streams` — 윈도우의 cp949·cp1252, `pythonw` 의 `None` 은 버리는 곳으로) |
 
-패키지 밖: `scripts/` — 만들고 재는 도구(묶음 `bundle.py`·`bundle.toml`, `windows/install.ps1`·`uninstall.ps1`, 라이선스 `licenses.py`, 설명서 `cli_reference.py`·
-`manual_html.py`·`manual_shots.py`, 성적서 `test_report.py`, 확장성 `v2_metrics.py`, 규모 `bigdb.py`). 설치되는 패키지에 들지 않는다 — 목록은 `scripts/README.md`.
+패키지 밖: `scripts/` — 만들고 재는 도구(묶음 `bundle.py`·`bundle.toml`·`bundle.lock`, `windows/install.ps1`·`uninstall.ps1`, 라이선스 `licenses.py`, 설명서 `cli_reference.py`·
+`manual_html.py`·`manual_shots.py`, 성적서 `test_report.py`, 확장성 `v2_metrics.py`, 규모 `bigdb.py`, 서명의 민감도 `sig_probe.py`, CI 의 알림 `ci_notice.py`).
+설치되는 패키지에 들지 않는다 — 목록은 `scripts/README.md`.
 
 ## 작업 규칙
 
@@ -275,6 +282,8 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 - 설치는 **망에 닿지 않는다** — 묶음에 든 바퀴만 `pip --no-index` 로, 자가 시험도 망 없이. 런타임 의존성을 더하면 `cp312-win_amd64` 에서
   쓰는 바퀴(순수 파이썬이면 `py3-none-any`)가 있어야 하고 (묶음은 바퀴만 받는다 — `--only-binary=:all:`) 라이선스가 `scripts/licenses.py --check` 의 허용 목록 안이어야 한다. 윈도우에서만 드는 것(표식
   `sys_platform == "win32"`)은 `scripts/bundle.toml` 의 `windows_only` 에 — `pip download --platform` 은 표식을 묶음을 만드는 기계로 평가한다.
+  의존성을 더하거나 판을 올리면 `python scripts/bundle.py lock` 으로 잠금을 다시 쓰고 차이를 읽는다 (묶음은 잠금 밖의 것을 받지 않는다 — tasks/0010 4.4).
+  CI 에서 검증하는 쪽은 산출물·기록을 받지 못한다 — 보고할 수는 `scripts/ci_notice.py` 의 알림으로도 남긴다 (ASCII·`key=value`, `if: always()`).
 - 프로그램이 쓰는 도구(`synth`, 템플릿 도구, 자가 시험)는 패키지 안(`tools/`, `selftest.py`), **만들고 재는 도구**(묶음, 라이선스 목록, 명령 목록,
   설명서의 HTML·갈무리, 성적서, 확장성 표, 규모)는 `scripts/` — 설치되는 패키지에 넣지 않고 패키지에서 부르지 않는다. 그 의존성은 `[docs]` 처럼 선택 의존성으로.
 - 윈도우 PC 는 작업 환경에 없다 — CI 의 `windows`(기본 `pytest`, 러너의 코드 페이지 cp1252)와 `windows-install`(묶음 → 망을 막고 `install.ps1` →
@@ -399,6 +408,11 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
   기준 0.80 은 그만큼 놓친다). 다른 날의 다른 종이는 0.85 까지 올라간다(같은 사람이 같은 차로 같은 칸에 쓴다) — 같은 날 안에서만 견준다.
   0.70 이면 실데이터는 갈리지만 합성은 같은 날 다른 종이가 0.77 까지 올라가 기본값은 0.80 그대로, 현장의 값은 실제 다시 스캔 뒤 (tasks/0008 1절 라).
   합성 글씨는 같은 날 모든 일보의 머리 칸이 화소까지 같아 서명에서 **표 밖 필드도 지운다** (ADR 0020).
+- **서명은 작은 정합 오차에 약했다** (tasks/0010 1절 다): 실제 81쪽의 정합 그림을 (2, 1) px 옮기면 최소 0.608, (3, 2) px 0.316, 0.2° 돌리면 0.810 —
+  손글씨는 같은 칸에 남는데 인쇄(괘선·글자)가 인쇄 마스크 밖으로 밀려 나와 서명을 흔든다. 윈도우의 OpenCV 가 조금 다르게 정합한 합성 다시 스캔이
+  0.8626 이었던 것도 같다. → 지울 자리를 9 × 9 로 넓힌다 (서명의 판 2): 합성 (2, 1) px + 0.2° 의 5 % / 최소 리눅스 0.602/0.597 → 0.955/0.952,
+  윈도우 0.602/0.588 → 0.955/0.951, 다시 스캔 최소 윈도우 0.8626 → 0.9803, 같은 날 다른 종이 최대 0.594(리눅스)·0.597(윈도우) 그대로, 시간 그대로.
+  5 × 5 는 윈도우에서 기준 밑(최소 0.840), 7 × 7 은 넘지만 더 어긋날 때 갈린다(0.4°: 0.786, 9 × 9 0.920). 긴 선(41 px) 지우기는 혼자서 못 넘고 1.5–2배 느리다.
 - 양면 스캔의 빈 뒷면은 `unknown_form` 이 된다. 어두운 화소 비율로 갈린다 (실제 쪽 최소 0.046, 흰 종이·티·그림자 ≤ 0.011) — 양식을 못 찾은 쪽에서만 본다.
 - 문서 하나를 한 트랜잭션으로 처리하면 30쪽에 30–70초 동안 화면의 저장이 막힌다 → 쪽마다 커밋 (1–2초).
 - 접수 폴더에서 먼저 치우고 등록하면 그 사이에 끊길 때 문서가 사라진다 → 등록·커밋한 뒤에 치운다. OpenCV 4.9 는 잘린 JPEG 도 디코딩한다
@@ -418,6 +432,11 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 - **사본의 주인**: 실제 DB 를 실어 둔 스키마에 합성 묶음의 작업 폴더로 `publish` 하자 문서 3·날짜 3 범위가 묻지 않고 합성 행으로 바뀌었다
   (URL 이 환경변수에 있는 PC 에서 합성 예제를 돌리면 일어난다). 엑셀 폴더도 빈 작업 DB 로 훑으면 기록된 파일을 다 지웠다 → 사이트 팩에 적힌
   `[site] name` 을 대상의 `pub_meta`·기록 파일에 두고 다르면 쓰지도 지우지도 않는다. 쪽이 없는 작업 DB 는 지우지 않는다 (tasks/0009 4.1 다).
+- **빈 작업 DB 로 실으면 통합 DB 가 비워졌다** (tasks/0010 1절 가): 새로 만든(쪽 0) 작업 DB 로 같은 사이트·스키마에 `publish` → "지운 범위 — 문서 3,
+  날짜 3", 대상의 `doc_field` 2,221 → 0, 종료 코드 0. 새 PC 로 옮기며 통합 DB 의 주소를 먼저 옮기면 `serve` 의 첫 바퀴가 그렇게 한다 → 쪽이 없는
+  작업 DB 로는 대상의 범위를 지우지 않는다 (`empty_work_db`, 종료 코드 2). 큰 지우기 일반은 막지 않는다 — 작업 DB 가 진실이다.
+- **버린 실패 문서가 `run --fresh` 뒤에 다시 failed 였다** (tasks/0010 1절 나): 등록은 파일을 열지 못하면 결정을 보지 않고 실패로 끝났고, 처리는 결정을
+  먼저 본다 → 등록이 버린 결정을 보고, 처리도 날짜 앞에 같은 열기 검사 (불변식 흔들기에 손상 문서와 그 문서의 결정을 넣는다 — 고치기 전에는 씨앗 셋 중 둘이 어긋났다).
 - **멈춰 버린 서버**(연결은 살아 있는데 프로세스가 돌지 않는다 — 실험은 그 백엔드에 `SIGSTOP`)에는 서버의 시간 제한도 keepalive 도 듣지 않는다
   (서버의 커널이 답한다 — 153초까지 기다렸다) → 우리 쪽의 감시 타이머. 시험은 서버를 멈출 수 없어 **멈추는 TCP 중계**로, 답을 기다리는 동안에
   멈춘다 (COPY 를 보내는 동안 멈추면 리눅스의 `tcp_user_timeout` 이 먼저 끊어 타이머를 시험하지 못한다).
@@ -442,12 +461,19 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
   그 pip 으로 다시 설치), 실행 파일(`minedocscan.exe`·`pip.exe`)은 파이썬의 절대 경로를 담는다(폴더를 바꿔 끼운 뒤 다시 만든다), embeddable 은 3.12.10 이
   3.12 의 마지막이다. `msvcp140.dll` 은 PC 에 없어도 된다 — numpy·rapidfuzz 는 자기 것을 담고 `vcruntime140(_1)` 은 embeddable 이 준다
   (CI: 묶음 76.0 MB, 망을 막은 설치 15초 — 러너에서, 현장 PC 가 아니다).
+- **묶음을 다시 만들 수 없었다** (tasks/0010 1절 라): `pip download` 에 판이 없어 만들 때마다 그때 최신 판이었고, zip 에 파일의 수정 시각이 들어갔다
+  → 잠금(바퀴의 판·해시) + `bundle.toml`(파이썬·pip·빌드 도구·sdist), 빌드 도구는 따로 만든 가상 환경, `SOURCE_DATE_EPOCH` = 커밋 시각, zip 의 이름 순서·시각·
+  권한·압축 수준 고정, 저장소의 글은 LF(`.gitattributes` — 윈도우에서 받은 CRLF 가 바퀴·설명서에 들어가면 바이트가 달라진다). 윈도우 CI 에서 같은 커밋으로
+  두 번 만든 zip 의 sha256 이 같다. OpenCV 바퀴의 FFmpeg(LGPL-2.1, 30.9 MB)를 빼고 `RECORD` 를 맞춰 다시 묶으니 묶음 77.4 → 65.8 MB (같은 날의 윈도우 CI — 잠금 없이 그때 최신 판이던 것과).
 
 ## 하지 말 것
 
 - 범용 표 인식 모델로 셀을 찾으려 하지 않는다. 양식은 고정이고 정합이 더 정확하다 (ADR 0001).
 - PDF 를 `pymupdf` 로 다시 읽지 않는다 — AGPL-3.0 이다 (ADR 0023). 런타임 의존성의 라이선스는 `scripts/licenses.py --check` 가 막는다.
 - 설치·자가 시험에 망을 쓰지 않는다 — 내려받기·온라인 확인·자동 업데이트 없이 묶음에 든 것만 (ADR 0003·0024). 묶음을 만드는 도구(`scripts/`)를 패키지에 넣지 않는다.
+- 잠금 없이 묶음을 만들지 않는다 — 판이 없는 `pip download`, 잠금 밖의 바퀴, 해시를 확인하지 않은 파일을 묶음에 넣지 않는다 (ADR 0024).
+- 소스 조건이 있는 것(LGPL·GPL·MPL)을 소스 없이 묶음에 넣지 않는다 — `sources/` 에 그 sdist 를 같이, 바퀴 안의 그런 구성요소는 빼거나 소스를 (`licenses.py --check`).
+- 쪽이 없는 작업 DB 로 통합 DB 의 범위를 지우지 않는다 (`empty_work_db`). 판이 다른 다시 스캔 서명을 견주지 않는다.
 - 인쇄된 머리글 값을 사실로 믿는 조인을 만들지 않는다 (ADR 0004).
 - 교차검증 불일치를 자동으로 "맞춰" 넣지 않는다. 보여 주고 검수로 보낸다 (ADR 0006).
 - 합성 데이터의 수치로 한글 손글씨 인식률을 말하지 않는다. 인식률은 실데이터 평가셋으로만 말한다.

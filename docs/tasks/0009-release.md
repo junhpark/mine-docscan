@@ -1,6 +1,6 @@
 # 작업 지시서 0009 — 등록 준비: 윈도우 설치 묶음·자가 시험·사용 설명서·시험 성적서, 가상 양식(V2) (그리고 0008 의 뒷정리)
 
-상태: 단계 1–7 완료 (feat/release). 8절은 사람의 일. 지시서와 달라진 점은 12절
+상태: 단계 1–7 완료 (PR #18). 8절은 사람의 일. 지시서와 달라진 점은 12절
 관련: [ROADMAP.md](../ROADMAP.md) M6·"확장성 검증 (V2)", [0008](0008-export.md)(12절과 [PR #15 의 검토](https://github.com/junhpark/mine-docscan/pull/15#pullrequestreview-5450024497)),
 [PRIOR_WORK.md](../PRIOR_WORK.md)("권리 관계"), [ADR 0003](../decisions/0003-pluggable-recognizer.md), [ADR 0021](../decisions/0021-publish-to-the-shared-db.md),
 [ADR 0022](../decisions/0022-exports-are-copies.md)

@@ -52,3 +52,32 @@ def test_the_signature_probe_line_has_no_path_or_user(tmp_path, monkeypatch):
     user = getpass.getuser()
     assert len(user) < 3 or user not in s.split("::", 2)[2]
     assert s.count("%0A") == len(res)
+
+
+def test_the_readers_take_only_numbers_from_their_files(tmp_path, capsys):
+    """--junit·--selftest·--licenses·--v2: 파일의 수만 읽는다 — 시험 이름·실패 글·경로·이름이 든 파일이어도 알림에는 수만 (4.6)."""
+    import json
+
+    from ci_notice import main
+
+    secret = str(tmp_path / "작업" / "ALPHA")
+    (tmp_path / "junit.xml").write_text(
+        f'<testsuites><testsuite tests="10" skipped="2" failures="1" errors="0" time="12.6">'
+        f'<testcase name="t {secret}"><failure message="{secret}">{secret}</failure></testcase></testsuite></testsuites>',
+        encoding="utf-8")
+    (tmp_path / "selftest.json").write_text(json.dumps({"passed": True, "seconds": 40.9, "checks": [
+        {"name": "synth", "status": "passed", "message": secret}, {"name": "publish", "status": "skipped"}]}), encoding="utf-8")
+    (tmp_path / "licenses.txt").write_text(f"ok  numpy 2.5.3 — BSD-3-Clause\nNO  bad 1.0 — {secret}\n"
+                                           "소스 조건: 소스를 같이 줘야 하는 배포판 2, 바퀴 안에 든 그런 구성요소 0\n", encoding="utf-8")
+    (tmp_path / "v2.json").write_text(json.dumps({"days": 3, "normal": {"fuel_log": {"loaded": 3, "pages": 3, "oracle_cer": 0.0,
+                                                                                      "presence_recall": 0.9846}}}), encoding="utf-8")
+    assert main(["test 3.12", "job=test", "--junit", str(tmp_path / "junit.xml"), "--selftest", str(tmp_path / "selftest.json"),
+                 "--licenses", str(tmp_path / "licenses.txt"), "--v2", str(tmp_path / "v2.json")]) == 0
+    line = capsys.readouterr().out.strip()
+    assert line.isascii() and str(tmp_path) not in line and "ALPHA" not in line
+    for kv in ("job=test", "passed=7", "skipped=2", "failed=1", "seconds=13", "selftest=1", "selftest_s=40.9", "checks_passed=1",
+               "checks_skipped=1", "licenses_ok=1", "licenses_no=1", "source_dists=2", "source_components=0",
+               "normal_fuel_loaded=3of3", "normal_fuel_cer=0", "normal_fuel_recall=0.9846", "rough_env_cer=-"):
+        assert kv in line.split("::", 2)[2].split(" "), kv
+    assert main(["missing", "--junit", str(tmp_path / "없다.xml"), "--licenses", str(tmp_path / "없다.txt")]) == 0
+    assert capsys.readouterr().out.strip() == "::notice title=missing::passed=- skipped=- failed=- errors=- seconds=- licenses_ok=- licenses_no=-"
