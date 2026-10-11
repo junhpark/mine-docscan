@@ -28,6 +28,7 @@ from .model import (
 
 class DigitsRecognizer:
     name = "digits"
+    formats = ()                     # 숫자(정수)만 — 소수·시각은 readings (tasks/0011)
 
     def __init__(self, model_dir: str | Path, threshold: float | None = None, threshold_source: str = "card",
                  fallback_threshold: float = 0.90):

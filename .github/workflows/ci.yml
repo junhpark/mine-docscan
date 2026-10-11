@@ -349,7 +349,9 @@ jobs:
 
   train:
     # 숫자 인식기 학습 시험 (torch 필요, 몇 분). 합성 셀만으로 학습한 모델의 문턱, torch ↔ OpenCV 출력 일치,
-    # 그리고 시험용 모델(tests/fixtures/digits-fixture)을 다시 만들어도 단계 5 의 문턱을 넘는지 (tasks/0003 6절)
+    # 그리고 시험용 모델(tests/fixtures/digits-fixture)을 다시 만들어도 단계 5 의 문턱을 넘는지 (tasks/0003 6절).
+    # 소수·시각 모델(tests/fixtures/readings-fixture)도 README 의 명령으로 다시 만들어 단계 2 의 문턱을 본다 (tasks/0011 —
+    # 4코어에서 약 14분, 러너가 작으면 더)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

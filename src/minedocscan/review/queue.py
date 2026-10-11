@@ -14,12 +14,14 @@
                 판정 불가인 행, 점검을 하지 않은 날(column_unused)의 행도 모집단에 있다 — 표시가 없다는 것도 정답이다.
                 검수한 행도 목록에 남긴다 (answer) — 다시 열면 전에 고른 답이 보인다
   readings      가동 일보의 가동 시간을 정하는 칸 (tasks/0005 단계 5, tasks/0006 4.7). 항목 = 쪽 하나: 계기 칸(시작·종료·총) +
-                근무 시각 칸(shifts 표의 time_range 칸, 행 순서)을 한 번에. 그중 하나라도 잉크가 있는 쪽, audit=N 이면 잉크와 상관없이
+                근무 시각 칸(shifts 표의 time_range 칸, 행 순서)을 한 번에. 그중 하나라도 기계가 검수로 보낸 칸(status_raw pending)이
+                있는 쪽 — 형식 칸을 읽지 않으면 잉크가 있는 쪽 (tasks/0011 4.7), audit=N 이면 기계의 상태와 상관없이
                 날짜별로 고르게 뽑은 쪽 N 개. 기계 값도 앞날의 값도 싣지 않는다 (0005 4.7 — 보여 주면 따라 적는다).
                 계기 표의 시작·종료 칸(reading 형식)에는 ask_dotted — 점으로 쓴 시각(08.00)을 넣으면 화면이 묻는다 (0006 4.8).
                 usage-check·pending 의 계기 칸도 같다
   usage-check   가동 일보의 검산이 어긋난 것 (xcheck_usage 의 gap·overlap·mismatch). 항목 = 검산 하나: 비교한 칸들(다른 쪽이면
-                두 쪽)과 지금 값, 차이. 고칠 칸만 고쳐 저장한다 — 고쳐서 맞으면 끝, 여전히 어긋나면 남는다. 아무것도 고치지 않고
+                두 쪽)과 지금 값, 차이 — 자동 적재된 칸이면 지금 값은 기계가 읽은 값이다 (tasks/0011 — 연속성이 어긋난 자동 적재 칸은
+                여기서 사람이 본다). 고칠 칸만 고쳐 저장한다 — 고쳐서 맞으면 끝, 여전히 어긋나면 남는다. 아무것도 고치지 않고
                 저장하면 "종이에 적힌 대로"를 확인한 것이고 끝난다 (어긋남은 xcheck_usage 와 리포트에 그대로 남는다 — ADR 0006).
                 이 대기열의 검수는 note 에 검산 id 를 남긴다 (USAGE_CHECK_NOTE). 확인 = 비교한 칸 전부가 그 검산의 항목에서 저장되었고
                 지금 값이 그때와 같다 — 한 칸이 두 검산에 걸쳐 있어도(종료 칸) 둘 다 끝낼 수 있다
@@ -51,7 +53,7 @@ INPUT_KINDS = ("handwritten_number", "handwritten_text")      # 이 화면이 �
 
 _FIELD_SQL = (
     "SELECT f.field_id, f.page_id, f.region, f.row_no, f.field_name, f.kind, f.format, f.row_key, f.x0, f.y0, f.x1, f.y1, "
-    "f.has_value_raw, f.value_raw, f.confidence, f.backend, f.review_status, f.has_value, f.value_final, "
+    "f.has_value_raw, f.value_raw, f.confidence, f.backend, f.review_status, f.status_raw, f.has_value, f.value_final, "
     "p.template_name, p.page_no, p.work_date, d.source_name "
     "FROM doc_field f JOIN doc_page p ON f.page_id = p.page_id JOIN doc_document d ON p.document_id = d.document_id ")
 
@@ -389,9 +391,10 @@ def _candidates(con, site, key: str) -> list[str]:
 # ── readings ───────────────────────────────────────────────────────────────
 def _readings(con, site, audit: int | None = None, seed: int = 0):
     """가동 시간을 정하는 칸 (tasks/0006 4.7). 쪽마다 한 항목: 계기 칸(role meter — 시작·종료·총) 다음에 근무 시각 칸(role shifts 의
-    time_range 칸, 행 순서). 계기 표만 있는 양식도, 근무 시각 표만 있는 양식도 된다. 그 칸 중 하나라도 기계가 잉크를 본 칸
-    (has_value_raw)이 있는 쪽 — audit=N 이면 잉크와 상관없이 날짜별로 고르게 N 쪽. 셀에 기계 값을 싣지 않고, 다른 쪽(앞날)의 값도
-    싣지 않는다 (0005 4.7). 항목의 칸에 전부 유효한 검수가 있으면 끝난 쪽."""
+    time_range 칸, 행 순서). 계기 표만 있는 양식도, 근무 시각 표만 있는 양식도 된다. 그 칸 중 하나라도 기계가 사람에게 보낸 칸
+    (status_raw pending — tasks/0011 4.7)이 있는 쪽. 형식 칸을 읽지 않으면 잉크가 있는 칸이 늘 검수 대기라 "잉크를 본 칸이 있는 쪽"과
+    같다. 형식 칸을 읽으면 자동 적재된 쪽은 오르지 않는다 — audit=N 이면 기계의 상태와 상관없이 날짜별로 고르게 N 쪽 (자동 적재된 쪽의
+    감사). 셀에 기계 값을 싣지 않고, 다른 쪽(앞날)의 값도 싣지 않는다 (0005 4.7). 항목의 칸에 전부 유효한 검수가 있으면 끝난 쪽."""
     from ..forms.template import meter_slot
     from ..handlers.usage import is_shift_cell
 
@@ -417,7 +420,7 @@ def _readings(con, site, audit: int | None = None, seed: int = 0):
         firsts = [min(v, key=lambda x: x[0])[2] for v in by_page.values()]
         pages = [r["page_id"] for r in _stratified_pages(firsts, audit, seed)]
     else:
-        pages = [pid for pid, v in by_page.items() if any(r["has_value_raw"] for _o, _l, r in v)]
+        pages = [pid for pid, v in by_page.items() if any(r["status_raw"] == "pending" for _o, _l, r in v)]
     pages.sort(key=lambda pid: _order(min(by_page[pid], key=lambda x: x[0])[2]))
     reviews = effective(con, field_ids=[r["field_id"] for pid in pages for _o, _l, r in by_page[pid]])
     items, done = [], 0
@@ -469,7 +472,8 @@ def check_id(c) -> str:
 def _usage_check(con, site):
     """xcheck_usage 의 어긋난 검산(gap·overlap·mismatch) + 이 대기열에서 손댄 검산(note 에 그 id 가 남은 검수가 있는 것).
     끝난 것 = 지금 맞는 것(고쳐서 맞게 됐다) + 비교한 칸이 전부 이 대기열에서 확인된 것(종이에 적힌 대로의 어긋남).
-    항목의 셀에는 지금의 최종 값을 싣는다 (기계 값이 아니다 — 계기 칸은 기계가 읽지 않는다)."""
+    항목의 셀에는 지금의 최종 값을 싣는다 — 자동 적재된 칸이면 기계가 읽은 값이다 ([recognize.by_format] — tasks/0011 4.7). 연속성이
+    어긋난 자동 적재 칸은 여기서 사람이 본다."""
     from ..validate.usage import check_cells
 
     # 이 대기열에서 저장한 검수: (칸, 검산) → 그때의 (판정, 값)들. 한 칸이 두 검산에 들어 있을 수 있다 (종료 칸 = 그 쪽의 총 검산과 다음 기록의

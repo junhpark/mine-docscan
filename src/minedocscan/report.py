@@ -98,7 +98,31 @@ def build_report(con: sqlite3.Connection, families: dict[str, str] | None = None
     old = old_signatures(con)
     if old:
         rep["old_signatures"] = old
+    # 형식 칸(소수·시각)을 기계가 읽은 것 (tasks/0011 4.7): 형식 칸에 인식기의 행(backend ≠ ink)이 있을 때만 키가 생긴다 — 형식 칸을
+    # 읽지 않는 사이트의 리포트(와 regress 의 기준)는 예전과 같다
+    fc = format_cells(con)
+    if fc:
+        rep["format_cells"] = fc
     return rep
+
+
+def format_cells(con: sqlite3.Connection) -> dict:
+    """형식마다 기계가 읽은 칸(인식기에 간 칸 — backend 가 ink 가 아닌 것): 읽은 칸, 자동 적재(값·빈 칸 — 기계의 상태 status_raw),
+    검수 대기, 점으로 쓴 시각으로 읽은 칸(reading 칸 — formats.dotted_clock, 늘 검수 대기). 수만 — 값은 내지 않는다."""
+    from .forms.formats import dotted_clock
+
+    out: dict[str, dict] = {}
+    for fmt, status, has, raw in con.execute(
+            "SELECT format, status_raw, has_value_raw, value_raw FROM doc_field WHERE format IS NOT NULL "
+            "AND format != 'integer' AND COALESCE(backend, '') != 'ink'"):
+        d = out.setdefault(fmt, {"read": 0, "auto_value": 0, "auto_empty": 0, "pending": 0, "dotted": 0})
+        d["read"] += 1
+        if status == "auto":
+            d["auto_value" if has else "auto_empty"] += 1
+        else:
+            d["pending"] += 1
+        d["dotted"] += int(fmt == "reading" and dotted_clock(raw) is not None)
+    return dict(sorted(out.items()))
 
 
 def old_signatures_line(n: int) -> str:
@@ -175,8 +199,10 @@ def dotted_suspect(con: sqlite3.Connection) -> int:
     """계기 값(reading_kind meter)으로 적재되었는데 시작·종료가 둘 다 24 이하인 쪽의 수 — 점으로 쓴 시각(08.00)을 그대로 넣었을
     수 있다 (tasks/0006 4.8). 리포트는 옆에 mixed(한 칸만 콜론으로 넣은 쪽 — usage.reading 의 mixed)를 같이 보여 준다.
     세기만 한다 — 값은 고치지 않는다."""
-    return con.execute("SELECT COUNT(*) FROM eq_usage_daily WHERE reading_kind = 'meter' AND meter_start <= 24 "
-                       "AND meter_end <= 24").fetchone()[0] or 0
+    from .forms.formats import CLOCK_MAX_HOUR  # 쪽 안 검산(handlers/usage.page_gate ⑤)과 같은 수 (24)
+
+    return con.execute("SELECT COUNT(*) FROM eq_usage_daily WHERE reading_kind = 'meter' AND meter_start <= ? "
+                       "AND meter_end <= ?", (CLOCK_MAX_HOUR, CLOCK_MAX_HOUR)).fetchone()[0] or 0
 
 
 NEAR_TIE_PX = 1.0          # 리포트: 두 판의 괘선 오차 차이가 이보다 작은 쪽 = 가르기 어려웠던 쪽 (tasks/0006 4.6·9절) — 세기만 한다
@@ -494,6 +520,9 @@ def format_report(rep: dict, by_date: list[dict] | None = None) -> str:
         names = {"total": "총 = 종료 − 시작", "subtotal": "소계 = 합", "continuity": "계기의 연속성"}
         for k, d in (rep.get("xcheck_usage") or {}).items():
             lines.append(f"  검산 {names.get(k, k)}: {kv(d)}")
+    for fmt, d in (rep.get("format_cells") or {}).items():          # 형식 칸을 읽을 때만 (tasks/0011 4.7)
+        lines.append(f"기계가 읽은 형식 칸 [{fmt}] {d['read']} — 자동 적재 값 {d['auto_value']}, 빈 칸 {d['auto_empty']}; "
+                     f"검수 대기 {d['pending']} (점으로 쓴 시각 {d['dotted']})")
     if by_date:
         lines.append("날짜별 교차검증:")
         for d in by_date:

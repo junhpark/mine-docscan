@@ -18,7 +18,9 @@
     이진 그림으로 잰다 — 칸 안에 인쇄만 있는 칸이 빈 칸이 된다 (tasks/0006 4.3, presence). 필드·작업 표·크롭은 원래 그림
 값:
   · 정수 칸(작업량)은 지금의 숫자 인식 경로(by_kind, 자동 적재 표)를 그대로 탄다 — handlers/base.number_row
-  · 소수·시각 칸은 읽지 않는다 (미룸 — tasks/0006 1절). 잉크가 있으면 검수 대기 — 계기 칸은 `review serve --queue readings`
+  · 소수·시각 칸(계기·근무 시각)은 [recognize.by_format] 에 적힌 형식일 때만 읽는다 (tasks/0011): 칸의 규칙(base.format_row — 적힌 대로
+    읽고 정규화해 자동 적재, 점으로 쓴 시각은 늘 사람) 다음에 쪽 안 검산(page_gate — 기계 값만으로, 표마다)이 자동 적재를 막는다.
+    적히지 않은 형식은 읽지 않는다 — 잉크가 있으면 검수 대기 (`review serve --queue readings`). 검수 대기인 형식 칸의 value_final 은 NULL
 
 가동 시간(hours)은 적힌 값에서 계산하고, 무엇으로 계산했는지를 hours_basis 에 남긴다 (4.3):
   meter(종료 − 시작) > total(총 칸) > clock(계기 칸에 적은 시각의 종료 − 시작) > shifts(근무 시각 범위의 합) > NULL.
@@ -35,20 +37,41 @@ import json
 from dataclasses import dataclass
 
 from ..forms.equipment import META_KEY as EQUIPMENT
-from ..forms.formats import as_number, minutes, range_minutes, reading_kind, span_minutes, try_normalize
+from ..forms.formats import (
+    CLOCK_MAX_HOUR,
+    as_number,
+    minutes,
+    range_minutes,
+    reading_kind,
+    span_minutes,
+    try_normalize,
+)
 from ..forms.template import Template, meter_slot
 from ..imaging.blobs import assign_blobs
 from ..pagemeta import page_meta_of
 from ..store.db import upsert
-from ..validate.usage import check_usage, equipment_ref, recompute_continuity, write_page_checks
+from ..validate.usage import (
+    DAY_HOURS,
+    TOLERANCE,
+    check_usage,
+    equipment_ref,
+    recompute_continuity,
+    total_check,
+    write_page_checks,
+)
 from .base import (
     FormHandler,
     PageContext,
     apply_reviews,
     as_int,
     field_row,
+    format_final,
+    format_row,
+    is_format_row,
+    is_table_format_row,
     number_row,
     readable,
+    reads_format,
     recognize,
     unread_row,
 )
@@ -74,14 +97,22 @@ class UsageHandler(FormHandler):
         to_read = [o for o in ints if any_ink(o)]
         recs = dict(zip([id(o) for o in to_read], recognize(ctx, to_read), strict=True))
         int_ids = {id(o) for o in ints}
+        # 표의 형식 칸(소수·시각): [recognize.by_format] 에 적힌 형식만 인식기에 (tasks/0011 4.1). 정수 칸과 따로 부른다
+        fmts = [o for o in ctx.obs if o.cell.region != "fields" and o.cell.kind.startswith("handwritten")
+                and not readable(o.cell)]
+        reading = any(reads_format(ctx.recognizer, o.cell.fmt) for o in fmts)
+        to_fmt = [o for o in fmts if any_ink(o) and reads_format(ctx.recognizer, o.cell.fmt)]
+        frecs = dict(zip([id(o) for o in to_fmt], recognize(ctx, to_fmt), strict=True))
 
         rows, hw = [], []
         for o in ctx.obs:
             c = o.cell
             if id(o) in int_ids:
                 rows.append(number_row(ctx, o, recs.get(id(o))))
+            elif id(o) in frecs:                             # 읽은 형식 칸: 칸의 규칙 (빈 칸은 NULL — machine_final 과 같다)
+                rows.append(format_row(ctx, o, frecs[id(o)], empty_final=None))
             elif c.kind.startswith("handwritten") and c.region != "fields" and not readable(c):
-                # 소수·시각 칸: 읽지 않는다. 잉크가 있으면 검수 대기, 없으면 빈 칸 (value_final NULL — machine_final 과 같다)
+                # 읽지 않는 형식 칸: 잉크가 있으면 검수 대기, 없으면 빈 칸 (value_final NULL — machine_final 과 같다)
                 rows.append(unread_row(ctx, o) if any_ink(o) else number_row(ctx, o, None))
             elif c.kind == "printed":
                 v = c.row_meta.get(c.name)
@@ -93,6 +124,9 @@ class UsageHandler(FormHandler):
                 rows.append(field_row(ctx, o, has_value=o.ink >= self.text_ink_min, value_raw=None, value_final=None,
                                       confidence=None, candidates=None, backend="ink", review_status="auto"))
         rows += self.load_handwritten(ctx, hw)
+        gate: dict[str, int] = {}
+        if reading:                                          # 쪽 안 검산 — 기계 값만으로, 검수를 덮기 전에 (4.2)
+            rows, gate = page_gate(tpl, rows)
         rows = apply_reviews(ctx, rows)                      # 검수가 있으면 최종값으로 덮는다
         upsert(ctx.con, "doc_field", rows)
 
@@ -102,7 +136,8 @@ class UsageHandler(FormHandler):
         write_page_checks(ctx.con, tpl, ctx.page_id)          # 쪽 안의 검산. 날짜 사이(연속성)는 마무리에서 전체를
         return {"fields": len(rows), "usage_pages": 1, "tally_cells": len(tally),
                 "tally_filled": sum(t["has_value"] for t in tally), "notes": n_notes,
-                "meter_pending": int(usage["reading_kind"] == "pending")}
+                "meter_pending": int(usage["reading_kind"] == "pending"),
+                **{f"format_gate_{k}": n for k, n in gate.items()}}   # 형식 칸을 읽을 때만 (설정하지 않은 요약은 그대로)
 
     def finalize(self, con, site, settings, dates=None, equipment=None) -> dict:
         """dates·equipment 가 None 이면 모든 쪽을 적재한 뒤의 검산 전부 (쪽 안 + 계기의 연속성). 아니면 계기의 연속성만 — 그 날짜에
@@ -129,7 +164,11 @@ class UsageHandler(FormHandler):
                 and f["reviewed_by"] is None}, []
 
     def machine_final(self, row: dict) -> str | None:
-        """기계만으로 정했을 때의 value_final (load 와 같은 규칙): 필드·글자 칸은 기계 값 그대로, 정수 칸은 정수로, 소수·시각 칸은 NULL."""
+        """기계만으로 정했을 때의 value_final (load 와 같은 규칙): 표의 형식 칸은 형식을 먼저 — 검수 대기(쪽 안 검산으로 내린 칸 포함)는
+        NULL, 자동 적재한 값은 정규화한 값, 빈 칸은 NULL (format_final). 필드(형식이 있어도 — 메타 모델이 읽은 값 그대로)·글자 칸은
+        기계 값 그대로, 정수 칸은 정수로."""
+        if is_table_format_row(row):
+            return format_final(row, None)
         if row["region"] == "fields" or row["format"] is None:
             return row["value_raw"]
         if row["format"] == "integer":
@@ -278,6 +317,90 @@ def usage_rows(site, tpl: Template, page: dict, meta: dict, frows: list[dict]) -
     return usage, tally
 
 
+# ── 쪽 안 검산: 형식 칸의 자동 적재를 막는다 (tasks/0011 4.2) ──────────────────
+GATE_REASONS = ("pending", "incomplete", "mixed", "range", "total", "clock_like", "shift_pending", "shift_day")
+
+
+def page_gate(tpl: Template, rows: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    """칸의 규칙 뒤·검수를 덮기 전에, 기계 값만으로 쪽 하나 안에서 (앞날·다른 쪽에 기대지 않는다 — 순서). 표마다 따로: 통과하지 못한
+    표의 auto 인 값 칸을 전부 검수 대기로 내린다 (review_status·status_raw pending, value_final NULL — 빈 칸으로 자동 적재한 칸은 그대로).
+    돌려주는 값: (새 행들, 이유마다 내린 칸의 수). 이유는 meter_gate·shift_gate. 고치지 않는다 — 막기만 한다 (ADR 0006)."""
+    roles = {reg["name"]: reg.get("role") for reg in tpl.regions}
+    counts = dict.fromkeys(GATE_REASONS, 0)
+    out = list(rows)
+    for reg, role in roles.items():
+        if role == "meter":
+            idx = [i for i, r in enumerate(rows) if r["region"] == reg and is_format_row(r)
+                   and str(r["kind"]).startswith("handwritten")]
+            reason = meter_gate([rows[i] for i in idx])
+        elif role == "shifts":
+            idx = [i for i, r in enumerate(rows) if r["region"] == reg and is_shift_cell(role, r)]
+            reason = shift_gate([rows[i] for i in idx])
+        else:
+            continue
+        if reason is None:
+            continue
+        for i in idx:
+            r = out[i]
+            if r["review_status"] == "auto" and r["has_value_raw"]:
+                out[i] = {**r, "review_status": "pending", "status_raw": "pending", "value_final": None}
+                counts[reason] += 1
+    return out, counts
+
+
+def meter_gate(cells: list[dict]) -> str | None:
+    """계기 표의 형식 칸(기계 행)이 자동 적재를 지나가도 되는가 — None 이면 통과, 아니면 내리는 이유:
+      ① pending     형식 칸 중 하나라도 검수 대기 (읽지 않는 형식이라 검수 대기인 칸도)
+      ② (통과)      값 칸이 없다 (모두 빈 칸)
+      ③ incomplete  시작·종료가 둘 다 값이 아니다 (총만, 시작만 …)       mixed  시작·종료의 종류가 다르다 (계기 값과 시각)
+      ④ range       계기 값: 종료 − 시작이 0–DAY_HOURS 밖                 total  총이 있는데 맞지 않는다 (page_checks 와 같은
+                    함수 total_check — 계기 값의 총은 계기 값이어야 한다. 시각이면 총은 수이고 |총 − 길이(시간)| ≤ TOLERANCE)
+      ⑤ clock_like  계기 값인데 시작·종료가 둘 다 CLOCK_MAX_HOUR 이하 — 점으로 쓴 시각(08.00)을 소수 한 자리로 읽었을 수 있다
+                    (report 의 usage_dotted_suspect 와 같은 조건)"""
+    if any(r["review_status"] == "pending" for r in cells):
+        return "pending"
+    vals: dict = {}
+    for r in cells:
+        if not r["has_value_raw"]:
+            continue
+        v = r["value_final"]
+        vals[_meter_slot(r)] = None if v in (None, "") else _meter_value(r["format"], v)
+    if not vals:
+        return None
+    s, e, t = vals.get("start"), vals.get("end"), vals.get("total")
+    if s is None or e is None:
+        return "incomplete"
+    if s[0] != e[0]:
+        return "mixed"
+    if s[0] == "meter":
+        if not 0 <= round(e[1] - s[1], 4) <= DAY_HOURS:
+            return "range"
+        if "total" in vals and (t is None or t[0] != "meter" or not total_check(s[1], e[1], t[1])[2]):
+            return "total"
+        if s[1] <= CLOCK_MAX_HOUR and e[1] <= CLOCK_MAX_HOUR:
+            return "clock_like"
+        return None
+    if "total" in vals and (t is None or t[0] != "meter"
+                            or abs(round(t[1] - span_minutes(s[1], e[1]) / 60, 4)) > TOLERANCE):
+        return "total"
+    return None
+
+
+def shift_gate(cells: list[dict]) -> str | None:
+    """근무 시각 표의 time_range 칸(기계 행): 하나라도 검수 대기면 shift_pending, 범위의 합이 DAY_HOURS 를 넘으면 shift_day."""
+    if any(r["review_status"] == "pending" for r in cells):
+        return "shift_pending"
+    total = 0
+    for r in cells:
+        if not r["has_value_raw"]:
+            continue
+        m = range_minutes(r["value_final"])
+        if m is None:
+            return "shift_pending"
+        total += m
+    return "shift_day" if total > DAY_HOURS * 60 else None
+
+
 def is_shift_cell(role: str | None, row: dict) -> bool:
     """근무 시각 칸: role shifts 인 표의 손글씨 time_range 칸 (row: doc_field 행). 가동 기록의 근무 시각·readings 대기열·
     내보내기(근무 시각이 확정인가 — tasks/0008 4.2)가 같은 규칙을 쓴다."""
@@ -291,9 +414,11 @@ def _meter_slot(r: dict) -> str | None:
 def _state(r: dict):
     """최종 필드 행의 값: None(빈 칸) | UNKNOWN(잉크는 있는데 값이 없다 — 검수 대기·읽을 수 없음) | 정규화한 표기.
     검수 대기인데 값이 없으면 기계가 빈 칸이라 했어도 UNKNOWN 이다 — "읽을 수 없음" 검수는 기계의 값 유무를 그대로 두므로
-    (has_value 0), 그것을 빈 칸으로 치면 가동 시간이 다음 근거로 내려간다 (추정)."""
+    (has_value 0), 그것을 빈 칸으로 치면 가동 시간이 다음 근거로 내려간다 (추정).
+    검수 대기인 형식 칸은 값이 있어도 UNKNOWN 이다 (tasks/0011 4.2): 자동 적재한 칸에 "읽을 수 없음"을 넣으면 값이 그대로 남는다
+    (apply_verdict) — 사람이 읽을 수 없다고 한 칸으로 가동 시간·연속성을 계산하지 않는다."""
     v = r["value_final"]
-    if r["review_status"] == "pending" and v in (None, ""):
+    if r["review_status"] == "pending" and (v in (None, "") or is_format_row(r)):
         return UNKNOWN
     if not r["has_value"]:
         return None

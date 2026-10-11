@@ -14,6 +14,7 @@
 | 정합 이미지, SQLite DB, 리포트 | 각자의 로컬 디스크 (= `WORK_ROOT`) | 아니오 (언제든 다시 만든다) |
 | 숫자 인식기 모델 (`models/<이름>/`) | 사이트 팩 안 (= `SITE/models/`) — 현장 글씨로 학습한 것 | **아니오** (예외: 합성 셀만으로 만든 `tests/fixtures/digits-fixture`) |
 | 메타 필드 모델 (`models/<이름>/`, `classes.json` 에 이름·차량번호) | 사이트 팩 안 (= `SITE/models/`) | **아니오** (예외: 합성 값만으로 만든 `tests/fixtures/meta-digits`, `meta-operator`) |
+| 소수·시각 모델 (`models/<이름>/` — `recognizer train --readings`) | 사이트 팩 안 (= `SITE/models/`) — 현장 글씨로 학습한 것 | **아니오** (예외: 합성 칸만으로 만든 `tests/fixtures/readings-fixture`) |
 | 학습용 크롭(`export-crops`), 틀린 칸 모아 보기(`recognizer eval --errors`) | 저장소 밖 (기본 `WORK_ROOT/recognizer-errors`) | **아니오** — 현장 글씨. git 작업 트리·접수 폴더·보관 폴더 안이면 도구가 거절한다 |
 | 인쇄 층(`print.png` — `template print-layer`), 다른 판의 기준 이미지(`template variant` 가 쓴 `reference.png`) | 사이트 팩 안 (= `SITE/templates/<양식>/`) | **아니오** — 현장 스캔에서 나온 것. 인쇄 층에는 늘 같은 자리에 쓰는 손글씨(이름·서명)의 잔상이 남는다. git 작업 트리 안이면 도구가 거절한다 (`print-layer` 는 합성 사이트 팩이면 `--allow-in-repo`) |
 | 템플릿 미리보기(`template preview`, `--print`), 쪽 미리보기(`pages --thumbs`) | `WORK_ROOT/template-preview`, `WORK_ROOT/thumbs` | **아니오** — 실제 양식과 글씨. `template preview` 는 저장소 안이면 거절한다 |
@@ -519,6 +520,42 @@ minedocscan report                          # 백엔드별 칸 수·자동·대�
 - 범위: `site.toml` 의 `[haul] trips_max` 보다 큰 값은 신뢰도가 높아도 검수로 간다.
 - 인식기 수치는 실데이터 검증·test 날짜로만 말한다. 합성 셀의 수치는 학습·추론 경로가 맞는지의 확인이다.
 
+### 소수·시각 인식기: 학습에서 평가까지
+
+가동 일보의 형식 칸(계기 값·시각·근무 시각 범위 — `decimal`·`time`·`time_range`·`reading`)의 인식기(`readings`, ADR 0025). 숫자 인식기와
+같은 크롭 폴더를 쓴다 — `review export-crops` 한 번으로 두 모델의 크롭이 나온다 (숫자 모델은 형식 칸 줄을 빼고, 이 모델은 형식 칸 줄만).
+학습만 torch 가 필요하다. 현장 PC 의 추론은 OpenCV 만 쓴다.
+
+```bash
+minedocscan review serve --queue readings --reviewer jp     # 정답부터: 가동 시간 칸 (계기 + 근무 시각). --audit N 은 빈 칸으로 넘어간 칸도
+minedocscan review export-crops ~/crops --split train --include-illegible   # --kind 없이 — 글자 종류의 형식 칸도
+minedocscan recognizer train --readings --crops ~/crops --name readings-v1 --cv 5
+                                            # → <site>/models/readings-v1/. 칸이 적으면 --cv (날짜 묶음마다 나머지로 학습해 그 묶음을 읽는다)
+minedocscan recognizer eval --crops ~/crops --model readings-v1 --split val
+                                            # 형식마다 값·빈 칸·거절, 점으로 쓴 시각으로 읽은 칸, 임계값별 자동 적재
+                                            # (--cv 모델의 val 은 학습 때의 묶음 교차 읽기 cv-reads.jsonl 로 — 수만, 그림 없음)
+minedocscan recognizer eval --crops ~/crops --model readings-v1 --split train --errors
+                                            # 틀린 칸 그림에 모델이 본 띠 (학습한 칸이라 틀린 것이 적게 나온다 — 띠를 보는 데 쓴다)
+# 설정: [recognize.by_format] reading = "readings", time_range = "readings" …,  [recognize.readings] model = "readings-v1"
+minedocscan info                            # 형식마다 백엔드와 모델(규격, 자동 적재 기준과 상한)
+minedocscan run DB_scans --fresh
+minedocscan eval --answers answers-test.json --target raw --only-listed --split test   # 기계 값은 같은 값의 다른 표기(8-12)를 맞다고 본다
+```
+
+- **정답은 정규화한 값이다** (검수가 남기는 것 — `08:00~12:00`). 종이의 글자(`8-12`)와 다르므로 학습은 그 값이 될 수 있는 표기를 모두 목표로
+  한다 (`formats.spellings` — 손실 = −log Σ P(표기)). 점으로 쓴 시각(08.00)은 사람이 시각으로 정했으면 시각의 표기로 배운다.
+- 학습·온도·자동 적재 기준·test 의 규칙은 숫자 인식기와 같다 (test 줄 거절, 검증 칸 100 미만이면 기준 없음, 95 % 상한). 기준은 하나 — 형식마다
+  두지 않는다. 메타 필드처럼 칸이 적으면 `--cv` 로 정하고, 자동 적재된 쪽은 `readings --audit` 로 표본 감사한다.
+- **자동 적재는 칸의 기준과 쪽 안 검산을 다 지나야 한다**: 계기 표는 검수 대기인 칸이 없고, 값 칸이 있으면 시작·종료가 둘 다 값이고 종류가
+  같고(계기 값과 시각이 섞이지 않는다), 계기 값이면 종료 − 시작이 0–24시간이고 둘 다 24 이하가 아니고(점으로 쓴 시각을 소수로 읽었을 수
+  있다), 총이 적혀 있으면 총 = 종료 − 시작일 때만 — 총이 빈 칸이거나 표가 다 빈 칸이면 통과. 근무 시각 표는 검수 대기가 없고 합이 24시간
+  이하일 때만. 걸리면 그 표의 자동 적재 값 칸을 전부 검수 대기로 내린다 (이유별 수는 `run --json` 의 요약 `format_gate_*`). 계기 칸에 점으로 쓴 시각으로 읽힌 칸은 늘 검수 대기다. 연속성(어제 종료 = 오늘 시작)은 고르지 않고
+  `usage-check` 에서 보여 준다.
+- 검수 대기인 칸에도 기계 값이 남는다 — `pending` 대기열이 미리 채운다 (`readings` 대기열은 기계 값을 보여 주지 않는다).
+- 모델 카드에는 값 대신 모양(`dddd.d`)의 분포가 적힌다. 모델·크롭·틀린 칸 모아 보기는 현장 글씨다 — 저장소 밖에.
+- 합성 칸(`tools/synth_readings.py`)만으로 학습한 모델(`tests/fixtures/readings-fixture`)은 시험용이다. 그 기준(합성 검증에서 고른 0.8)은 현장에
+  쓰지 않는다 — 합성 가동 일보에서도 값의 신뢰도가 0.5–0.85 라 보수적이었다 (tasks/0011 12절).
+
 ### 쪽 메타(차량번호·작성자): 정답에서 감사까지
 
 일보의 차량번호(네 자리)·작성자를 기계가 채우게 하는 순서다 (tasks/0004, ADR 0013·0014). 학습만 torch 가 필요하다.
@@ -644,6 +681,10 @@ minedocscan review stats                                        # 형식별·대
   행 순서 — 라벨은 행에 인쇄된 근무 구분). 그중 하나라도 기계가 잉크를 본 쪽이 올라온다 — 계기가 비고 근무 시각만 적힌 쪽(로우더)도
   한 번의 저장으로 가동 시간이 근무 시각 근거(`shifts`)로 정해진다. 항목의 칸이 전부 검수되어야 끝난다 — 계기 칸만 검수한 쪽은 근무 시각
   칸 때문에 다시 올라온다. `--audit N` 은 잉크와 상관없이 날짜별로 고르게 N 쪽 — 빈 칸으로 넘어간 칸을 잴 정답.
+- **소수·시각 인식기를 켠 현장**(`[recognize.by_format]`, 위의 "소수·시각 인식기")에서는 기계가 계기·근무 시각 칸을 읽는다. 칸의 기준과 쪽 안
+  검산을 다 지난 쪽은 `readings` 에 오르지 않는다 — 자동 적재된 쪽은 `readings --audit N` 으로 표본 감사한다(기계 값 없이). 기계가 확신했는데도
+  검수로 온 칸은 같은 표가 쪽 안 검산을 지나지 못한 것이다 — 그 표의 다른 칸이 검수 대기였거나, 시작·종료가 빠졌거나, 총 ≠ 종료 − 시작,
+  24시간 넘음, 시각을 소수로 읽었을 수 있는 값 (`run --json` 요약의 `format_gate_*`). 계기 칸에 점으로 쓴 시각으로 읽힌 칸은 늘 온다.
 - 작업량 칸의 검수 대기는 지금처럼 `pending`(`--template`, `--kind` 로 좁힌다)이다. 계기·근무 시각 칸도 같은 `handwritten_number` 라 거기
   같이 나오지만 그 칸은 `readings` 에서 넣는 것이 빠르다.
 - **계기 칸의 규칙**: 계기 값은 숫자 그대로(1234.5), 시각은 콜론으로(08:00) — 점으로 쓴 시각(08.00)도 콜론으로 입력. 숫자인지 시각인지는 사람이 정한다

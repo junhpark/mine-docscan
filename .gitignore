@@ -41,6 +41,8 @@ minedocscan.toml
 # 메타 필드 시험용 모델 (합성 메타 필드만으로 학습 — tools/synth_meta, tasks/0004)
 !tests/fixtures/meta-digits/model.onnx
 !tests/fixtures/meta-operator/model.onnx
+# 소수·시각 시험용 모델 (합성 칸만으로 학습 — tools/synth_readings, tasks/0011)
+!tests/fixtures/readings-fixture/model.onnx
 
 # Python
 __pycache__/

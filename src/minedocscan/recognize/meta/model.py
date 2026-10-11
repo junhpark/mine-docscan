@@ -60,6 +60,9 @@ class MetaModel:
         self.dir = Path(model_dir)
         card = json.loads((self.dir / "card.json").read_text(encoding="utf-8"))
         meta = card.get("meta")
+        if card.get("reader") == "readings":                 # 갈래를 먼저 본다 (tasks/0011 4.3)
+            raise MetaModelError(f"'{card.get('name', self.dir.name)}' 은 소수·시각 모델입니다 — [recognize.meta] 가 아니라 "
+                                 "[recognize.readings] 에 꽂으세요")
         if not meta:
             raise MetaModelError(f"메타 필드 모델이 아닙니다 (카드에 meta 가 없다 — 숫자 칸 모델이면 [recognize.digits] 에): {self.dir}")
         self.reader = meta.get("reader")
