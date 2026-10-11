@@ -196,7 +196,9 @@ fields:
 | `reading` | 계기 값 또는 시각 | 콜론이 없으면 `decimal`, 있으면 `time` | `1234.5`, `08:00` |
 | (없음) | 글자 (`handwritten_text` 의 기본) | 적힌 대로 | |
 
-`integer` 가 아닌 칸은 지금의 숫자 인식기에 보내지 않는다 — 잉크가 있으면 검수 대기다 (계기 칸은 `review serve --queue readings`).
+`integer` 가 아닌 칸은 숫자 인식기에 보내지 않는다. 설정 `[recognize.by_format]` 에 그 형식을 적으면 표의 칸을 소수·시각 인식기(`readings`)가
+읽는다 (ADR 0025 — 적힌 대로 읽고 정규화, 자동 적재는 칸의 기준과 가동 일보의 쪽 안 검산을 다 지나야). 적지 않았으면 잉크가 있을 때 검수
+대기다 (계기 칸은 `review serve --queue readings`).
 계기 칸의 규칙: 계기 값은 숫자 그대로(1234.5), 시각은 콜론으로(08:00) — 점으로 쓴 시각(08.00)도 콜론으로 입력. 숫자인지 시각인지는 사람이 정한다.
 
 ### 열의 종류 (`kind`)
@@ -205,7 +207,7 @@ fields:
 |---|---|
 | `printed` | 읽지 않는다. 행 메타에서 같은 이름의 값을 가져온다 (`rows[].<열 이름>`) |
 | `handwritten_text` | 잉크가 있으면 인식 백엔드로 보낸다 |
-| `handwritten_number` | 위와 같되 숫자로 해석한다. `haul` 핸들러는 글씨 덩어리 배정으로, `usage` 의 `meter`·`shifts`·`tally` 표는 덩어리 배정 **또는** 잉크 비율로 값 유무를 정한다 (인쇄 층이 있으면 인쇄를 뺀 그림으로). 형식이 `integer` 가 아니면 인식기에 보내지 않는다 |
+| `handwritten_number` | 위와 같되 숫자로 해석한다. `haul` 핸들러는 글씨 덩어리 배정으로, `usage` 의 `meter`·`shifts`·`tally` 표는 덩어리 배정 **또는** 잉크 비율로 값 유무를 정한다 (인쇄 층이 있으면 인쇄를 뺀 그림으로). 형식이 `integer` 가 아니면 `[recognize.by_format]` 에 적힌 형식일 때만 인식기(소수·시각)에 보낸다 |
 | `checkmark` | ✓ 유무. `inspection` 핸들러에서는 나란한 두 칸을 한 쌍으로 판정한다 |
 | `signature` | 유무만 기록한다 |
 

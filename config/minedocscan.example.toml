@@ -69,7 +69,7 @@ backend = "null"             # 등록된 인식 백엔드 이름 (minedocscan in
 # model = "digits-v1"        # 이름 또는 모델 폴더 경로. 없으면 run 이 시작할 때 멈춘다
 # auto_accept_conf = 0.97    # (선택) 모델 카드의 자동 적재 기준 대신. 우선순위: 이것 > 카드 > [pipeline] auto_accept_conf
 
-# 소수·시각 모델 (계기 값·시각·근무 시각 범위 — docs/DATA.md "소수·시각 모델"). by_format 에 "readings" 를 꽂으면 이 모델로 읽는다.
+# 소수·시각 모델 (계기 값·시각·근무 시각 범위 — docs/DATA.md "소수·시각 인식기"). by_format 에 "readings" 를 꽂으면 이 모델로 읽는다.
 # 숫자·메타 모델을 꽂으면 멈춘다 (카드의 reader 를 먼저 본다). site.toml 의 같은 항목보다 이 파일이 이긴다
 # [recognize.readings]
 # model = "readings-v1"      # 이름 또는 모델 폴더 경로
