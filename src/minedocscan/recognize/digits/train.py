@@ -37,12 +37,13 @@ from ...tools.synth_cells import CellParams, make_cell, plan_cells
 from . import calib, data
 from .model import (
     CHARS,
+    DIGITS,
     INPUT_H,
     INPUT_W,
     KINDS,
-    N_CLASSES,
     N_INPUT_CHANNELS,
     OnnxNet,
+    Shape,
     clean_orphan_staging,
     encode,
     log_softmax,
@@ -107,10 +108,11 @@ class TrainArgs:
 
 
 # ── 망 ────────────────────────────────────────────────────────────────────
-def build_net(torch, channels=(16, 32, 64, 64, 96)):
+def build_net(torch, channels=(16, 32, 64, 64, 96), shape: Shape = DIGITS):
     """합성곱·배치 정규화·ReLU·최대 풀링만. (1, N_INPUT_CHANNELS, INPUT_H, INPUT_W) = (1, 3, 32, 96) → (1, N_CLASSES, 1, T)
     = (1, 12, 1, 24) — 가로는 두 번 반으로 줄어 T = INPUT_W / 4.
-    세로는 최대 풀링으로 접는다 — 같은 자리를 학습되는 합성곱으로 접은 구조는 값 있는 칸 정확도가 0.2 에서 움직이지 않았다 (4.2)."""
+    세로는 최대 풀링으로 접는다 — 같은 자리를 학습되는 합성곱으로 접은 구조는 값 있는 칸 정확도가 0.2 에서 움직이지 않았다 (4.2).
+    shape: 글자·입력 (기본 숫자 모델 — 소수·시각 모델은 (1, 3, 48, 320) → (1, 16, 1, 80), tasks/0011 4.3)."""
     nn = torch.nn
     c1, c2, c3, c4, c5 = channels
 
@@ -118,19 +120,20 @@ def build_net(torch, channels=(16, 32, 64, 64, 96)):
         return [nn.Conv2d(i, o, k, padding=p, bias=False), nn.BatchNorm2d(o), nn.ReLU()]
 
     return nn.Sequential(
-        *cbr(N_INPUT_CHANNELS, c1), nn.MaxPool2d(2),
+        *cbr(shape.channels, c1), nn.MaxPool2d(2),
         *cbr(c1, c2), nn.MaxPool2d(2),
         *cbr(c2, c3), *cbr(c3, c4), nn.MaxPool2d((2, 1)),
-        *cbr(c4, c5), nn.MaxPool2d((INPUT_H // 8, 1)),
+        *cbr(c4, c5), nn.MaxPool2d((shape.height // 8, 1)),
         *cbr(c5, c5, (1, 3), (0, 1)),
-        nn.Conv2d(c5, N_CLASSES, 1),
+        nn.Conv2d(c5, shape.n_classes, 1),
     )
 
 
-def describe_net(channels) -> str:
+def describe_net(channels, shape: Shape = DIGITS) -> str:
     c1, c2, c3, c4, c5 = channels
     return (f"conv3x3({c1})-pool2-conv3x3({c2})-pool2-conv3x3({c3})-conv3x3({c4})-pool(2,1)-conv3x3({c5})"
-            f"-maxpool({INPUT_H // 8},1)-conv1x3({c5})-conv1x1({N_CLASSES}); 합성곱마다 BN+ReLU; CTC, T={INPUT_W // 4}")
+            f"-maxpool({shape.height // 8},1)-conv1x3({c5})-conv1x1({shape.n_classes}); 합성곱마다 BN+ReLU; CTC, "
+            f"T={shape.width // 4}")
 
 
 # ── 합성 셀 ────────────────────────────────────────────────────────────────
@@ -220,13 +223,13 @@ def _greedy(logits: np.ndarray) -> str:
     return normalize_answer("".join(out))
 
 
-def _torch_logits(torch, net, xs: np.ndarray, batch: int = 256) -> np.ndarray:
+def _torch_logits(torch, net, xs: np.ndarray, batch: int = 256, shape: Shape = DIGITS) -> np.ndarray:
     net.eval()
     outs = []
     with torch.no_grad():
         for i in range(0, len(xs), batch):
             outs.append(net(torch.from_numpy(xs[i:i + batch])).squeeze(2).numpy())
-    return np.concatenate(outs) if outs else np.zeros((0, N_CLASSES, INPUT_W // 4), np.float32)
+    return np.concatenate(outs) if outs else np.zeros((0, shape.n_classes, shape.width // 4), np.float32)
 
 
 def _log(msg: str) -> None:
@@ -467,14 +470,14 @@ def _geometry_of(samples: list[data.Sample], k: int = 6) -> list[tuple[int, int]
     return [g for g, _n in c.most_common(k)] or list(DEFAULT_GEOMETRY)
 
 
-def export_onnx(torch, net, path: Path) -> str:
+def export_onnx(torch, net, path: Path, shape: Shape = DIGITS) -> str:
     """배치 1 고정. 예전(TorchScript) 내보내기로 opset 13 — 오래된 OpenCV 도 읽는다. `dynamo` 인자가 없는 옛 torch(2.4 이하)는
     그것이 기본이고, 예전 내보내기가 없어진 torch 에서는 새 내보내기(opset 18). 어느 쪽이었는지 돌려준다."""
     import inspect
     import warnings
 
     params = inspect.signature(torch.onnx.export).parameters
-    x = torch.zeros(1, N_INPUT_CHANNELS, INPUT_H, INPUT_W)
+    x = torch.zeros(1, shape.channels, shape.height, shape.width)
     common = {"opset_version": 13, "input_names": ["x"], "output_names": ["logits"]}
     try:
         with warnings.catch_warnings(), redirect_stdout(io.StringIO()):
@@ -494,13 +497,13 @@ def _with_upper(row: dict) -> str:
     return f"{row['threshold']} (자동 적재 {row['auto']}칸 중 오류 {row['errors']}, 95 % 상한 {row['error_ci95'][1]:.1%})"
 
 
-def _check_export(torch, channels) -> None:
+def _check_export(torch, channels, shape: Shape = DIGITS) -> None:
     """학습하지 않은 망으로 ONNX 내보내기를 한 번 해 본다 — 이 torch 로 내보낼 수 없으면 학습 전에 멈춘다."""
     import tempfile
 
     with tempfile.TemporaryDirectory(prefix="minedocscan-export-") as tmp:
         try:
-            export_onnx(torch, build_net(torch, channels).eval(), Path(tmp) / "probe.onnx")
+            export_onnx(torch, build_net(torch, channels, shape).eval(), Path(tmp) / "probe.onnx", shape)
         except Exception as e:                              # noqa: BLE001 — 어떤 실패든 같은 안내로
             raise TrainError(f"이 torch({torch.__version__})로는 ONNX 를 내보낼 수 없습니다: {type(e).__name__}: {e} "
                              "— torch·onnx·onnxscript 판을 확인하세요 (pip install -e \".[train]\")") from e
