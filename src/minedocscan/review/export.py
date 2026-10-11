@@ -80,6 +80,14 @@ def inside_intake_folders(out: str | Path, settings, what: str = "내보낸 파�
     return None
 
 
+def inked_of(r) -> bool:
+    """내보낸 줄의 inked — 잉크 판정이 값 있음 → 인식기에 가는 칸 (검증·평가가 이 줄만 센다). 정수·글자 칸은 인식기에 간 칸
+    (backend 가 ink 가 아니다). 형식 칸(소수·시각)은 인식기에 갔거나(빈 칸으로 자동 적재한 칸도 — has_value_raw 0) 잉크 판정이 있는 칸
+    (tasks/0011 4.6) — 읽지 않는 형식의 칸은 늘 backend ink 라 기계의 값 유무 그대로다 (tasks/0005)."""
+    sent = (r["backend"] or "") != "ink"
+    return sent if r["format"] in (None, "integer") else (sent or r["has_value_raw"] == 1)
+
+
 def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split: str = "all", kind: str | None = None,
                  res: str = "auto", out_scale: float = 1.5, pad: int | None = None, allow_in_repo: bool = False,
                  include_illegible: bool = False) -> dict:
@@ -126,8 +134,7 @@ def export_crops(con: sqlite3.Connection, site, settings, out: str | Path, split
                 "verdict": rv.verdict, "template": r["template_name"], "region": r["region"], "field_name": r["field_name"],
                 "row_key": r["row_key"], "kind": r["kind"], "format": r["format"], "work_date": d, "split": sp,
                 "spec": spec.to_dict(),
-                # 잉크 판정이 값 있음 → 인식기에 가는 칸. 읽지 않는 형식(소수·시각)의 칸은 기계의 값 유무 그대로 (tasks/0005)
-                "inked": ((r["backend"] or "") != "ink") if r["format"] in (None, "integer") else r["has_value_raw"] == 1,
+                "inked": inked_of(r),
                 "resolution": src, "out_scale": out_scale, "pad": pd, "bbox": [r["x0"], r["y0"], r["x1"], r["y1"]],
                 "reviewer": rv.reviewer, "reviewed_at": rv.reviewed_at}, ensure_ascii=False) + "\n")
             written += 1

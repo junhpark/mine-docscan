@@ -272,15 +272,79 @@ def test_reprocess_invariant_long(world, seed):
     reprocess_fuzz(world, steps=40, seed=seed, damaged=True)
 
 
+class HashReader:
+    """형식 칸(소수·시각)을 읽는 가짜 백엔드 (tasks/0011): 크롭의 화소와 칸으로 정하는 답 — 같은 그림이면 다시 처리해도 같은 답.
+    값(점으로 쓴 시각 포함)·빈 칸·거절, 높고 낮은 신뢰도를 고루 — 칸의 규칙과 쪽 안 검산의 갈래가 다 나온다."""
+    name = "hash"
+    formats = ("decimal", "time", "time_range", "reading")
+    VALUES = {"reading": ["1234.5", "1240.5", "08.00", "17:00", "8.0", "1239.0"], "time_range": ["8-12", "13:00~17:00", "20:00~09:00"],
+              "decimal": ["1.5", "12.0"], "time": ["08:00", "17.30"]}
+
+    def recognize(self, crops, contexts):
+        import hashlib
+
+        from minedocscan.recognize import Recognition
+
+        out = []
+        for crop, c in zip(crops, contexts, strict=True):
+            h = int(hashlib.sha256(crop.tobytes() + c.field_id.encode()).hexdigest()[:12], 16)
+            conf = 0.5 if (h >> 8) % 5 == 0 else 0.99
+            mode = h % 8
+            if mode == 0:
+                out.append(Recognition("", conf, [], self.name, answer="empty"))
+            elif mode == 1:
+                out.append(Recognition("?", conf, ["?"], self.name, answer="reject"))
+            else:
+                vals = self.VALUES.get(c.fmt, ["1"])
+                text = vals[(h >> 4) % len(vals)]
+                out.append(Recognition(text, conf, [text], self.name, answer="value"))
+        return out
+
+
+@pytest.fixture
+def world_formats(bundles, tmp_path, monkeypatch):
+    """world 와 같은 묶음을 형식 칸을 읽는 인식기([recognize.by_format] 넷 — HashReader)로 처음부터 (tasks/0011 단계 1)."""
+    from conftest import BUNDLES, fast_imaging
+    from minedocscan.forms.sitepack import SitePack
+    from minedocscan.pipeline import Pipeline
+    from minedocscan.recognize import by_formats
+    from test_reprocess import copy_bundles, doc_ids, settings_for
+
+    fast_imaging(monkeypatch)
+    scans = copy_bundles(bundles, tmp_path / "scans", BUNDLES)
+    site = SitePack(bundles["site"])
+    st = settings_for(tmp_path, bundles["site"], scans)
+    rec = by_formats(HashReader(), HashReader.formats)
+    pipe = Pipeline(st, site=site, recognizer=rec)
+    pipe.run([scans])
+    return {"pipe": pipe, "site": site, "st": st, "scans": scans, "root": tmp_path, "ids": doc_ids(pipe.con),
+            "bundles": bundles, "recognizer": rec}
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", [11, 12, 13])
+def test_reprocess_invariant_reading_format_cells(world_formats, seed):
+    """형식 칸을 읽는 상태에서 계기·근무 시각 칸의 검수(값·빈 칸·읽을 수 없음)와 결정·다시 처리의 순서를 흔들어도 처음부터 만든 DB 와
+    같다 (tasks/0011 단계 1). 검수의 절반은 형식 칸에."""
+    con = world_formats["pipe"].con
+    got = {tuple(r) for r in con.execute("SELECT status_raw, has_value_raw FROM doc_field WHERE backend = 'hash'")}
+    assert {("auto", 1), ("auto", 0), ("pending", 1)} <= got                      # 자동 적재한 값·빈 칸, 검수 대기
+    gate = {k: v for k, v in world_formats["pipe"].summary["handlers"]["usage"].items() if k.startswith("format_gate_")}
+    assert sum(gate.values()) > 0                                                  # 쪽 안 검산이 내린 칸이 있다
+    reprocess_fuzz(world_formats, steps=20, seed=seed, format_cells=True)
+
+
 def reprocess_fuzz(world, steps: int, seed: int, fresh: bool = True, on_touched=None, after_step=None,
-                   damaged: bool = False) -> None:
+                   damaged: bool = False, format_cells: bool = False) -> None:
     """결정(날짜 바꾸기 — 다른 문서가 있는 날짜로도, 버리기, 되살리기 — 문서·쪽)과 검수(칸·차량번호·작성자)를 섞어 steps 번 넣고
     그때마다 대기 중인 문서를 처리한(watch 한 바퀴) DB 가 같은 파일·검수·결정으로 처음부터 만든 DB 와 같다. 묶음(conftest.BUNDLES)은
     2030-01-07 에 일보 문서 셋·점검표 두 쪽·T01 일보 두 쪽, 가동 일보 사흘. 없는 칸(버린 쪽)의 검수도 넣는다 — 되살리면 붙는다.
     fresh=False 면 처음부터 만든 DB 와 견주지 않는다. on_touched: 검수가 건드린 것을 받는 곳 (주면 save(touched=…)),
     after_step(step): 걸음마다 처리한 뒤에 부른다 — 통합 DB 싣기를 끼운 판 (test_publish_pg.py).
     damaged=True: 끝이 잘린 날짜 없는 이름의 PDF 하나를 더 넣고(failed) 문서 단위 결정의 절반쯤을 그 문서에 건다 — 버린 실패 문서
-    (tasks/0010 4.2). 쪽 수가 없는 문서라 쪽을 고르는 곳·쪽 결정에서는 뺀다. 주지 않으면 난수의 쓰임이 전과 같다."""
+    (tasks/0010 4.2). 쪽 수가 없는 문서라 쪽을 고르는 곳·쪽 결정에서는 뺀다. 주지 않으면 난수의 쓰임이 전과 같다.
+    format_cells=True: 칸 검수의 절반쯤을 형식 칸(소수·시각 — 계기·근무 시각)에 (tasks/0011). 처음부터 만드는 DB 도 world 의 인식기로
+    (world["recognizer"]). 주지 않으면 난수의 쓰임이 전과 같다."""
     from minedocscan.touched import Touched
 
     def save_(review):
@@ -302,8 +366,16 @@ def reprocess_fuzz(world, steps: int, seed: int, fresh: bool = True, on_touched=
     con = pipe.con
     docs = {r["document_id"]: r["n_pages"] for r in con.execute("SELECT document_id, n_pages FROM doc_document")}
     fields = {r["field_id"]: dict(r) for r in con.execute(
-        "SELECT f.field_id, f.kind, f.region, f.field_name, p.template_name FROM doc_field f JOIN doc_page p "
+        "SELECT f.field_id, f.kind, f.region, f.field_name, f.format, p.template_name FROM doc_field f JOIN doc_page p "
         "ON f.page_id = p.page_id WHERE f.kind LIKE 'handwritten%' AND f.region <> 'fields' ORDER BY f.field_id")}
+    fmt_fields = sorted(k for k, f in fields.items() if f["format"] not in (None, "integer"))
+    assert fmt_fields or not format_cells
+    # 자동 적재된 형식 값 칸 — 첫 형식 칸 검수 둘은 여기에 읽을 수 없음·값 (4.2 의 _state·machine_final 이 보는 길)
+    auto_fmt = [r[0] for r in con.execute(
+        "SELECT field_id FROM doc_field WHERE format NOT IN ('integer') AND format IS NOT NULL AND region <> 'fields' "
+        "AND status_raw = 'auto' AND has_value_raw = 1 ORDER BY field_id")] if format_cells else []
+    forced = [("illegible", auto_fmt[0]), ("value", auto_fmt[-1])] if auto_fmt else []
+    assert auto_fmt or not format_cells
     logs = [r[0] for r in con.execute("SELECT page_id FROM doc_page WHERE template_name = ? ORDER BY page_id", (T_LOG,))]
     days = ["2030-01-07", "2030-01-08", "2030-01-09", "2030-01-10"]
     samples = {None: ["3", "oil leak"], "integer": ["2", "11"], "decimal": ["1.5"], "time": ["08:00"],
@@ -325,8 +397,14 @@ def reprocess_fuzz(world, steps: int, seed: int, fresh: bool = True, on_touched=
         now = f"2030-01-10T{step // 60:02d}:{step % 60:02d}:00Z"
         doc = rng.choice(sorted(docs))
         page = f"{doc}-p{rng.randint(1, docs[doc])}"
-        if kind == "review":                                     # 칸 하나 — 지금 DB 에 없는 칸(버린 쪽)일 수도 있다
-            f = fields[rng.choice(sorted(fields))]
+        if kind == "review" and forced:                          # 자동 적재된 형식 값 칸에 (format_cells)
+            verdict, fid = forced.pop(0)
+            fmt = field_format(site, fields[fid]["template_name"], fields[fid]["region"], fields[fid]["field_name"])
+            value = samples.get(fmt, samples[None])[0] if verdict == "value" else ""
+            save_(Review(fid, verdict, value, "jp", reviewed_at=now))
+            done.append((kind, fid, verdict, value))
+        elif kind == "review":                                   # 칸 하나 — 지금 DB 에 없는 칸(버린 쪽)일 수도 있다
+            f = fields[rng.choice(fmt_fields if format_cells and rng.random() < 0.5 else sorted(fields))]
             verdict = rng.choice(["value", "value", "empty", "illegible"])
             fmt = field_format(site, f["template_name"], f["region"], f["field_name"])
             value = rng.choice(samples.get(fmt, samples[None])) if verdict == "value" else ""
@@ -356,11 +434,12 @@ def reprocess_fuzz(world, steps: int, seed: int, fresh: bool = True, on_touched=
             after_step(step)
         if not fresh:
             continue
-        other = fresh_of(st, site, world["scans"], world["root"], f"fresh{step}")
+        other = fresh_of(st, site, world["scans"], world["root"], f"fresh{step}", recognizer=world.get("recognizer"))
         assert_same(dump(con), dump(other.con), (seed, step, done[-3:]))
         other.con.close()
         shutil.rmtree(world["root"] / f"fresh{step}")
     assert {k for k, *_ in done} == set(kinds) or steps < len(kinds)
+    assert not forced                                            # format_cells: 자동 적재된 형식 값 칸의 읽을 수 없음·값을 넣었다
     assert bad is None or any(d[1] == bad for d in done)
     assert con.execute("SELECT COUNT(*) FROM xcheck_haul").fetchone()[0] > 0
     assert sum(con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in BUSINESS) > 0

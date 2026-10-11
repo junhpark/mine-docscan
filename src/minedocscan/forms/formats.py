@@ -42,6 +42,10 @@ _RANGE_SEP = re.compile(r"\s*[~-]\s*")
 DOTTED_CLOCK = re.compile(r"^([0-9]{1,2})\.([0-9]{2})$")
 CLOCK_MAX_MINUTE = 59                  # 분은 00–59 — 08.75 는 시각이 아니다
 CLOCK_MAX_DAY_MINUTES = 24 * 60        # 24.00 까지 (하루의 끝) — 24.30·25.30 은 시각이 아니다
+# 시각의 시가 될 수 있는 가장 큰 수 (24). 계기 값의 시작·종료가 둘 다 이 아래면 점으로 쓴 시각을 소수로 읽었을 수 있다 —
+# report 의 usage_dotted_suspect 와 쪽 안 검산(handlers/usage.page_gate ⑤)이 같은 수를 쓴다
+CLOCK_MAX_HOUR = CLOCK_MAX_DAY_MINUTES // 60
+SPELLINGS_MAX = 128                    # 한 값의 표기 수의 상한 (시각 범위: 양쪽 8 × 8 × 구분 2)
 
 
 # 한글 입력기가 낼 수 있는 전각 글자 → ASCII (숫자, 콜론, 점, 물결, 붙임표)
@@ -109,6 +113,48 @@ def dotted_clock(text: str | None) -> str | None:
 def dotted_clock_rule() -> dict:
     """검수 화면에 보내는 dotted_clock 의 규칙: 정규식(원문)과 분·하루의 상한. 화면의 dottedClock 은 이것만 쓴다 — 수를 따로 적지 않는다."""
     return {"pattern": DOTTED_CLOCK.pattern, "max_minute": CLOCK_MAX_MINUTE, "max_day_minutes": CLOCK_MAX_DAY_MINUTES}
+
+
+def spellings(fmt: str | None, value: str) -> list[str]:
+    """정규화한 값 하나가 될 수 있는, 사람이 종이에 쓰는 글자들 (tasks/0011 4.4 — 기계는 적힌 대로 읽는다, 검수는 정규형만 남긴다).
+    첫째가 정규형, 순서는 정해져 있고 같은 글자는 한 번, 많아야 SPELLINGS_MAX 개. 모두 same_value(fmt, 글자, value) 가 참이다.
+
+      decimal, reading 의 계기 값   그 값 하나
+      time                          시 08·8 × (:mm, .mm, mm — 0800·800), 분이 00 이면 시만(08·8)도
+      reading 의 시각               08:00·8:00·08.00·8.00 — 점은 사람이 시각으로 정한 것이다 (ADR 0015)
+      time_range                    양쪽의 time 표기 × ~·-
+    빈 값("")은 [""] (빈 칸의 정답), 정규형이 아닌 값은 그 값 하나."""
+    v = "" if value is None else str(value)
+    if v == "" or fmt not in ("time", "time_range", "reading"):
+        return [v]
+    if fmt == "reading":
+        if reading_kind(v) != "clock" or minutes(v) is None:
+            return [v]
+        hh, mm = v.split(":")
+        return _unique([f"{hh}:{mm}", f"{int(hh)}:{mm}", f"{hh}.{mm}", f"{int(hh)}.{mm}"])
+    if fmt == "time":
+        return _time_spellings(v) or [v]
+    if "~" not in v:
+        return [v]
+    a, b = (_time_spellings(x) for x in v.split("~", 1))
+    if not a or not b:
+        return [v]
+    return _unique([f"{x}{sep}{y}" for sep in ("~", "-") for x in a for y in b])[:SPELLINGS_MAX]
+
+
+def same_value(fmt: str | None, written: str | None, value: str | None) -> bool:
+    """적힌 글자(기계가 읽은 것)가 정규화한 값과 같은 값인가: normalize(fmt, 글자) == 값, 또는 reading 칸이고 점으로 쓴 시각
+    (dotted_clock(글자) == 값). 빈 글자는 빈 값과만 같다. 기계 값의 평가에만 쓴다 — 사람이 넣은 최종 값의 계기 값 8.00 을
+    시각 정답 08:00 과 같다고 하지 않는다 (tasks/0011 4.4)."""
+    w = "" if written is None else str(written).strip()
+    if value in (None, "") or w == "":
+        return w == ("" if value is None else str(value))
+    try:
+        if normalize(fmt, w) == value:
+            return True
+    except FormatError:
+        pass
+    return fmt == "reading" and dotted_clock(w) == value
 
 
 def try_normalize(fmt: str | None, text: str | None) -> str | None:
@@ -190,6 +236,21 @@ def _time(t: str, dots: bool) -> str:
     if h > 24 or (h == 24 and mi > 0):
         raise FormatError(f"24:00 을 넘는 시각: {t!r}")
     return f"{h:02d}:{mi:02d}"
+
+
+def _time_spellings(v: str) -> list[str]:
+    """정규화한 시각(HH:MM) 하나의 표기들 (spellings 의 time). 시각이 아니면 []."""
+    if minutes(v) is None:
+        return []
+    hh, mm = v.split(":")
+    out = [f"{h}{sep}{mm}" for sep in (":", ".", "") for h in (hh, str(int(hh)))]
+    if mm == "00":
+        out += [hh, str(int(hh))]
+    return _unique(out)
+
+
+def _unique(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(items))
 
 
 def _range(t: str) -> tuple[str, str]:

@@ -411,13 +411,13 @@ def cmd_info(a) -> int:
     if "error" in rec:
         lines.append(f"인식기: 준비할 수 없습니다 — {rec['error']}")
     else:
-        for kind, d in rec["by_kind"].items():
+        for label, d in [*rec["by_kind"].items(), *(rec.get("by_format") or {}).items()]:
             m = (f" — 모델 {d['model']} ({d['path']}), 규격 {d['spec']}, 자동 적재 기준 "
                  f"{d['auto_accept_conf'] if d['auto_accept_conf'] is not None else '없음'} ({d['auto_accept_source']}"
                  + (f", 검증 오류율 95 % 상한 {d['auto_accept_upper95']:.1%}" if d.get("auto_accept_upper95") is not None else "")
                  + "), "
                  f"학습 셀 {d['train_cells']} + 합성 {d['synthetic_cells']}") if "model" in d else ""
-            lines.append(f"인식기 [{kind}]: {d['backend']}{m}")
+            lines.append(f"인식기 [{label}]: {d['backend']}{m}")
     mr = data["meta_readers"]
     if "error" in mr:
         lines.append(f"메타 필드: 준비할 수 없습니다 — {mr['error']}")
@@ -500,7 +500,8 @@ def _print_sha(t) -> str | None:
 
 
 def _describe_recognizer(s: Settings, site) -> dict:
-    """info: 칸 종류마다 어느 백엔드가 받는지, 숫자 모델이면 이름·규격·자동 적재 기준·학습 셀 수."""
+    """info: 칸 종류마다 어느 백엔드가 받는지, 숫자 모델이면 이름·규격·자동 적재 기준·학습 셀 수. [recognize.by_format] 이 있으면
+    형식마다 같은 꼴로 (by_format — 적힌 형식만, tasks/0011 4.1). 없으면 키가 없다 (예전과 같다)."""
     from .recognize import KINDS, build_recognizer
 
     try:
@@ -515,7 +516,11 @@ def _describe_recognizer(s: Settings, site) -> dict:
         return d
 
     backend_for = getattr(rec, "backend_for", lambda _k: rec)
-    return {"by_kind": {k: one(backend_for(k)) for k in KINDS}}
+    out = {"by_kind": {k: one(backend_for(k)) for k in KINDS}}
+    by_format = getattr(rec, "by_format", None) or {}
+    if by_format:
+        out["by_format"] = {f: one(b) for f, b in by_format.items()}
+    return out
 
 
 def _describe_meta(s: Settings, site) -> dict:
@@ -531,7 +536,7 @@ def _describe_meta(s: Settings, site) -> dict:
 
 def cmd_run(a) -> int:
     from .pipeline import Pipeline
-    from .recognize import OracleRecognizer, load_answers_json
+    from .recognize import OracleRecognizer, by_formats, load_answers_json
     from .report import build_report, format_report, xcheck_by_date
 
     s = _settings(a, recognizer=a.recognizer, corrector=a.corrector)
@@ -546,6 +551,10 @@ def cmd_run(a) -> int:
 
             answers |= load_answers(a.inspection_csv, site.templates[_only_inspection_template(site)])
         recognizer = OracleRecognizer(answers, site=site)       # 동시 판의 정답은 계열로 (tasks/0006 4.6)
+        try:        # [recognize.by_format] 이 있으면 그 형식들의 칸도 정답으로 읽는다 (tasks/0011 4.1 — 적힌 백엔드 이름과 상관없이)
+            recognizer = by_formats(recognizer, s.recognizer_by_format)
+        except ValueError as e:
+            raise SystemExit(f"인식 백엔드를 준비할 수 없습니다: {e}") from e
     elif s.recognizer == "oracle":
         raise SystemExit("oracle 백엔드는 --answers 또는 --inspection-csv 가 필요합니다")
     else:

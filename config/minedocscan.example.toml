@@ -58,6 +58,12 @@ backend = "null"             # 등록된 인식 백엔드 이름 (minedocscan in
 # [recognize.by_kind]
 # handwritten_number = "digits"
 
+# 값의 형식마다 (decimal | time | time_range | reading — 정수 칸은 by_kind). 적힌 형식의 표 칸만 기계가 읽는다 (없으면 읽지 않고,
+# 글씨가 있으면 검수 대기). 우선순위: by_format > by_kind > backend. 그 형식을 읽는다고 선언한 백엔드만 — 아니면 시작할 때 멈춘다
+# [recognize.by_format]
+# reading    = "readings"
+# time_range = "readings"
+
 # 숫자 인식기 (docs/DATA.md "숫자 인식기"). 모델은 사이트 팩의 models/<이름>/ — site.toml 의 같은 항목보다 이 파일이 이긴다
 # [recognize.digits]
 # model = "digits-v1"        # 이름 또는 모델 폴더 경로. 없으면 run 이 시작할 때 멈춘다

@@ -14,6 +14,7 @@ import numpy as np
 
 from ..config import Settings
 from ..correct import Corrector
+from ..forms.formats import FormatError, dotted_clock, is_valid, normalize
 from ..forms.sitepack import SitePack
 from ..forms.template import Template
 from ..imaging.cells import CellObs
@@ -89,10 +90,10 @@ def recognize(ctx: PageContext, cells: list[CellObs], choices: dict[str, list[st
     source = f"{ctx.source_name}#{ctx.page_no}"
     contexts = [CellContext(ctx.template.name, o.cell.region, o.cell.name, o.cell.kind, o.cell.row_key,
                             ctx.work_date, ctx.page_id, source, (choices or {}).get(o.cell.name, []),
-                            field_id=field_id(ctx, o))
+                            field_id=field_id(ctx, o), fmt=o.cell.fmt, bbox=tuple(o.cell.bbox))
                 for o in cells]
     images = ctx.images or PageImages(aligned=ctx.aligned)
-    crops = [crop_cell(images, o.cell.bbox, spec_for(ctx.recognizer, o.cell.kind)) for o in cells]
+    crops = [crop_cell(images, o.cell.bbox, spec_for(ctx.recognizer, o.cell.kind, o.cell.fmt)) for o in cells]
     recs = ctx.recognizer.recognize(crops, contexts)
     return ctx.corrector.correct(recs, contexts)
 
@@ -151,6 +152,62 @@ def number_row(ctx: PageContext, o: CellObs, r: Recognition | None, max_value: i
                      candidates=r.candidates if r else None, backend=r.backend if r else "ink", review_status=status)
 
 
+def reads_format(recognizer, fmt: str | None) -> bool:
+    """형식 칸(소수·시각)을 인식기에 보내는가 (tasks/0011 4.1): 그 인식기가 가진 형식의 표([recognize.by_format] — ByKindRecognizer.
+    by_format)에 fmt 가 있을 때만. 감싸지 않은 인식기(null·oracle·digits)는 늘 거짓 — 지금처럼 잉크가 있으면 검수 대기(unread_row).
+    정수·글자 칸(readable)은 이 함수와 상관없이 지금의 길로 간다. 범위는 표의 칸 — 표 밖 필드(fields)는 부르는 쪽이 뺀다."""
+    return fmt is not None and fmt in (getattr(recognizer, "by_format", None) or {})
+
+
+def format_row(ctx: PageContext, o: CellObs, r: Recognition, empty_final: str | None) -> dict:
+    """인식기가 읽은 형식 칸(decimal·time·time_range·reading)의 doc_field 행 — tasks/0011 4.2 의 표. 기준 t:
+
+      빈 칸                                신뢰도 ≥ t → 값 없음으로 자동 적재(value_final = empty_final)   그 밖 → 검수 대기
+      거절("?")                            검수 대기
+      값, reading 칸에 점으로 쓴 시각       검수 대기 — 계기 값인지 시각인지는 사람이 정한다 (ADR 0015)
+      값                                   신뢰도 ≥ t → normalize(형식, 적힌 글자)로 자동 적재              그 밖 → 검수 대기
+    답의 종류를 말하지 않는 백엔드(oracle — r.answer None)는 글자가 형식에 맞으면 값, 아니면(빈 글자 포함) 검수 대기.
+    value_raw 는 적힌 대로 읽은 글자(08.00, 8-12). 검수 대기인 형식 칸의 value_final 은 NULL 이다 — 정수 칸과 달리 가동 시간·계기
+    검산이 기계의 추측으로 계산되지 않게 (ADR 0016). empty_final: 그 핸들러가 빈 칸에 쓰는 값 (generic "", usage None).
+    쪽 안 검산(usage 의 page_gate)이 이 뒤에 auto 인 값 칸을 내릴 수 있다. machine_final(format_final)이 같은 규칙이다."""
+    fmt = o.cell.fmt
+    sure = r.confidence >= auto_threshold(r, ctx.settings)
+    has, status, final = True, "pending", None
+    if r.answer == "empty":
+        if sure:
+            has, status, final = False, "auto", empty_final
+    elif r.answer in ("value", None):
+        dotted = fmt == "reading" and dotted_clock(r.text) is not None
+        if sure and not dotted and is_valid(fmt, r.text):
+            status, final = "auto", normalize(fmt, r.text)
+    return field_row(ctx, o, has_value=has, value_raw=r.text, value_final=final, confidence=r.confidence,
+                     candidates=r.candidates, backend=r.backend, review_status=status)
+
+
+def is_format_row(row) -> bool:
+    """doc_field 행이 형식 칸(소수·시각 — 정수·글자가 아닌 것)인가."""
+    return row["format"] not in (None, "integer")
+
+
+def is_table_format_row(row) -> bool:
+    """표의 형식 칸 — format_row·unread_row 가 만드는 행 (표 밖 필드는 형식의 길로 읽지 않는다, 4.1)."""
+    return is_format_row(row) and row["region"] != "fields"
+
+
+def format_final(row, empty_final: str | None) -> str | None:
+    """형식 칸의 기계만으로 정한 value_final — format_row·쪽 안 검산과 같다: 기계가 검수로 보냈으면(status_raw pending) NULL,
+    자동 적재한 값이면 normalize(형식, value_raw), 자동 적재한 빈 칸이면 empty_final. 읽지 않은 칸(설정하지 않은 상태 — unread_row,
+    잉크 없는 칸)에서도 지금과 같은 값이 나온다 (pending → NULL, 잉크 없는 칸 → empty_final)."""
+    if row["status_raw"] == "pending":
+        return None
+    if row["has_value_raw"]:
+        try:
+            return normalize(row["format"], row["value_raw"])
+        except FormatError:
+            return None
+    return empty_final
+
+
 class FormHandler:
     """기본 핸들러: 모든 셀을 doc_field 에만 적재한다 (업무 테이블 없음)."""
 
@@ -179,10 +236,15 @@ class FormHandler:
         inked = [o for o in hw if o.ink >= self.text_ink_min]
         filled = [o for o in inked if readable(o.cell)]
         recs = dict(zip([id(o) for o in filled], recognize(ctx, filled), strict=True))
+        # 형식 칸(소수·시각)은 [recognize.by_format] 에 적힌 형식이고 표의 칸일 때만 읽는다 (tasks/0011 4.1). 따로 부른다 — 숫자 칸의 묶음은 그대로
+        fmts = [o for o in inked if not readable(o.cell) and o.cell.region != "fields" and reads_format(ctx.recognizer, o.cell.fmt)]
+        frecs = dict(zip([id(o) for o in fmts], recognize(ctx, fmts), strict=True))
         rows = []
         for o in hw:
             r = recs.get(id(o))
-            if r is None and o.ink >= self.text_ink_min:   # 잉크는 있는데 읽지 않는 형식(소수·시각 …): 검수 대기 (tasks/0005 4.1)
+            if id(o) in frecs:   # 형식 칸: 4.2 의 표 (빈 칸은 지금처럼 "")
+                rows.append(format_row(ctx, o, frecs[id(o)], empty_final=""))
+            elif r is None and o.ink >= self.text_ink_min:   # 잉크는 있는데 읽지 않는 형식(소수·시각 …): 검수 대기 (tasks/0005 4.1)
                 rows.append(unread_row(ctx, o))
             elif r is None:      # 잉크가 없으면 빈 셀로 확정
                 rows.append(field_row(ctx, o, has_value=False, value_raw="", value_final="", confidence=1.0,
@@ -206,7 +268,11 @@ class FormHandler:
         return {}
 
     def machine_final(self, row: dict) -> str | None:
-        """기계만으로 정했을 때의 value_final. 검수를 다시 적용하기 전에 행을 기계 상태로 되돌릴 때 쓴다."""
+        """기계만으로 정했을 때의 value_final. 검수를 다시 적용하기 전에 행을 기계 상태로 되돌릴 때 쓴다.
+        표의 형식 칸은 형식을 먼저 본다 (format_final — 빈 칸은 load 처럼 value_raw 의 ""). 표 밖 필드는 형식이 있어도 value_raw —
+        형식의 길로 읽지 않고, 메타 모델이 읽은 필드는 value_raw 가 그대로 value_final 이다 (pipeline 의 _meta_field_row)."""
+        if is_table_format_row(row):
+            return format_final(row, row["value_raw"])
         return row["value_raw"]
 
     def export_cells(self, template, fields: dict[str, dict]) -> tuple[dict[str, str], list[str]]:
@@ -223,13 +289,15 @@ class FormHandler:
 
 
 def readable(cell) -> bool:
-    """인식기에 보내는 칸인가: 형식이 없거나(글자) integer 인 칸만. 소수·시각·계기 칸은 지금의 숫자 모델이 읽지 못한다 —
-    보내지 않고, 잉크가 있으면 검수 대기다 (tasks/0005 4.1. 소수·시각을 읽는 것은 미룸 — tasks/0006 1절)."""
+    """정수·글자 경로로 인식기에 보내는 칸인가: 형식이 없거나(글자) integer 인 칸. 소수·시각·계기 칸은 숫자 모델이 읽지 못한다 —
+    [recognize.by_format] 에 적힌 형식의 표 칸만 형식 경로(reads_format → format_row — tasks/0011)로 읽고, 그 밖은 잉크가 있으면
+    검수 대기다 (tasks/0005 4.1). 자가 시험도 이 함수로 "읽는 칸"을 고른다 (기본 설정 — 형식 칸을 읽지 않는다)."""
     return cell.fmt in (None, "integer")
 
 
 def unread_row(ctx: PageContext, o: CellObs) -> dict:
-    """잉크는 있지만 읽지 않은 칸: 값 있음 + 검수 대기, 기계 값 없음 (value_raw·value_final NULL — machine_final 과 같다)."""
+    """잉크는 있지만 읽지 않은 칸(읽도록 설정하지 않은 형식 칸, 표 밖 필드의 형식 칸): 값 있음 + 검수 대기, 기계 값 없음
+    (value_raw·value_final NULL — machine_final 과 같다)."""
     return field_row(ctx, o, has_value=True, value_raw=None, value_final=None, confidence=None, candidates=None,
                      backend="ink", review_status="pending")
 

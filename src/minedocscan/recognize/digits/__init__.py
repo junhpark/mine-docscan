@@ -21,3 +21,6 @@ def make(settings=None, site=None):
     from .backend import DigitsRecognizer
 
     return DigitsRecognizer.from_settings(settings, site)
+
+
+make.formats = ()          # 소수·시각을 읽지 않는다 — [recognize.by_format] 에 꽂으면 모델을 찾기 전에 멈춘다 (recognize.build_recognizer)
