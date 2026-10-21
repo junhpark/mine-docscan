@@ -43,6 +43,7 @@ class Settings:
     dpi: int = 200                       # 템플릿 좌표계의 해상도. 템플릿을 만든 해상도와 같아야 한다
     recognizer: str = "null"             # recognize.REGISTRY 의 이름 — 기본 백엔드
     recognizer_by_kind: dict = field(default_factory=dict)   # [recognize.by_kind] 칸 종류 → 백엔드 이름
+    recognizer_by_format: dict = field(default_factory=dict)  # [recognize.by_format] 값의 형식 → 백엔드 이름 (tasks/0011 4.1)
     recognizer_options: dict = field(default_factory=dict)   # [recognize.<백엔드>] 표 — 예: {"digits": {"model": "digits-v1"}}
     corrector: str = "none"              # correct.REGISTRY 의 이름
     auto_accept_conf: float = 0.90       # 이 신뢰도 이상이면 검수 없이 적재
@@ -150,6 +151,9 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
     by_kind = rec.get("by_kind", {}) or {}
     if not isinstance(by_kind, dict):
         raise ConfigError(f"[recognize.by_kind] 는 표여야 합니다 ({path})")
+    by_format = rec.get("by_format", {}) or {}
+    if not isinstance(by_format, dict) or not all(isinstance(v, str) for v in by_format.values()):
+        raise ConfigError(f"[recognize.by_format] 는 형식 = \"백엔드 이름\" 의 표여야 합니다 ({path})")
     s = Settings(
         archive_root=_p(paths.get("archive_root")),
         work_root=_p(paths.get("work_root")) or Path("work"),
@@ -159,7 +163,8 @@ def load_settings(config_path: str | os.PathLike | None = None, **overrides) -> 
         dpi=_number(pipe, "dpi", 200, int, "[pipeline] dpi", lo=50, hi=1200),
         recognizer=str(rec.get("backend", "null")),
         recognizer_by_kind=dict(by_kind),
-        recognizer_options={k: dict(v) for k, v in rec.items() if isinstance(v, dict) and k != "by_kind"},
+        recognizer_by_format=dict(by_format),
+        recognizer_options={k: dict(v) for k, v in rec.items() if isinstance(v, dict) and k not in ("by_kind", "by_format")},
         corrector=str(_table(raw, "correct", path).get("backend", "none")),
         auto_accept_conf=_number(pipe, "auto_accept_conf", 0.90, float, "[pipeline] auto_accept_conf", lo=0.0, hi=1.0),
         classify_min_margin=_number(pipe, "classify_min_margin", 1.5, float, "[pipeline] classify_min_margin", lo=0.0),

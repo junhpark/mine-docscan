@@ -25,6 +25,9 @@ from ..forms.template import Template
 from ..store.db import upsert
 
 TOLERANCE = 0.05            # 계기 값의 허용 오차(시간): 소수 한 자리의 반올림 (tasks/0005 9절의 기본값)
+# 하루의 상한(시간): 장비 한 대의 하루 가동은 24시간을 넘을 수 없다 — 현장에 따라 다르지 않으므로 site.toml 이 아니라 상수.
+# 하루 두 장이면 장마다 본다 (쪽 하나 안에서만 — 순서에 기대지 않는다). 형식 칸의 자동 적재를 막는 쪽 안 검산(handlers/usage.page_gate)
+DAY_HOURS = 24
 KINDS = ("total", "subtotal", "continuity")
 PAGE_KINDS = ("total", "subtotal")
 
@@ -45,12 +48,19 @@ def page_checks(con: sqlite3.Connection, tpl: Template | None, page_id: str) -> 
     out = []
     s, e, t = u["meter_start"], u["meter_end"], u["meter_total"]
     if s is not None and e is not None and t is not None:
-        d = round(t - (e - s), 4)
-        out.append(_row(u, "total", "", t, round(e - s, 4), d, "match" if abs(d) <= TOLERANCE else "mismatch",
+        span, d, ok = total_check(s, e, t)
+        out.append(_row(u, "total", "", t, span, d, "match" if ok else "mismatch",
                         field_a=u["total_field_id"], field_b=u["end_field_id"]))
     if tpl is not None:
         out += _subtotal_checks(con, tpl, u)
     return out
+
+
+def total_check(start: float, end: float, total: float) -> tuple[float, float, bool]:
+    """총 = 종료 − 시작 의 검산 하나: (종료 − 시작, 총 − (종료 − 시작), 맞는가) — 반올림 round(·, 4), 허용 오차 TOLERANCE.
+    쪽 안 검산(page_checks)과 형식 칸의 자동 적재를 막는 쪽 안 검산(handlers/usage.page_gate)이 같은 함수를 쓴다 (tasks/0011 4.2)."""
+    d = round(total - (end - start), 4)
+    return round(end - start, 4), d, abs(d) <= TOLERANCE
 
 
 def _subtotal_checks(con, tpl: Template, u) -> list[dict]:

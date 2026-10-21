@@ -10,6 +10,8 @@ only_listed=True 로 정답에 있는 셀만 평가한다.
 
 target:  final = value_final (교정·검수 후 최종값),  raw = value_raw (기계가 읽은 값).
 검수값과 비교할 때는 raw 를 쓴다 — final 은 검수값 자신이라 언제나 맞는다.
+값은 정규화한 표기로 견준다 (8:00 = 08:00). 기계가 적힌 대로 읽은 글자(value_raw)는 formats.same_value 로 — 계기 칸에 점으로 쓴
+시각(08.00)을 시각 정답(08:00)과 같다고 본다 (tasks/0011 4.4). 사람이 넣은 최종 값(final)에는 그렇게 봐주지 않는다.
 
 정답이 빈 칸인 셀과 값이 있는 셀의 정확도를 따로 낸다. 빈 칸이 대부분이라 합치면 인식기의 성적이 가려진다.
 
@@ -22,7 +24,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from ..forms.formats import default_format, try_normalize
+from ..forms.formats import default_format, same_value, try_normalize
 from .metrics import auto_rate, corpus_cer, field_accuracy, normalize
 from .stats import wilson
 
@@ -66,10 +68,11 @@ def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final
         gkey = f"{r[3]}/{r[7]}" + ("" if fmt == default_format(r[7]) else f"/{fmt}")
         g = groups.setdefault(gkey, {"pairs": [], "statuses": [], "machine": []})
         truth = try_normalize(fmt, answers.get(key, "")) or ""   # 정규화한 표기로 비교한다 (8:00 = 08:00, 01234.5 = 1234.5)
-        g["pairs"].append((try_normalize(fmt, r[8] or "") or "", truth))
+        got = r[8] or ""
+        g["pairs"].append((machine_text(fmt, got, truth) if target == "raw" else try_normalize(fmt, got) or "", truth))
         g["statuses"].append(r[10] or r[9])                     # 자동 적재율은 기계가 정한 상태(status_raw)로 — 검수와 무관
         machine = (r[13] or "") if r[12] else ""                 # 기계가 값 없음으로 정했으면 빈 칸
-        g["machine"].append((r[10], r[11], try_normalize(fmt, machine) or "", truth))
+        g["machine"].append((r[10], r[11], machine_text(fmt, machine, truth), truth))
 
     def summarize(pairs, statuses, machine) -> dict:
         valued = [p for p in pairs if normalize(p[1])]
@@ -88,6 +91,13 @@ def evaluate_fields(con: sqlite3.Connection, answers: dict, target: str = "final
     out["answers_not_in_db"] = len(set(answers) - seen)      # 페이지가 적재되지 않아 비교하지 못한 정답
     out["by_field_kind"] = {k: summarize(g["pairs"], g["statuses"], g["machine"]) for k, g in sorted(groups.items())}
     return out
+
+
+def machine_text(fmt: str | None, text: str, truth: str) -> str:
+    """기계가 읽은 글자 → 견줄 표기: 정규화한 표기, 다만 정답과 같은 값(formats.same_value — 점으로 쓴 시각)이면 정답 그대로.
+    null·oracle 의 기계 값(빈 글자, 정규형)에는 차이가 없다."""
+    t = try_normalize(fmt, text) or ""
+    return truth if truth and t != truth and same_value(fmt, text, truth) else t
 
 
 def auto_error(machine: list[tuple]) -> dict:

@@ -1,0 +1,640 @@
+{
+ "name": "readings-fixture",
+ "created_at": "2026-10-11T03:55:14Z",
+ "code_version": {
+  "minedocscan": "1.0.1",
+  "git": "d94a826"
+ },
+ "reader": "readings",
+ "formats": [
+  "decimal",
+  "time",
+  "time_range",
+  "reading"
+ ],
+ "spec": {
+  "res": "source",
+  "scale": 1.5,
+  "pad": "auto"
+ },
+ "input": {
+  "width": 320,
+  "height": 48,
+  "channels": 3,
+  "band": {
+   "min_area": 4,
+   "side_in": 8,
+   "overlap": 0.3,
+   "trim": 0.01,
+   "margin": 0.15,
+   "min_margin": 3,
+   "side": 0.25,
+   "min_side": 4,
+   "join_gap": 4,
+   "tail_max": 0.4,
+   "over_h": 0.3,
+   "over_max": 0.25,
+   "height": 48,
+   "width": 320
+  },
+  "preprocess": "recognize/readings/model.py: band → channels (잉크, 세로 위치(띠), 가로 위치(칸))"
+ },
+ "chars": "0123456789.:~-?",
+ "architecture": {
+  "layers": "conv3x3(16)-pool2-conv3x3(32)-pool2-conv3x3(64)-conv3x3(64)-pool(2,1)-conv3x3(96)-maxpool(6,1)-conv1x3(96)-conv1x1(16); 합성곱마다 BN+ReLU; CTC, T=80",
+  "channels": [
+   16,
+   32,
+   64,
+   64,
+   96
+  ],
+  "params": 145568,
+  "onnx_bytes": 583504,
+  "exporter": "torchscript, opset 13",
+  "batch": 1,
+  "beam": 32
+ },
+ "train_args": {
+  "steps": 4000,
+  "batch": 32,
+  "lr": 0.004,
+  "synthetic": 12000,
+  "val_share": 0.2,
+  "target_auto_error": 0.01,
+  "min_val_auto": 100,
+  "channels": [
+   16,
+   32,
+   64,
+   64,
+   96
+  ],
+  "eval_every": 500,
+  "real_share": 0.5,
+  "cv": null,
+  "geometry": {
+   "reading": [
+    [
+     410,
+     38
+    ],
+    [
+     310,
+     38
+    ],
+    [
+     362,
+     38
+    ],
+    [
+     112,
+     51
+    ],
+    [
+     200,
+     51
+    ],
+    [
+     297,
+     51
+    ]
+   ],
+   "time_range": [
+    [
+     432,
+     52
+    ],
+    [
+     308,
+     62
+    ],
+    [
+     308,
+     99
+    ]
+   ],
+   "decimal": [
+    [
+     192,
+     82
+    ],
+    [
+     180,
+     40
+    ]
+   ],
+   "time": [
+    [
+     212,
+     82
+    ],
+    [
+     150,
+     40
+    ]
+   ]
+  },
+  "augment": "이동 ±4%/±6%, 크기 0.9–1.1, 회전 ±3°, 기울임 ±0.12, 대비 0.7–1.2, 밝기 ±0.1, 흐림·잡음 30%; 뒤집기 없음",
+  "loss": "−log Σ P(표기) — 실제 칸은 formats.spellings 의 표기 모두, 합성 칸은 적힌 글자 하나",
+  "mix": "합성만"
+ },
+ "seed": 0,
+ "data": {
+  "crops": null,
+  "train": {
+   "cells": 0,
+   "dates": 0,
+   "by_verdict": {},
+   "by_format": {},
+   "by_shape": {}
+  },
+  "val": {
+   "cells": 0,
+   "dates": 0,
+   "by_verdict": {},
+   "by_format": {},
+   "by_shape": {}
+  },
+  "synthetic": {
+   "cells": 12000,
+   "geometry": {
+    "reading": [
+     [
+      410,
+      38
+     ],
+     [
+      310,
+      38
+     ],
+     [
+      362,
+      38
+     ],
+     [
+      112,
+      51
+     ],
+     [
+      200,
+      51
+     ],
+     [
+      297,
+      51
+     ]
+    ],
+    "time_range": [
+     [
+      432,
+      52
+     ],
+     [
+      308,
+      62
+     ],
+     [
+      308,
+      99
+     ]
+    ],
+    "decimal": [
+     [
+      192,
+      82
+     ],
+     [
+      180,
+      40
+     ]
+    ],
+    "time": [
+     [
+      212,
+      82
+     ],
+     [
+      150,
+      40
+     ]
+    ]
+   },
+   "val_cells": 946,
+   "kinds": {
+    "blank": 672,
+    "note": 600,
+    "overwrite": 360,
+    "printed": 768,
+    "scribble": 480,
+    "spill": 960,
+    "value": 7440,
+    "x": 720
+   }
+  },
+  "val_rule": {
+   "salt": "synthetic:val",
+   "share": 0.2,
+   "rule": "sha256(salt:날짜) 앞 32비트 / 2^32 < share 이면 검증 (evaluate/split.py)"
+  }
+ },
+ "validation": {
+  "source": "synthetic",
+  "method": "val_dates",
+  "cv": null,
+  "cells": 946,
+  "excluded_no_ink": 0,
+  "best_step": 4000,
+  "score": {
+   "n": 946,
+   "all": {
+    "n": 946,
+    "correct": 887,
+    "accuracy": 0.9376
+   },
+   "value": {
+    "n": 618,
+    "correct": 595,
+    "accuracy": 0.9628
+   },
+   "empty": {
+    "n": 293,
+    "correct": 289,
+    "accuracy": 0.9863
+   },
+   "illegible": {
+    "n": 35,
+    "correct": 3,
+    "accuracy": 0.0857
+   },
+   "dotted": 30,
+   "auto": {
+    "n": 415,
+    "rate": 0.4387,
+    "errors": 4,
+    "error_rate": 0.0096,
+    "error_ci95": [
+     0.0038,
+     0.0245
+    ]
+   },
+   "by_format": {
+    "decimal": {
+     "n": 88,
+     "all": {
+      "n": 88,
+      "correct": 83,
+      "accuracy": 0.9432
+     },
+     "value": {
+      "n": 62,
+      "correct": 61,
+      "accuracy": 0.9839
+     },
+     "empty": {
+      "n": 22,
+      "correct": 22,
+      "accuracy": 1.0
+     },
+     "illegible": {
+      "n": 4,
+      "correct": 0,
+      "accuracy": 0.0
+     },
+     "dotted": 0,
+     "auto": {
+      "n": 42,
+      "rate": 0.4773,
+      "errors": 2,
+      "error_rate": 0.0476,
+      "error_ci95": [
+       0.0132,
+       0.1579
+      ]
+     }
+    },
+    "time": {
+     "n": 88,
+     "all": {
+      "n": 88,
+      "correct": 82,
+      "accuracy": 0.9318
+     },
+     "value": {
+      "n": 62,
+      "correct": 60,
+      "accuracy": 0.9677
+     },
+     "empty": {
+      "n": 22,
+      "correct": 22,
+      "accuracy": 1.0
+     },
+     "illegible": {
+      "n": 4,
+      "correct": 0,
+      "accuracy": 0.0
+     },
+     "dotted": 0,
+     "auto": {
+      "n": 53,
+      "rate": 0.6023,
+      "errors": 1,
+      "error_rate": 0.0189,
+      "error_ci95": [
+       0.0033,
+       0.0994
+      ]
+     }
+    },
+    "time_range": {
+     "n": 288,
+     "all": {
+      "n": 288,
+      "correct": 272,
+      "accuracy": 0.9444
+     },
+     "value": {
+      "n": 186,
+      "correct": 179,
+      "accuracy": 0.9624
+     },
+     "empty": {
+      "n": 93,
+      "correct": 92,
+      "accuracy": 0.9892
+     },
+     "illegible": {
+      "n": 9,
+      "correct": 1,
+      "accuracy": 0.1111
+     },
+     "dotted": 0,
+     "auto": {
+      "n": 109,
+      "rate": 0.3785,
+      "errors": 1,
+      "error_rate": 0.0092,
+      "error_ci95": [
+       0.0016,
+       0.0501
+      ]
+     }
+    },
+    "reading": {
+     "n": 482,
+     "all": {
+      "n": 482,
+      "correct": 450,
+      "accuracy": 0.9336
+     },
+     "value": {
+      "n": 308,
+      "correct": 295,
+      "accuracy": 0.9578
+     },
+     "empty": {
+      "n": 156,
+      "correct": 153,
+      "accuracy": 0.9808
+     },
+     "illegible": {
+      "n": 18,
+      "correct": 2,
+      "accuracy": 0.1111
+     },
+     "dotted": 30,
+     "auto": {
+      "n": 211,
+      "rate": 0.4378,
+      "errors": 0,
+      "error_rate": 0.0,
+      "error_ci95": [
+       0.0,
+       0.0179
+      ]
+     }
+    }
+   }
+  },
+  "train_seconds": 734.3,
+  "total_seconds": 810.1,
+  "export_check": {
+   "max_abs_diff": 1.71661376953125e-05,
+   "same_answers": true,
+   "cells": 64
+  },
+  "calibration": {
+   "cells": 946,
+   "pairs": 946,
+   "nll_at_1": 1.09982,
+   "nll": 1.09238,
+   "seconds": 2.22
+  }
+ },
+ "temperature": 1.1,
+ "auto_accept": {
+  "target": 0.01,
+  "threshold": 0.8,
+  "met": true,
+  "reason": null,
+  "min_auto": 100,
+  "auto": 415,
+  "errors": 4,
+  "upper95": 0.0245,
+  "basis": "검증 칸 (synthetic)",
+  "rule": "오류율(자동 적재된 칸 중 정답과 다른 비율)이 목표 이하인 가장 낮은 임계값. 대상 = 값(점으로 쓴 시각이 아닌 것)과 빈 칸, 맞았는가 = formats.same_value (tasks/0011 4.3)",
+  "table": [
+   {
+    "threshold": 0.5,
+    "auto": 825,
+    "auto_value": 543,
+    "auto_empty": 282,
+    "auto_rate": 0.8721,
+    "errors": 27,
+    "error_rate": 0.0327,
+    "error_ci95": [
+     0.0226,
+     0.0472
+    ]
+   },
+   {
+    "threshold": 0.6,
+    "auto": 754,
+    "auto_value": 474,
+    "auto_empty": 280,
+    "auto_rate": 0.797,
+    "errors": 20,
+    "error_rate": 0.0265,
+    "error_ci95": [
+     0.0172,
+     0.0406
+    ]
+   },
+   {
+    "threshold": 0.7,
+    "auto": 623,
+    "auto_value": 346,
+    "auto_empty": 277,
+    "auto_rate": 0.6586,
+    "errors": 13,
+    "error_rate": 0.0209,
+    "error_ci95": [
+     0.0122,
+     0.0354
+    ]
+   },
+   {
+    "threshold": 0.8,
+    "auto": 415,
+    "auto_value": 145,
+    "auto_empty": 270,
+    "auto_rate": 0.4387,
+    "errors": 4,
+    "error_rate": 0.0096,
+    "error_ci95": [
+     0.0038,
+     0.0245
+    ]
+   },
+   {
+    "threshold": 0.85,
+    "auto": 330,
+    "auto_value": 62,
+    "auto_empty": 268,
+    "auto_rate": 0.3488,
+    "errors": 1,
+    "error_rate": 0.003,
+    "error_ci95": [
+     0.0005,
+     0.017
+    ]
+   },
+   {
+    "threshold": 0.9,
+    "auto": 285,
+    "auto_value": 19,
+    "auto_empty": 266,
+    "auto_rate": 0.3013,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0133
+    ]
+   },
+   {
+    "threshold": 0.93,
+    "auto": 271,
+    "auto_value": 5,
+    "auto_empty": 266,
+    "auto_rate": 0.2865,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.014
+    ]
+   },
+   {
+    "threshold": 0.95,
+    "auto": 265,
+    "auto_value": 3,
+    "auto_empty": 262,
+    "auto_rate": 0.2801,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0143
+    ]
+   },
+   {
+    "threshold": 0.97,
+    "auto": 255,
+    "auto_value": 0,
+    "auto_empty": 255,
+    "auto_rate": 0.2696,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0148
+    ]
+   },
+   {
+    "threshold": 0.98,
+    "auto": 251,
+    "auto_value": 0,
+    "auto_empty": 251,
+    "auto_rate": 0.2653,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0151
+    ]
+   },
+   {
+    "threshold": 0.99,
+    "auto": 227,
+    "auto_value": 0,
+    "auto_empty": 227,
+    "auto_rate": 0.24,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0166
+    ]
+   },
+   {
+    "threshold": 0.995,
+    "auto": 199,
+    "auto_value": 0,
+    "auto_empty": 199,
+    "auto_rate": 0.2104,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0189
+    ]
+   },
+   {
+    "threshold": 0.998,
+    "auto": 148,
+    "auto_value": 0,
+    "auto_empty": 148,
+    "auto_rate": 0.1564,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.0253
+    ]
+   },
+   {
+    "threshold": 0.999,
+    "auto": 103,
+    "auto_value": 0,
+    "auto_empty": 103,
+    "auto_rate": 0.1089,
+    "errors": 0,
+    "error_rate": 0.0,
+    "error_ci95": [
+     0.0,
+     0.036
+    ]
+   }
+  ]
+ },
+ "libraries": {
+  "python": "3.11.15",
+  "torch": "2.14.1+cu130",
+  "onnx": "1.23.1",
+  "numpy": "2.4.6",
+  "opencv": "5.0.0"
+ },
+ "model_sha256": "2de648ce4fb0e285278ffe741e512092654eff1544c71a4d481f2cdcc283de3c"
+}

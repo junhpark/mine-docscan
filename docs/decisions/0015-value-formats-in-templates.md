@@ -2,6 +2,9 @@
 
 상태: 채택 (2026-10). 작업 지시서 [tasks/0005](../tasks/0005-usage-logs.md) 4.1.
 
+고침 (2026-10, [tasks/0011](../tasks/0011-reading-decimals-and-times.md) — [ADR 0025](0025-reading-decimals-and-times.md)): 결정 5 — 설정(`[recognize.by_format]`)이
+있으면 기계가 소수·시각을 읽는다. 계기 칸에 점으로 쓴 시각은 여전히 사람이 정한다 (기계가 읽어도 늘 검수 대기).
+
 ## 상황
 
 지금까지 손으로 쓰는 칸은 두 가지였다: 정수(`handwritten_number` — 운반 횟수)와 글자(`handwritten_text`). 장비 가동 일보에는 그 밖의 값이 있다.

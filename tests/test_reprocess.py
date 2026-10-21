@@ -79,9 +79,9 @@ def decide(pipe, items: list[dict]) -> dict:
     return decs.save(pipe.con, pipe.settings.decisions_path(pipe.site.root), items, "jp", received=RECEIVED)
 
 
-def fresh_of(st: Settings, site: SitePack, scans: Path, root: Path, name: str) -> Pipeline:
-    """같은 파일·같은 검수·같은 결정으로 처음부터 (새 WORK_ROOT)."""
-    p = Pipeline(replace(st, archive_root=scans, work_root=root / name), site=site)
+def fresh_of(st: Settings, site: SitePack, scans: Path, root: Path, name: str, recognizer=None) -> Pipeline:
+    """같은 파일·같은 검수·같은 결정으로 처음부터 (새 WORK_ROOT). recognizer: 지금의 DB 를 만든 것과 같은 인식기 (없으면 설정의 것)."""
+    p = Pipeline(replace(st, archive_root=scans, work_root=root / name), site=site, recognizer=recognizer)
     p.run([scans])
     return p
 

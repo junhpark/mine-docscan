@@ -13,6 +13,7 @@ class NullRecognizer:
     """인식기가 없을 때의 자리표시자: 빈 텍스트, 신뢰도 0 → 잉크가 있는 셀은 전부 검수 대상이 된다."""
 
     name = "null"
+    formats = ()                     # 형식 칸을 읽지 않는다 ([recognize.by_format] 에 꽂으면 멈춘다)
 
     def recognize(self, crops, contexts: list[CellContext]) -> list[Recognition]:
         return [Recognition("", 0.0, [], self.name) for _ in contexts]
@@ -33,6 +34,7 @@ class OracleRecognizer:
     """
 
     name = "oracle"
+    formats = ("decimal", "time", "time_range", "reading")    # 정답이면 무엇이든 (run --answers + [recognize.by_format])
 
     def __init__(self, answers: dict[AnswerKey, str] | None = None, site=None):
         self.answers = answers or {}

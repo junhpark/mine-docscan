@@ -6,10 +6,14 @@
 크롭의 규격(imaging/cropspec.CropSpec)은 백엔드가 선언한다 (tasks/0003 4.1):
   crop_spec = CropSpec(...)              속성으로 — 모든 칸에 그 규격
   crop_spec_for(kind) -> CropSpec|None   메서드로 — 칸 종류마다 (종류별로 나눠 주는 ByKindRecognizer 가 쓴다)
+  crop_spec_for(kind, fmt=None)          형식도 보는 백엔드 (tasks/0011 4.1 — 형식을 모르는 백엔드는 지금처럼 종류로)
 선언하지 않으면 DEFAULT_SPEC(정합 이미지, 칸 그대로)을 받는다 — null·oracle 이 그렇다.
+
+읽는 형식은 `formats`(속성 — 예: ("reading", "time_range"))로 선언한다. 선언하지 않으면 형식 칸을 읽지 않는 백엔드다.
 """
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -29,6 +33,8 @@ class CellContext:
     choices: list[str] = field(default_factory=list)   # 닫힌 집합이면 그 목록 (예: 운전자 명단)
     hints: list[str] = field(default_factory=list)     # 같은 행의 최근 값·반복 문구 (문구 DB)
     field_id: str = ""               # doc_field 의 키 (시험·진단용. 인식기가 값을 정하는 데 쓰지 않는다)
+    fmt: str | None = None           # 칸의 값의 형식 (integer, decimal, time, time_range, reading — 글자 칸은 None)
+    bbox: tuple[int, int, int, int] | None = None   # 칸의 자리 (템플릿 좌표) — 크롭 안의 칸 자리를 규격으로 계산할 때
 
 
 @dataclass
@@ -50,10 +56,22 @@ class Recognizer(Protocol):
     def recognize(self, crops: list[np.ndarray], contexts: list[CellContext]) -> list[Recognition]: ...
 
 
-def spec_for(recognizer, kind: str):
-    """그 백엔드가 그 종류의 칸에 원하는 크롭 규격. 선언이 없으면 DEFAULT_SPEC."""
+def spec_for(recognizer, kind: str, fmt: str | None = None):
+    """그 백엔드가 그 종류(·형식)의 칸에 원하는 크롭 규격. 선언이 없으면 DEFAULT_SPEC.
+    형식을 받지 않는 crop_spec_for(kind) 에는 종류만 넘긴다 (숫자 모델 — 지금과 같다)."""
     from ..imaging.cropspec import DEFAULT_SPEC
 
     fn = getattr(recognizer, "crop_spec_for", None)
-    spec = fn(kind) if callable(fn) else getattr(recognizer, "crop_spec", None)
+    if callable(fn):
+        spec = fn(kind, fmt) if fmt is not None and _takes_fmt(fn) else fn(kind)
+    else:
+        spec = getattr(recognizer, "crop_spec", None)
     return spec or DEFAULT_SPEC
+
+
+def _takes_fmt(fn) -> bool:
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "fmt" in params or any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params.values())

@@ -123,28 +123,33 @@ def moved(gray: np.ndarray, dx: float, dy: float, deg: float) -> np.ndarray:
     return cv2.warpAffine(gray, m, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=255)
 
 
-def stats(v: list[float]) -> dict:
-    if not v:
-        return {"n": 0, "median": None, "p5": None, "min": None, "max": None}
-    a = np.asarray(v, np.float64)
-    return {"n": len(v), "median": round(float(np.median(a)), 4), "p5": round(float(np.percentile(a, 5)), 4),
+def stats(v: list[float | None]) -> dict:
+    """분포 (n·중앙·5 %·최소·최대). 비교할 수 없는 쌍(유사도 None — 서명이 전부 0 인 쪽, 판·모양이 다른 서명)은 분포에서 빼고 따로
+    센다(none). 0.0 으로 세면 실제 110쪽 중 그런 3쪽 때문에 최소·5 % 가 0.0 으로 보였다 (tasks/0011 4.8)."""
+    none = sum(x is None for x in v)
+    a = np.asarray([x for x in v if x is not None], np.float64)
+    if not len(a):
+        return {"n": 0, "none": none, "median": None, "p5": None, "min": None, "max": None}
+    return {"n": len(a), "none": none, "median": round(float(np.median(a)), 4), "p5": round(float(np.percentile(a, 5)), 4),
             "min": round(float(a.min()), 4), "max": round(float(a.max()), 4)}
 
 
-def _sim(a, b) -> float:
-    s = sigs.similarity(a, b)
-    return 0.0 if s is None else s
+def _sim(a, b) -> float | None:
+    return sigs.similarity(a, b)
 
 
 def measure(pages: list[dict], rescans: list[tuple[int, int]], others: list[tuple[int, int]]) -> dict:
-    """pages: [{"gray", "tpl"}]. rescans·others: pages 의 번호 쌍. 돌려주는 값: 후보마다 {경우: 분포, rescan, other, ms, chars}."""
+    """pages: [{"gray", "tpl"}]. rescans·others: pages 의 번호 쌍. 돌려주는 값: 후보마다 {경우: 분포, rescan, other, ms, chars,
+    no_signature — 서명을 견줄 수 없는 쪽(None 이거나 전부 0 — 빈 쪽)의 수}. 분포의 none 은 견줄 수 없는 쌍의 수다."""
     out = {}
     bins = [binarize(p["gray"]) for p in pages]
     for name, fn in CANDIDATES.items():
         t0 = time.perf_counter()
         base = [fn(b, p["tpl"]) for b, p in zip(bins, pages, strict=True)]
         ms = (time.perf_counter() - t0) * 1000 / max(1, len(pages))
-        r = {"ms": round(ms, 2), "chars": int(np.mean([len(sigs.encode(s)) for s in base])) if base else 0}
+        made = [x for x in base if x is not None]
+        r = {"ms": round(ms, 2), "chars": int(np.mean([len(sigs.encode(x)) for x in made])) if made else 0,
+             "no_signature": sum(x is None or not np.any(x) for x in base)}
         for case, (dx, dy, deg) in CASES.items():
             r[case] = stats([_sim(base[i], fn(binarize(moved(p["gray"], dx, dy, deg)), p["tpl"]))
                              for i, p in enumerate(pages) if p.get("original", True)])
@@ -153,8 +158,12 @@ def measure(pages: list[dict], rescans: list[tuple[int, int]], others: list[tupl
         out[name] = r
     v1 = out["v1"]
     for r in out.values():
-        r["ok"] = bool(all(r[c]["n"] and r[c]["p5"] >= P5_MIN and r[c]["min"] >= MIN_MIN for c in JUDGED)
-                       and (not r["rescan"]["n"] or r["rescan"]["min"] >= RESCAN_MIN)
+        # 견줄 수 없는 다시 스캔 쌍은 실패다 — 현장의 dup_min_sim 도 그 쪽을 붙잡지 못한다. 옮기고 돌린 경우에 v1 보다 견줄 수 없는 쪽이
+        # 늘어난 후보도 (분포에서 빠진 쪽 덕에 통과하지 않게).
+        rs = r["rescan"]
+        r["ok"] = bool(all(r[c]["n"] and r[c]["p5"] >= P5_MIN and r[c]["min"] >= MIN_MIN and r[c]["none"] <= v1[c]["none"]
+                           for c in JUDGED)
+                       and not rs["none"] and (not rs["n"] or rs["min"] >= RESCAN_MIN)
                        and (not r["other"]["n"] or r["other"]["max"] <= v1["other"]["max"] + OTHER_RISE)
                        and r["ms"] <= COST * v1["ms"] + 1.0 and r["chars"] <= COST * v1["chars"])
     return out
@@ -230,7 +239,8 @@ def lines(res: dict, head: dict) -> list:
         row = [("cand", name), ("ok", r["ok"])]
         for c in CASES:
             row += [(f"{c}_p5", r[c]["p5"]), (f"{c}_min", r[c]["min"])]
-        row += [("rescan_min", r["rescan"]["min"]), ("other_max", r["other"]["max"]), ("ms", r["ms"]), ("chars", r["chars"])]
+        row += [("rescan_min", r["rescan"]["min"]), ("other_max", r["other"]["max"]), ("ms", r["ms"]), ("chars", r["chars"]),
+                ("no_sig", r.get("no_signature", 0)), ("none", sum(r[c].get("none", 0) for c in (*CASES, "rescan", "other")))]
         out.append(row)
     return out
 
@@ -265,7 +275,8 @@ def main(argv: list[str] | None = None) -> int:
         a.out.write_text(json.dumps(doc, indent=1), encoding="utf-8")
     for name, r in res.items():
         print(f"{name:16s} ok={int(r['ok'])} " + " ".join(f"{c}={r[c]['p5']}/{r[c]['min']}" for c in CASES)
-              + f" rescan_min={r['rescan']['min']} other_max={r['other']['max']} ms={r['ms']} chars={r['chars']}")
+              + f" rescan_min={r['rescan']['min']} other_max={r['other']['max']} ms={r['ms']} chars={r['chars']}"
+              + f" no_sig={r['no_signature']} none={sum(r[c].get('none', 0) for c in (*CASES, 'rescan', 'other'))}")
     if a.synthetic:
         print(notice(f"sig_probe {sys.platform}", *lines(res, {k: str(v).replace(" ", "") for k, v in head.items()})))
     return 0

@@ -42,3 +42,20 @@ minedocscan recognizer train --meta-key operator --synthetic-meta 100 --name met
 ```
 
 합성 100일 × 6명. 검증 날짜(20 %)를 읽은 168번으로 기준을 정한다.
+
+## readings-fixture/ — 소수·시각 시험용 모델 (계기 값, 시각, 근무 시각 범위)
+
+합성 형식 칸(`tools/synth_readings.py` — 계기 값·콜론·점으로 쓴 시각, 근무 시각 범위, 인쇄된 이름표와 `~`, 이웃 칸의 글씨, X 표·덧칠·메모,
+덧쓴 숫자)만으로 학습한 모델 (tasks/0011 단계 2). torch 없는 시험에서 글씨 띠·형식으로 고르는 해독·쪽 안 검산·자동 적재 규칙을 돌린다.
+손글씨 인식률과는 관계가 없다.
+
+```bash
+minedocscan recognizer train --readings --name readings-fixture \
+    --synthetic-geometry reading=410x38,reading=310x38,reading=362x38,reading=112x51,reading=200x51,reading=297x51,time_range=432x52,time_range=308x62,time_range=308x99,decimal=192x82,decimal=180x40,time=212x82,time=150x40 \
+    --out tests/fixtures/readings-fixture --allow-in-repo
+```
+
+칸 크기는 합성 가동 일보의 칸(계기 410×38·310×38·362×38, 근무 시각 432×52 — 템플릿 bbox), 실제 가동 일보의 칸(1절 나 — 계기 폭 112–297 × 51,
+근무 시각 308 × 62·99), V2 의 유류일지·환경일지 칸이다 (이 목록이 `--readings` 의 기본값이기도 하다). 합성 검증 칸 1,000 (잉크 없는 빈 칸을 빼면 946) 으로 온도·기준을 정한다.
+CI 의 `pytest -m train` 이 다시 만든 모델로 단계 2 의 문턱을 확인한다 (바이트까지 같을 필요는 없다).
+

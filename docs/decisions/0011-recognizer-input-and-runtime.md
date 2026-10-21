@@ -2,6 +2,10 @@
 
 상태: 채택 (2026-10). 작업 지시서 [tasks/0003](../tasks/0003-digit-recognizer.md) 4.1, 4.2, 4.5.
 
+고침 (2026-10, [tasks/0011](../tasks/0011-reading-decimals-and-times.md) — [ADR 0025](0025-reading-decimals-and-times.md)): 인식기는 칸의 형식과 자리를 안다(`CellContext.fmt`·`bbox`),
+크롭 규격은 그 칸을 읽는 백엔드의 것(`crop_spec_for(kind, fmt)`), 백엔드는 읽는 형식을 선언한다(`formats`). 소수·시각 모델 `readings` 는
+같은 망·같은 규격·같은 런타임이다.
+
 ## 상황
 
 첫 인식기(운반 횟수 숫자)를 학습해 붙인다. 학습 데이터는 검수값으로 만든 크롭(`review export-crops`)이고, 운용에서는 파이프라인이

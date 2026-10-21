@@ -21,6 +21,7 @@ import math
 import os
 import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -36,6 +37,23 @@ KINDS = ("handwritten_number",)            # 이 모델이 읽는 칸 종류
 TOP_K = 5                                  # 후보로 남기는 답의 수 (9절 기본값)
 CARD_KEYS = ("name", "created_at", "code_version", "spec", "input", "chars", "kinds", "architecture", "train_args",
              "seed", "data", "validation", "temperature", "auto_accept", "libraries", "model_sha256")
+
+
+@dataclass(frozen=True)
+class Shape:
+    """글자와 입력 — 같은 망·학습 코드를 숫자 모델과 소수·시각 모델(recognize/readings, tasks/0011 4.3)이 같이 쓴다.
+    인자로 받는 곳(beam_search, OnnxNet, train.build_net·export_onnx)의 기본값은 숫자 모델의 것이다 — 숫자 모델은 그대로."""
+    chars: str
+    width: int
+    height: int
+    channels: int = N_INPUT_CHANNELS
+
+    @property
+    def n_classes(self) -> int:
+        return 1 + len(self.chars)
+
+
+DIGITS = Shape(CHARS, INPUT_W, INPUT_H)
 
 
 # ── 입력 ───────────────────────────────────────────────────────────────────
@@ -61,14 +79,19 @@ def normalize(small: np.ndarray, position: bool = True) -> np.ndarray:
     """모델 입력 크기의 회색조 → (3, H, W) float32: 잉크 채널, 세로 위치, 가로 위치.
     잉크 = (종이 - 화소) / 대비. 종이는 중앙값, 대비는 종이와 가장 진한 1 % 의 차 — 단 48 미만으로는 두지 않는다
     (거의 빈 칸에서 종이의 잡음을 잉크로 키우지 않게. 연한 잉크는 최대 약 5배까지 키운다)."""
-    g = small.astype(np.float32)
-    paper = float(np.median(g))
-    dark = float(np.percentile(g, 1))
-    ink = np.clip((paper - g) / max(paper - dark, 48.0), -0.3, 1.2)
+    ink = ink_channel(small)
     if not position:                         # 메타 필드 모델: 위치 채널을 0 으로 (meta/train.py — 넓은 필드에서 지름길이 되었다)
         z = np.zeros_like(_YS)
         return np.stack([ink, z, z]).astype(np.float32)
     return np.stack([ink, _YS, _XS]).astype(np.float32)
+
+
+def ink_channel(small: np.ndarray) -> np.ndarray:
+    """회색조 → 잉크 채널 (float32): (종이 − 화소) / 대비 (normalize 의 설명). 소수·시각 모델의 글씨 띠도 같은 식."""
+    g = small.astype(np.float32)
+    paper = float(np.median(g))
+    dark = float(np.percentile(g, 1))
+    return np.clip((paper - g) / max(paper - dark, 48.0), -0.3, 1.2)
 
 
 def preprocess(crop: np.ndarray, position: bool = True) -> np.ndarray:
@@ -112,9 +135,10 @@ def _lse(a: float, b: float) -> float:
     return m + math.log(math.exp(a - m) + math.exp(b - m))
 
 
-def beam_search(logp: np.ndarray, beam: int = 12, prune: float = -10.0) -> list[tuple[str, float]]:
+def beam_search(logp: np.ndarray, beam: int = 12, prune: float = -10.0, chars: str = CHARS) -> list[tuple[str, float]]:
     """CTC 접두사 빔 탐색. (T, C) 로그 확률 → [(문자열, 로그 확률)] 확률순. 확률은 그 문자열로 접히는 경로의 합이다
-    (빔에서 떨어진 경로만큼 조금 모자랄 수 있다). prune: 한 칸에서 이보다 낮은 로그 확률의 문자는 보지 않는다."""
+    (빔에서 떨어진 경로만큼 조금 모자랄 수 있다). prune: 한 칸에서 이보다 낮은 로그 확률의 문자는 보지 않는다.
+    chars: blank 다음부터의 글자 (기본 숫자 모델 — 소수·시각 모델은 readings.model.CHARS)."""
     beams: dict[tuple[int, ...], tuple[float, float]] = {(): (0.0, -math.inf)}     # 접두사 → (blank 로 끝남, 문자로 끝남)
     for t in range(logp.shape[0]):
         lp = logp[t]
@@ -134,7 +158,7 @@ def beam_search(logp: np.ndarray, beam: int = 12, prune: float = -10.0) -> list[
                     ext[1] = _lse(ext[1], tot + lp[c])
         ranked = sorted(nxt.items(), key=lambda kv: -_lse(*kv[1]))[:beam]
         beams = {k: (v[0], v[1]) for k, v in ranked}
-    out = [("".join(CHARS[c - 1] for c in p), _lse(pb, pnb)) for p, (pb, pnb) in beams.items()]
+    out = [("".join(chars[c - 1] for c in p), _lse(pb, pnb)) for p, (pb, pnb) in beams.items()]
     return sorted(out, key=lambda x: -x[1])
 
 
@@ -151,19 +175,20 @@ def read_answers(logits: np.ndarray, temperature: float = 1.0, top: int = TOP_K)
 class OnnxNet:
     """model.onnx 를 cv2.dnn 으로 읽는다. 배치는 1 로 고정해 내보냈다 (동적 배치는 cv2.dnn 에서 출력 모양이 달라졌다 — 4.2)."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, n_classes: int = N_CLASSES):
         self.path = Path(path)
+        self.n_classes = int(n_classes)
         self.net = cv2.dnn.readNetFromONNX(str(self.path))
 
     def logits(self, x: np.ndarray) -> np.ndarray:
         """(1, 3, H, W) → (C, T)."""
         self.net.setInput(np.ascontiguousarray(x, dtype=np.float32))
         out = np.asarray(self.net.forward())
-        return out.reshape(N_CLASSES, -1)
+        return out.reshape(self.n_classes, -1)
 
     def logits_many(self, xs: np.ndarray) -> np.ndarray:
         """(N, 3, H, W) → (N, C, T), 한 장씩."""
-        return np.stack([self.logits(x[None]) for x in xs]) if len(xs) else np.zeros((0, N_CLASSES, 0), np.float32)
+        return np.stack([self.logits(x[None]) for x in xs]) if len(xs) else np.zeros((0, self.n_classes, 0), np.float32)
 
 
 # ── 모델 폴더와 카드 ────────────────────────────────────────────────────────
@@ -204,6 +229,9 @@ def resolve_model(ref: str, site_root: str | Path | None) -> Path:
 def load_card(model_dir: str | Path, check_hash: bool = True) -> dict:
     d = Path(model_dir)
     card = json.loads((d / "card.json").read_text(encoding="utf-8"))
+    if card.get("reader") == "readings":                   # 갈래를 먼저 본다 (tasks/0011 4.3) — 글자가 다르다는 엉뚱한 말 대신
+        raise ValueError(f"'{card.get('name', d.name)}' 은 소수·시각 모델입니다 — [recognize.readings] 에 꽂으세요 "
+                         "([recognize.digits]·[recognize.meta] 가 아니라)")
     lacking = [k for k in CARD_KEYS if k not in card]
     if lacking:
         raise ValueError(f"모델 카드에 항목이 없습니다: {lacking} ({d / 'card.json'})")
@@ -294,6 +322,19 @@ def list_models(site_root: str | Path) -> list[dict]:
                "val_empty_acc": None}
         try:
             raw = json.loads((d / "card.json").read_text(encoding="utf-8")) if (d / "card.json").is_file() else {}
+            if raw.get("reader") == "readings":                # 소수·시각 모델 (tasks/0011): 갈래를 먼저 본다
+                from ..readings.model import load_card as load_readings
+
+                card = load_readings(d)
+                aa, v, dt = card["auto_accept"], card["validation"], card["data"]
+                row.update(created_at=card["created_at"], spec=CropSpec.from_dict(card["spec"]).describe(),
+                           threshold=(f"{aa['threshold']} (상한 {aa['upper95']:.1%})" if aa.get("met") else "없음"),
+                           train_cells=dt["train"]["cells"], train_dates=dt["train"]["dates"],
+                           synthetic_cells=dt["synthetic"]["cells"], val_source=v["source"], val_cells=v["cells"],
+                           val_value_acc=v["score"]["value"]["accuracy"], val_empty_acc=v["score"]["empty"]["accuracy"],
+                           reader="readings", formats=card["formats"])
+                out.append(row)
+                continue
             if raw.get("meta"):                                # 메타 필드 모델 (tasks/0004): 읽는 법·키, 읽기 수치
                 from ..meta.model import MetaModel
 

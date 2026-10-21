@@ -16,7 +16,7 @@
 ## 범위
 
 이 저장소는 **1단계 소프트웨어**다: 스캐너 → 인식 → 데이터베이스. 독립 소프트웨어로 등록할 예정이므로
-혼자서 설치·실행·시험이 되어야 한다 — 현장 PC 는 윈도우이고 외부망이 없어 오프라인 설치 묶음과 자가 시험으로 한다 (판 1.0.1, ADR 0024).
+혼자서 설치·실행·시험이 되어야 한다 — 현장 PC 는 윈도우이고 외부망이 없어 오프라인 설치 묶음과 자가 시험으로 한다 (판 1.1.0, ADR 0024).
 2단계(통합 DB, 입력 체계, 시각화)는 이 저장소가 통합 DB(PostgreSQL)에 실은 업무 테이블
 (`insp_*`, `prod_*`, `xcheck_*`, `eq_*`)의 사본을 읽어 가는 별도 작업이다 (ADR 0021). 2단계 기능을 여기에 넣지 않는다.
 작업 DB 는 로컬 SQLite 그대로다. 엑셀·통합 DB·가린 쪽 그림은 DB 에서 만든 **사본**이다 — 한 방향 (ADR 0022).
@@ -31,8 +31,9 @@ pip install -e ".[dev]"
 
 pytest                      # 합성 양식으로 전체 시험 (약 7–8분, 실데이터·torch 불필요)
 pytest -m slow              # 무거운 시험 (다시 처리·엑셀의 흔들기, 합성 접수 시나리오, 돌린 쪽의 비교, 엑셀 끝에서 끝까지, 가린 그림, 60일 복제의
-                            # 읽은 행 수, V2 의 거친 글씨·템플릿 도구로 만든 템플릿, 자가 시험 깨뜨리기, 설명서의 명령 보기 test_manual — CI 의 slow 작업)
-pytest -m train             # 숫자 인식기 학습 시험 (torch 필요: pip install -e ".[train]", 몇 분)
+                            # 읽은 행 수, V2 의 거친 글씨·템플릿 도구로 만든 템플릿, 자가 시험 깨뜨리기, 설명서의 명령 보기 test_manual,
+                            # 소수·시각 모델의 2,000칸·글씨 띠, 가동 일보 15일치를 읽기 — CI 의 slow 작업)
+pytest -m train             # 인식기 학습 시험 (torch 필요: pip install -e ".[train]" — 숫자·메타 몇 분, 소수·시각 모델의 재현 약 13분)
 ruff check .
 
 minedocscan synth out/demo                  # 개인정보 없는 합성 사이트 팩 + 스캔 + 정답
@@ -55,6 +56,12 @@ minedocscan recognizer eval  --crops ~/crops --model digits-v1 --split val --err
 minedocscan recognizer list                                         # 사이트 팩의 모델과 카드 요약
 # 설정: [recognize.by_kind] handwritten_number = "digits"   [recognize.digits] model = "digits-v1"   → minedocscan info 로 확인
 minedocscan synth out/low --low-cells       # 낮은 칸·거친 숫자·X 표의 합성 양식 (숫자 인식기 시험용)
+
+# 소수·시각 인식기 (계기 값·시각·근무 시각 범위 — tasks/0011, ADR 0025) — 같은 크롭 폴더의 형식 칸 줄로. 학습만 torch
+minedocscan recognizer train --readings --crops ~/crops --name readings-v1 [--cv 5]   # → <site>/models/readings-v1/ (--crops 없으면 합성만)
+minedocscan recognizer eval  --crops ~/crops --model readings-v1 --split val --errors   # 형식마다 값·빈 칸·거절, 점으로 쓴 시각, 모델이 본 띠
+# 설정: [recognize.by_format] reading = "readings", time_range = "readings" …  [recognize.readings] model = "readings-v1"   → minedocscan info
+#       (by_format > by_kind > backend, 적힌 형식의 표 칸만. 자동 적재 = 칸의 기준 + 쪽 안 검산 — run --json 의 요약 format_gate_*)
 
 # 표 밖 필드(쪽 메타: 차량번호·작성자·월·일) — docs/DATA.md "쪽 메타", ADR 0013·0014
 minedocscan review export-crops ~/meta --meta --split train --site … --archive-root … --work-root …   # 사람·파일명 값이 있는 필드만
@@ -183,18 +190,19 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 | `imaging/cropspec.py` | 인식기에 넘기는 크롭의 규격(`CropSpec`: 해상도 aligned/source·배율·여유)과 자르는 구현 하나 — 파이프라인·내보내기·검수 화면이 같이 쓴다 |
 | `imaging/hires.py` | 원본 쪽 렌더링 (몇 장 캐시). 원본 해상도 크롭은 쪽의 호모그래피로 그 셀만 다시 정합 |
 | `forms/template.py` | 템플릿 로더·검증 (`meta_key`, `format`, 표의 `role`, 나눔 선 `split_ys`/`split_xs`, `subtotal`, `family`/`valid_from`/`valid_to`, `concurrent`). `problems()` 는 오류 전부. 인쇄 층 `print_image`(템플릿 폴더 안의 파일 이름만, PNG, 기준 이미지와 같은 크기 — `print_problems`·`print_layer`·`print_mask`·`print_sha`). YAML 의 문법·날짜 오류도 `TemplateError` (`load_yaml`). 인쇄 층을 쓰는 칸은 `role_value_cell` 한 곳(meter·shifts·tally 표의 형식 있는 손글씨 칸), `uses_print_layer`. 엑셀에 보이는 이름 `display`(`display_of`), 가릴 상자 `redact`(기하 — 판마다) |
-| `forms/formats.py` | 값의 형식(ADR 0015): `integer`·`decimal`·`time`·`time_range`·`reading`. 정규화 한 곳 — 검수 저장·서버·정답 내보내기·평가·핸들러가 같이 쓴다. 화면이 받는 글자와 안내. `dotted_clock`(점으로 쓴 시각 — 화면이 묻는 조건, 정규식과 상한은 `dotted_clock_rule()` 로 서버가 화면에 보낸다 — 화면에 수가 없다) |
+| `forms/formats.py` | 값의 형식(ADR 0015): `integer`·`decimal`·`time`·`time_range`·`reading`. 정규화 한 곳 — 검수 저장·서버·정답 내보내기·평가·핸들러가 같이 쓴다. 화면이 받는 글자와 안내. `dotted_clock`(점으로 쓴 시각 — 화면이 묻는 조건, 정규식과 상한은 `dotted_clock_rule()` 로 서버가 화면에 보낸다 — 화면에 수가 없다). 쓸 수 있는 표기 `spellings`(정규화한 값이 될 수 있는 종이의 글자 — 소수·시각 모델의 목표, 많아야 128)·`same_value`(기계가 읽은 글자 ↔ 정답 — 점으로 쓴 시각은 기계 값에만 봐준다) |
 | `forms/equipment.py` | 장비 마스터(점검표 템플릿의 장비 행), `equipment_id`, 장비명 메타 키 `equipment` |
 | `forms/sitepack.py` | 사이트 팩 (템플릿·현장 옵션·페이지 라벨·평가셋 소금값), `templates_for(date)`, 장비명 대응표 `[equipment.aliases]`(마스터에 없는 키면 오류), `known_values(key)`(후보 목록), 대응표의 해시 `equipment_aliases_sha`. 동시 판(ADR 0018): 계열의 겹침은 모두 `concurrent` 일 때만, 계열에 동시 판 하나뿐이면 오류, 판끼리 기하 밖의 전부가 같아야 한다(`variant_key_diff`), 같은 `name` 둘이면 오류, `concurrent_groups(date)`, `answer_key`(정답은 계열로), `variant_families()`. 판끼리 양식의 `display` 도 같아야 한다. `[haul_table]`(운반 표의 열·자리 순서)·`[redact]`(가릴 메타 키·넓히는 폭). 동시 판끼리 `redact` 의 이름 목록도 같아야 한다. 사본의 주인 `declared_name`(적힌 `[site] name` 만 — 폴더 이름으로 대신하지 않는다, `declared_site_name(root)`) |
 | `forms/classify.py` | 페이지가 어느 양식인지 (그날 유효한 판만 후보). 그날의 동시 판 묶음(`groups`)은 한 후보 — 점수는 최댓값, 1위/2위 여유는 계열 사이, `ClassResult.group` |
-| `recognize/` | 인식 백엔드 인터페이스와 등록소 (`null`, `oracle`, `digits`), 칸 종류별 백엔드(`ByKindRecognizer`, `[recognize.by_kind]`) |
+| `recognize/` | 인식 백엔드 인터페이스와 등록소 (`null`, `oracle`, `digits`, `readings`), 칸 종류·값의 형식별 백엔드(`ByKindRecognizer` — `[recognize.by_kind]`, `[recognize.by_format]`: `by_format` > `by_kind` > `backend`, 형식을 읽는다고 선언한 백엔드(`formats`)만 — `build_recognizer` 가 막는다, 형식 이름은 `check_formats`, `run --answers` 의 oracle 은 `by_formats`). `CellContext` 의 `fmt`·`bbox` |
 | `pagemeta.py` | 쪽 메타(`doc_page_meta`): 키마다 최종 값과 출처(검수 > 결정 > 라벨 > 파일명 > 기계 값), 기계 값의 대조, 날짜의 월·일 대조. 날짜의 순서 한 곳 — `page_date`(쪽의 결정 > 문서의 결정 > 쪽 라벨 > 문서 라벨 > 파일명)·`document_date`(ISO 라벨만), 사람의 출처 목록 `HUMAN_SOURCES` |
 | `recognize/digits/` | 숫자 인식기: `model.py`(전처리·CTC 빔 탐색·ONNX 를 cv2.dnn 으로, torch 없음), `backend.py`(카드의 규격·온도·기준), `data.py`(크롭 폴더, test 거절, 검증 날짜), `calib.py`(온도·임계값표·윌슨 구간), `train.py`(학습 — torch 는 여기서만), `evaluate.py`(크롭 단위 평가) |
 | `recognize/meta/` | 메타 필드 모델 (ADR 0013): `model.py`(카드·`classes.json`·후보 목록, `[recognize.meta]` → `build_meta_readers`), `choose.py`(CTC 우도로 닫힌 목록에서 고르기, 목록에 없는 값), `calib.py`(온도·기준·묶음 교차 읽기 `cv-reads.jsonl`), `train.py`(`--cv K`, 숫자 모델), `evaluate.py` |
+| `recognize/readings/` | 소수·시각 모델 (ADR 0025): `model.py`(글씨 띠 `band` — 칸 안의 덩어리를 줄로, 괘선에서 끊긴 조각, 48 × 320 / 형식으로 고르는 해독 `decode` — 빔 32, 같은 값의 표기는 더한다 / 카드, `reader` 를 먼저 본다), `backend.py`(`[recognize.readings]`, 선언하는 형식 = 카드의 `formats`), `data.py`(크롭 폴더의 형식 칸 줄, 정답의 표기들), `calib.py`(여러 표기의 CTC 우도 `ctc_nll_many`, 판정 줄 `flags`), `train.py`(torch — 여러 표기의 손실, `--cv`, 합성 칸), `evaluate.py`. 숫자 모델과 같은 망·코드(`digits/model.Shape`) — 숫자 모델은 바이트까지 그대로 |
 | `recognize/choice/` | 이름 필드의 닫힌 집합 분류기 (종류 0 = "그 밖"): `model.py`(OpenCV 추론), `train.py`(torch) |
 | `correct/` | 교정 백엔드 인터페이스와 등록소 (`none`) |
-| `handlers/` | 양식의 의미: 셀 → `doc_field` → 업무 테이블 (`generic`, `inspection`, `haul`, `usage`). 숫자 칸의 자동 적재 표는 `base.number_status` (ADR 0012), 정수 칸의 행은 `base.number_row`(운반·작업량), 읽지 않는 형식은 `base.unread_row`. 엑셀에서 칸의 상태를 고쳐 말하는 것은 `export_cells`(점검표 — 점검하지 않은 쪽·여백 행의 기계가 못 본 ✓ 칸은 빈 칸, 가동 일보 — 작업 표의 검수 대기 글자 칸은 ●). 근무 시각 칸은 `usage.is_shift_cell` 한 곳 |
-| `handlers/usage.py` | 장비 가동 일보(ADR 0016): 표의 역할 `meter`·`shifts`·`tally`·`activities` → `eq_usage_daily`(쪽 하나에 한 행, 가동 시간과 근거) + `prod_tally`. 업무 행은 `usage_rows` 하나(load·on_review). 값 유무는 `presence`(덩어리 배정 또는 잉크 비율, 인쇄 마스크 — 핸들러와 시험이 같은 함수) |
+| `handlers/` | 양식의 의미: 셀 → `doc_field` → 업무 테이블 (`generic`, `inspection`, `haul`, `usage`). 숫자 칸의 자동 적재 표는 `base.number_status` (ADR 0012), 정수 칸의 행은 `base.number_row`(운반·작업량), 읽지 않는 형식은 `base.unread_row`, `[recognize.by_format]` 으로 읽는 형식 칸은 `base.format_row`(적힌 대로 읽고 정규화해 자동 적재 — 점으로 쓴 시각·거절은 늘 검수 대기, 검수 대기의 `value_final` NULL; `reads_format`·`format_final`). 엑셀에서 칸의 상태를 고쳐 말하는 것은 `export_cells`(점검표 — 점검하지 않은 쪽·여백 행의 기계가 못 본 ✓ 칸은 빈 칸, 가동 일보 — 작업 표의 검수 대기 글자 칸은 ●). 근무 시각 칸은 `usage.is_shift_cell` 한 곳 |
+| `handlers/usage.py` | 장비 가동 일보(ADR 0016): 표의 역할 `meter`·`shifts`·`tally`·`activities` → `eq_usage_daily`(쪽 하나에 한 행, 가동 시간과 근거) + `prod_tally`. 업무 행은 `usage_rows` 하나(load·on_review). 값 유무는 `presence`(덩어리 배정 또는 잉크 비율, 인쇄 마스크 — 핸들러와 시험이 같은 함수). 형식 칸을 기계가 읽으면 쪽 안 검산 `page_gate`(계기 표 — 총 = 종료 − 시작·24시간·섞임·`clock_like`, 근무 시각 표 — 합 24시간; 걸리면 그 표의 자동 적재 값을 검수로, 이유별 `format_gate_*`) |
 | `validate/crosscheck.py` | 양식 간 교차검증, 그날의 실제 배차 관측 (날짜 지정 재계산 가능) |
 | `validate/usage.py` | 가동 일보의 검산 → `xcheck_usage`: 쪽 안(총 = 종료 − 시작, 소계 = 합), 계기의 연속성(같은 장비의 어제 종료 = 오늘 시작). 장비 단위 재계산 |
 | `review/` | 검수: `store.py`(추가 전용 `reviews.jsonl` ↔ `doc_review`, `save()`), `queue.py`(대기열 8종: `haul-numbers`·`mismatch`·`pending`·`page-fields`(`--audit`)·`meta-check`·`checks`·`readings`(계기 + 근무 시각 칸, `--audit`)·`usage-check`, 계기 시작·종료 칸의 `ask_dotted`), `checks.py`(✓ 행의 답 ↔ 두 칸의 판정), `crops.py`(원본/정합, 두 칸 띠), `export.py`(크롭 내보내기, `--meta`), `server.py` + `static/index.html`(표준 라이브러리, 127.0.0.1, 포트를 혼자 쓴다 — 윈도우는 `SO_EXCLUSIVEADDRUSE`), `ops.py` + `static/home.html`(운영 화면 — 홈·문서 화면·결정, `serve` 에서만: 남은 수는 DB 가 바뀔 때만 다시 센다, 표본 대기열은 만들지 않는다, `/page.png` 는 원본에서 세워서, 엑셀·싣기의 상태, 엑셀 내려받기 `/export/day.xlsx`·`/export/month.xlsx`). `store.save(touched=…)`·`ReviewApp.on_touched` — 검수가 건드린 날짜·문서(연속성 행이 바뀐 쪽의 것까지)를 작업 스레드에 (깨우지 않는다) |
@@ -212,6 +220,7 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 | `tools/printlayer.py` | `template print-layer`: 그 양식으로 분류된 쪽(loaded·classified_only)을 날짜별로 고르게 최대 40장 — 정합 그림, 없으면 호모그래피로 다시 펴고, 분류 전용 쪽은 직접 정합(인라이어만). 3장 미만 거절·5장 미만 경고·백분위 75 미만이면 괘선을 잡는 데만 쓰라고 경고. DB 는 읽기 전용, `print.png` 만 쓴다. 요약은 수와 칸 이름만 |
 | `tools/variant.py` | `template variant`: 표 영역(+60 px) 밖의 특징점만으로 편 그림이 새 기준 이미지(`header_homography`), 표마다 기존 괘선을 ±min(40 px, 이웃 표까지의 절반 — 붙은 표가 같이 쓰는 경계선(3 px 안)은 빼고 잰다) 안에서 다시 잡아 짝짓는다. 열·행·필드는 그대로, 기존 판은 고치지 않는다. `redact` 는 그대로 베끼고 다시 확인하라고 알린다 |
 | `tools/synth_meta.py` | 메타 필드 합성: 사람마다 다른 획(기울기·굵기·크기·간격)의 네 자리 차량번호·이름·월·일, 크롭 폴더 (메타 모델의 학습·시험용) |
+| `tools/synth_readings.py` | 합성 형식 칸 (tasks/0011 4.5): 계기 값·시각·근무 시각 범위의 갈래, 꼴(흘려 쓴 00, 사선 하나의 1, 칸보다 큰 글씨, 칸 폭을 다 쓰는 값, 덧쓴 숫자, 이웃 글씨, 키 큰 칸), 인쇄(이름표·`~`), 빈 칸의 갈래. 글씨 높이는 잉크의 세로 범위(`_sized_ink`), 원본 해상도로 그린다. `write_reading_crops`(export-crops 꼴의 폴더). 난수는 따로 — 기존 합성의 바이트는 그대로 |
 | `tools/synth_cells.py` | 어려운 합성 숫자 칸: 값·X 표·덧칠·메모·이웃 칸 글씨를 크롭 규격대로 (숫자 인식기의 학습·시험용) |
 | `tools/handfont.py` | 합성 손글씨의 획 정의 (숫자 꼴 몇 가지, 소수점·콜론·물결표·붙임표, 메모용 이어 쓴 글자). OpenCV 내장 글꼴을 쓰지 않는다. `roughened`(`synth --rough` — 떨림·획마다 굵기·연한 잉크·번짐, 자기 난수로만) |
 | `tools/thumbs.py` | 쪽 미리보기 (1/4, WORK_ROOT/thumbs — 방향을 알면 세워서, 파일 이름에 문서 ID) |
@@ -241,7 +250,8 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 - 검수 화면의 갈무리(실제 값이 보인다)를 문서·PR·이슈에 붙이지 않는다. 서버 로그에 입력값을 찍지 않는다.
 - 테스트에 필요한 이미지는 `tools/synth.py` 로 만든다. 실제 문서를 `tests/fixtures/` 에 넣지 않는다.
 - 학습한 모델(`<site>/models/` — 메타 필드 모델의 `classes.json` 은 이름·차량번호 목록이다), 내보낸 크롭, 틀린 칸 모아 보기는 현장 글씨다 — 저장소 밖에.
-  예외는 합성 데이터만으로 만든 시험용 모델 셋: `tests/fixtures/digits-fixture`, `meta-digits`, `meta-operator` (다시 만드는 명령은 `tests/fixtures/README.md`).
+  예외는 합성 데이터만으로 만든 시험용 모델 넷: `tests/fixtures/digits-fixture`, `meta-digits`, `meta-operator`, `readings-fixture`
+  (다시 만드는 명령은 `tests/fixtures/README.md`).
 - 인쇄 층(`print.png`)과 판의 기준 이미지(`template variant` 가 쓰는 `reference.png`)도 현장 데이터다 — 저장소 밖에. 늘 같은 자리에 같은 글씨로
   쓰는 칸(작성자 이름, 늘 "ok" 인 점검란, 서명)은 쪽이 많아도 인쇄 층에 손글씨의 잔상이 남는다. `template print-layer`·`variant`·`add-region`·
   `preview` 는 저장소 안을 거절한다. 예외는 합성 양식으로 시험 중에 만든 것뿐이다 (저장소에 넣지 않는다).
@@ -397,6 +407,11 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 - 로우더 작업일보는 계기가 비어 있고(6쪽 전부) 가동 시간이 근무 시각 칸에만 있다 → `readings` 에 근무 시각 칸.
 - 계기 칸에 시각을 적은 3쪽(계기가 없는 장비 — 로우더 작업일보가 아니다) 중 2쪽이 점으로 썼다(08.00) — 적힌 대로 넣으면 계기 값 8.00 이
   되고 첫날에는 검산에도 걸리지 않는다 → 화면이 묻는다 (코드는 여전히 콜론만 시각으로 본다).
+- **소수·시각 칸** (tasks/0011 1절 나·다 — 40쪽): 계기 칸 폭 112–297 × 51, 글씨 높이 중앙 35 px(19–51), 글씨 폭 / 칸 폭 중앙 0.93. 근무 시각 칸
+  308 × 62·99·100 의 키 큰 칸(99·100)은 글씨가 칸의 5분의 1 — 크롭 전체를 높이 48 로 줄이면 계기 17 px, 근무 시각 7 px, 키 큰 칸 4 px 이고 윗줄(오전 칸)의 글씨가
+  같이 들어온다 → 칸 안의 덩어리를 줄로 묶어 자른 **글씨 띠**. 검수는 정규화한 값만 남긴다(`08:00~17:00`) — 종이의 `8-17` 과 다르므로 학습의
+  목표는 그 값이 될 수 있는 표기 전부(`formats.spellings`). 합성만으로 학습한 시험용 모델은 합성 칸에서 값 0.94–0.98 이지만 값의 신뢰도가
+  0.5–0.85 라 그 카드의 기준(0.8)으로는 합성 가동 일보의 몫이 0.16 — 시험은 `auto_accept_conf = 0.5` 로 잰다 (tasks/0011 12절).
 - OpenCV 내장 글꼴(Hershey)의 "~" 는 판마다 잉크가 크게 다르다 (5.0 에서 102 px, 4.9 에서 276 px). 합성 양식의 인쇄 표시 하나가 값 유무를
   정하면 글꼴이 아니라 선으로 그린다.
 - **스캐너가 붙이는 이름은 날짜 규칙에 맞지 않는다.** 하루치(28쪽)를 그런 이름으로 넣으면 전부 `loaded`, 업무 행 1,773행이 `work_date` NULL,
@@ -480,6 +495,8 @@ python scripts/bigdb.py report before.json after.json --out docs/test-report/sca
 - 외부 API 를 부르는 인식·교정 백엔드를 만들지 않는다. 현장은 외부 네트워크 없이 운용한다 (ADR 0003).
 - 인쇄 층을 정합·분류의 기준 이미지나 크롭에 쓰지 않는다 (ADR 0017). 같은 날 섞여 쓰이는 판을 표마다의 2차 정합(괘선 스냅)으로 풀지 않는다 —
   판 B 는 줄 간격까지 달라 평행 이동으로 풀리지 않고, 모든 양식의 수치가 바뀐다. 판은 템플릿이다 (ADR 0018).
+- 계기의 연속성(어제 종료)으로 오늘 시작의 후보를 고르지 않는다 — 보여 주고 사람이 정한다. 계기 칸에 점으로 쓴 시각(08.00)을 기계가 시각이나
+  계기 값으로 정하지 않는다 (늘 검수 대기). 크롭 전체를 줄여 근무 시각을 읽지 않는다 — 글씨 띠로 (ADR 0025).
 - 날짜 없는 쪽을 적재하지 않는다. 손으로 쓴 월·일이나 파일의 시각으로 날짜를 정하지 않는다 (ADR 0019). `run --date` 를 만들지 않는다.
 - 다시 스캔 의심을 기계가 스스로 버리거나 합치지 않는다. 사람이 정할 때까지 적재하지 않는다 (ADR 0020).
 - 작업 DB 를 PostgreSQL 로 옮기지 않는다 — 통합 DB 에는 싣는다 (ADR 0021). 통합 DB 의 실은 표에 다른 것이 쓰게 하지 않는다 (2단계는 자기 표에 쓰고 뷰로 합친다).

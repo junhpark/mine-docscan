@@ -54,6 +54,35 @@ def test_the_signature_probe_line_has_no_path_or_user(tmp_path, monkeypatch):
     assert s.count("%0A") == len(res)
 
 
+def test_the_signature_probe_counts_incomparable_pages_apart(monkeypatch):
+    """서명을 견줄 수 없는(전부 0 인 — 빈) 쪽이 있으면 그 쌍은 분포(최소·5 %)에서 빠지고 따로 센다 — 0.0 으로 세지 않는다 (tasks/0011 4.8).
+    그런 쪽의 수(no_signature)도 따로. 견줄 수 없는 다시 스캔 쌍은 통과가 아니다 (현장의 dup_min_sim 도 붙잡지 못한다)."""
+    import cv2
+    import numpy as np
+    import sig_probe
+
+    monkeypatch.setattr(sig_probe, "CANDIDATES", {"v1": lambda b, tpl: sig_probe.sigs.signature(None, None, binary=b)})
+    rng = np.random.default_rng(0)
+
+    def page(blank: bool) -> dict:
+        g = np.full((320, 480), 245, np.uint8)
+        for _ in range(0 if blank else 40):
+            x, y = int(rng.integers(20, 440)), int(rng.integers(20, 280))
+            cv2.line(g, (x, y), (x + 20, y + 15), 30, 3)
+        return {"gray": g, "tpl": None, "day": "d", "family": "f", "original": True}
+
+    res = sig_probe.measure([page(False), page(False), page(True)], rescans=[(0, 1)], others=[(0, 1), (0, 2), (1, 2)])
+    r = res["v1"]
+    for case in sig_probe.CASES:
+        assert r[case]["n"] == 2 and r[case]["none"] == 1 and r[case]["min"] > 0.0 and r[case]["p5"] > 0.0
+    assert (r["other"]["n"], r["other"]["none"]) == (1, 2) and r["other"]["min"] > 0.0
+    assert r["no_signature"] == 1 and r["rescan"]["none"] == 0       # 빈 쪽 하나 — 다시 스캔 쌍(0, 1)은 견줄 수 있다
+    row = dict(sig_probe.lines(res, {"pages": 3})[1])
+    assert row["none"] == len(sig_probe.CASES) + 2 and row["no_sig"] == 1
+    bad = sig_probe.measure([page(False), page(False), page(True)], rescans=[(0, 2)], others=[(0, 1)])["v1"]
+    assert (bad["rescan"]["n"], bad["rescan"]["none"]) == (0, 1) and bad["ok"] is False
+
+
 def test_the_readers_take_only_numbers_from_their_files(tmp_path, capsys):
     """--junit·--selftest·--licenses·--v2: 파일의 수만 읽는다 — 시험 이름·실패 글·경로·이름이 든 파일이어도 알림에는 수만 (4.6)."""
     import json
